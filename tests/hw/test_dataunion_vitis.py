@@ -11,7 +11,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from pysilicon.build.build import CodeGenConfig
+from pysilicon.build.build import BuildConfig
 from pysilicon.build.streamutils import copy_streamutils
 from pysilicon.hw.dataschema import DataList, IntField
 from pysilicon.hw.dataunion import (
@@ -86,7 +86,7 @@ def _generate_include_tree(schema_type, cfg, word_bw, seen=None):
         return
     for dep in schema_type.get_dependencies():
         _generate_include_tree(dep, cfg=cfg, word_bw=word_bw, seen=seen)
-    schema_type.gen_include(cfg=cfg, word_bw_supported=[word_bw])
+    schema_type.as_buildable(word_bw_supported=[word_bw]).run(cfg)
     seen.add(schema_type)
 
 
@@ -141,7 +141,7 @@ def test_dataunion_vitis_loopback(tmp_path: Path, word_bw: int):
     np.savetxt(tmp_path / "dataunion_words_in.txt", words_in, fmt="%u")
 
     # 2. Generate C++ includes
-    cfg = CodeGenConfig(root_dir=tmp_path)
+    cfg = BuildConfig(root_dir=tmp_path)
     _generate_all_includes(SensorDataUnion, cfg, [word_bw])
     copy_streamutils(cfg)
 

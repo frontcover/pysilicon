@@ -64,7 +64,7 @@ PySilicon is a Python-native hardware design platform. The philosophy is that Py
 
 ### Synthesis flow
 
-A Component's Python behavior is translated to Vitis HLS C++ via `CodeGenConfig` (`build/build.py`). `sv_synth` / `sv_impl` scripts drive Vitis and Vivado from generated TCL. AI-assisted prompt generation can derive HLS code from the Python `forward()` specification.
+A Component's Python behavior is translated to Vitis HLS C++ via `BuildConfig` (`build/build.py`). `sv_synth` / `sv_impl` scripts drive Vitis and Vivado from generated TCL. AI-assisted prompt generation can derive HLS code from the Python `forward()` specification.
 
 ## Notes
 

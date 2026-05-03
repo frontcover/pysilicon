@@ -4,7 +4,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from pysilicon.build.build import CodeGenConfig
+from pysilicon.build.build import BuildConfig
 from pysilicon.build.streamutils import copy_streamutils
 from pysilicon.hw import (
     DataArray as PublicDataArray,
@@ -191,9 +191,10 @@ def test_enumfield_defaults_follow_enum_type_metadata():
 
 def test_enumfield_gen_include_emits_guard_and_members(tmp_path: Path):
     mode_field = EnumField.specialize(enum_type=Mode)
-    out_path = mode_field.gen_include(cfg=CodeGenConfig(root_dir=tmp_path))
+    result = mode_field.as_buildable().run(BuildConfig(root_dir=tmp_path))
+    out_path = result.artifacts["include"]
     content = out_path.read_text(encoding="utf-8")
-    tb_content = (tmp_path / "mode_tb.h").read_text(encoding="utf-8")
+    tb_content = result.artifacts["tb_include"].read_text(encoding="utf-8")
 
     assert out_path == tmp_path / "mode.h"
     assert "#ifndef MODE_H" in content
@@ -391,10 +392,8 @@ def test_dataarray_write_uint32_file_write_slice(tmp_path: Path):
 
 
 def test_dataarray_gen_include_emits_nwords_len_for_dynamic(tmp_path: Path):
-    out_path = DynByteArray.gen_include(
-        cfg=CodeGenConfig(root_dir=tmp_path),
-        word_bw_supported=[32, 64],
-    )
+    result = DynByteArray.as_buildable(word_bw_supported=[32, 64]).run(BuildConfig(root_dir=tmp_path))
+    out_path = result.artifacts["include"]
     content = out_path.read_text(encoding="utf-8")
 
     assert out_path == tmp_path / "u_int8_array.h"
@@ -405,10 +404,8 @@ def test_dataarray_gen_include_emits_nwords_len_for_dynamic(tmp_path: Path):
 
 
 def test_dataarray_gen_include_emits_runtime_shape_params(tmp_path: Path):
-    out_path = DynByteArray.gen_include(
-        cfg=CodeGenConfig(root_dir=tmp_path),
-        word_bw_supported=[32],
-    )
+    result = DynByteArray.as_buildable(word_bw_supported=[32]).run(BuildConfig(root_dir=tmp_path))
+    out_path = result.artifacts["include"]
     content = out_path.read_text(encoding="utf-8")
 
     assert "void write_array(ap_uint<word_bw> x[], int n0=1) const {" in content
@@ -554,9 +551,10 @@ def test_datalist_get_dependencies_works_with_metadata_form():
 
 
 def test_datalist_gen_include_emits_dependency_includes_and_members(tmp_path: Path):
-    out_path = Packet.gen_include(cfg=CodeGenConfig(root_dir=tmp_path))
+    result = Packet.as_buildable().run(BuildConfig(root_dir=tmp_path))
+    out_path = result.artifacts["include"]
     content = out_path.read_text(encoding="utf-8")
-    tb_content = (tmp_path / "packet_tb.h").read_text(encoding="utf-8")
+    tb_content = result.artifacts["tb_include"].read_text(encoding="utf-8")
 
     assert out_path == tmp_path / "packet.h"
     assert '#include "streamutils_hls.h"' in content
@@ -583,7 +581,8 @@ def test_datalist_gen_include_emits_dependency_includes_and_members(tmp_path: Pa
 
 
 def test_datalist_gen_include_emits_inline_and_block_comments(tmp_path: Path):
-    out_path = DescribedComplex.gen_include(cfg=CodeGenConfig(root_dir=tmp_path))
+    result = DescribedComplex.as_buildable().run(BuildConfig(root_dir=tmp_path))
+    out_path = result.artifacts["include"]
     content = out_path.read_text(encoding="utf-8")
 
     assert "float real;  // Real component" in content
@@ -592,10 +591,8 @@ def test_datalist_gen_include_emits_inline_and_block_comments(tmp_path: Path):
 
 
 def test_datalist_gen_include_emits_read_helpers_when_requested(tmp_path: Path):
-    out_path = Packet.gen_include(
-        cfg=CodeGenConfig(root_dir=tmp_path),
-        word_bw_supported=[32],
-    )
+    result = Packet.as_buildable(word_bw_supported=[32]).run(BuildConfig(root_dir=tmp_path))
+    out_path = result.artifacts["include"]
     content = out_path.read_text(encoding="utf-8")
 
     assert "template<int word_bw>" in content
@@ -613,12 +610,10 @@ def test_datalist_gen_include_emits_read_helpers_when_requested(tmp_path: Path):
 
 
 def test_datalist_gen_include_emits_nwords_helper_and_json_nested_calls(tmp_path: Path):
-    out_path = Packet.gen_include(
-        cfg=CodeGenConfig(root_dir=tmp_path),
-        word_bw_supported=[32, 64],
-    )
+    result = Packet.as_buildable(word_bw_supported=[32, 64]).run(BuildConfig(root_dir=tmp_path))
+    out_path = result.artifacts["include"]
     content = out_path.read_text(encoding="utf-8")
-    tb_content = (tmp_path / "packet_tb.h").read_text(encoding="utf-8")
+    tb_content = result.artifacts["tb_include"].read_text(encoding="utf-8")
 
     assert out_path == tmp_path / "packet.h"
     assert "template<int word_bw>" in content
@@ -634,12 +629,10 @@ def test_datalist_gen_include_emits_nwords_helper_and_json_nested_calls(tmp_path
 
 
 def test_datalist_with_dataarray_field_uses_nested_storage_member_in_codegen(tmp_path: Path):
-    out_path = PacketWithArray.gen_include(
-        cfg=CodeGenConfig(root_dir=tmp_path),
-        word_bw_supported=[32, 64],
-    )
+    result = PacketWithArray.as_buildable(word_bw_supported=[32, 64]).run(BuildConfig(root_dir=tmp_path))
+    out_path = result.artifacts["include"]
     content = out_path.read_text(encoding="utf-8")
-    tb_content = (tmp_path / "packet_with_array_tb.h").read_text(encoding="utf-8")
+    tb_content = result.artifacts["tb_include"].read_text(encoding="utf-8")
 
     assert "self->coeffs.coeff[i0]" in content
     assert "self->coeffs.coeff[i + 0]" in content
@@ -654,10 +647,8 @@ def test_datalist_with_dataarray_field_uses_nested_storage_member_in_codegen(tmp
 
 
 def test_datalist_with_multiple_dataarray_fields_uses_unique_codegen_locals(tmp_path: Path):
-    out_path = MultiArrayPacket.gen_include(
-        cfg=CodeGenConfig(root_dir=tmp_path),
-        word_bw_supported=[32],
-    )
+    result = MultiArrayPacket.as_buildable(word_bw_supported=[32]).run(BuildConfig(root_dir=tmp_path))
+    out_path = result.artifacts["include"]
     content = out_path.read_text(encoding="utf-8")
 
     assert "        {\n            const int n0_eff = 4;\n            int out_idx = 0;\n            for (int i0 = 0; i0 < n0_eff; ++i0) {" in content
@@ -669,7 +660,7 @@ def test_datalist_with_multiple_dataarray_fields_uses_unique_codegen_locals(tmp_
 
 def test_gen_include_rejects_non_positive_word_widths():
     with pytest.raises(ValueError, match="word_bw values must be positive"):
-        Packet.gen_include(word_bw_supported=[0])
+        Packet.as_buildable(word_bw_supported=[0])
 
 
 def test_gen_include_writes_under_cfg_root_and_include_dir(tmp_path: Path):
@@ -679,9 +670,10 @@ def test_gen_include_writes_under_cfg_root_and_include_dir(tmp_path: Path):
             "count": U16,
         }
 
-    out_path = Instruction.gen_include(cfg=CodeGenConfig(root_dir=tmp_path))
+    result = Instruction.as_buildable().run(BuildConfig(root_dir=tmp_path))
+    out_path = result.artifacts["include"]
     content = out_path.read_text(encoding="utf-8")
-    tb_content = (tmp_path / "isa" / "instruction_tb.h").read_text(encoding="utf-8")
+    tb_content = result.artifacts["tb_include"].read_text(encoding="utf-8")
 
     assert out_path == tmp_path / "isa" / "instruction.h"
     assert out_path.exists()
@@ -690,10 +682,11 @@ def test_gen_include_writes_under_cfg_root_and_include_dir(tmp_path: Path):
 
 
 def test_gen_include_uses_cfg_util_dir_for_streamutils_include(tmp_path: Path):
-    cfg = CodeGenConfig(root_dir=tmp_path, util_dir="common")
-    out_path = Packet.gen_include(cfg=cfg)
+    cfg = BuildConfig(root_dir=tmp_path, util_dir="common")
+    result = Packet.as_buildable().run(cfg)
+    out_path = result.artifacts["include"]
     content = out_path.read_text(encoding="utf-8")
-    tb_content = (tmp_path / "packet_tb.h").read_text(encoding="utf-8")
+    tb_content = result.artifacts["tb_include"].read_text(encoding="utf-8")
 
     assert '#include "common/streamutils_hls.h"' in content
     assert '#include "common/streamutils_tb.h"' in tb_content
@@ -703,14 +696,15 @@ def test_gen_include_overwrites_existing_file(tmp_path: Path):
     out_path = tmp_path / "packet.h"
     out_path.write_text("stale", encoding="utf-8")
 
-    written_path = Packet.gen_include(cfg=CodeGenConfig(root_dir=tmp_path))
+    result = Packet.as_buildable().run(BuildConfig(root_dir=tmp_path))
+    written_path = result.artifacts["include"]
 
     assert written_path == out_path
     assert "stale" not in out_path.read_text(encoding="utf-8")
 
 
 def test_copy_streamutils_hls_emits_tlast_status_enum(tmp_path: Path):
-    copy_streamutils(CodeGenConfig(root_dir=tmp_path))
+    copy_streamutils(BuildConfig(root_dir=tmp_path))
     content = (tmp_path / "streamutils_hls.h").read_text(encoding="utf-8")
     cpp_content = (tmp_path / "streamutils.cpp").read_text(encoding="utf-8")
     memmgr_hpp = (tmp_path / "memmgr.hpp").read_text(encoding="utf-8")
@@ -734,7 +728,7 @@ def test_copy_streamutils_hls_emits_tlast_status_enum(tmp_path: Path):
 
 
 def test_copy_streamutils_can_skip_memmgr(tmp_path: Path):
-    copy_streamutils(CodeGenConfig(root_dir=tmp_path, copy_memmgr=False))
+    copy_streamutils(BuildConfig(root_dir=tmp_path, copy_memmgr=False))
 
     assert (tmp_path / "streamutils_hls.h").exists()
     assert (tmp_path / "streamutils_tb.h").exists()
@@ -933,7 +927,8 @@ def test_dataarray_subclass_include_uses_class_name_not_member_name(tmp_path: Pa
         max_shape = (4,)
         static = True
 
-    out_path = CoeffArray.gen_include(cfg=CodeGenConfig(root_dir=tmp_path), word_bw_supported=[32])
+    result = CoeffArray.as_buildable(word_bw_supported=[32]).run(BuildConfig(root_dir=tmp_path))
+    out_path = result.artifacts["include"]
 
     assert out_path == tmp_path / "coeff_array.h"
     assert out_path.exists()
@@ -969,4 +964,4 @@ def test_invalid_specialize_kwargs_are_rejected():
 @pytest.mark.parametrize("field_type", [IntField.specialize(bitwidth=16), FloatField.specialize(bitwidth=32)])
 def test_primitive_field_gen_include_raises(field_type):
     with pytest.raises(ValueError, match="does not support standalone include generation"):
-        field_type.gen_include()
+        field_type.as_buildable()

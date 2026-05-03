@@ -3,11 +3,11 @@ from __future__ import annotations
 from pathlib import Path
 import shutil
 
-from pysilicon.build.build import CodeGenConfig
+from pysilicon.build.build import BuildConfig
 
 
 def copy_streamutils(
-    cfg: CodeGenConfig,
+    cfg: BuildConfig,
 ) -> tuple[str, str, str | None]:
     """Copy streamutils support files into the configured utility directory.
 
@@ -26,7 +26,7 @@ def copy_streamutils(
 
     Parameters
     ----------
-    cfg : CodeGenConfig
+    cfg : BuildConfig
         Code-generation configuration describing the output root and utility
         directory.  Files are written to ``cfg.root_dir / cfg.util_dir``.
 

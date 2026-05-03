@@ -8,7 +8,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from pysilicon.build.build import CodeGenConfig
+from pysilicon.build.build import BuildConfig
 from pysilicon.build.streamutils import copy_streamutils
 from pysilicon.hw.arrayutils import gen_array_utils, write_uint32_file
 from pysilicon.hw.dataschema import DataArray, DataList, EnumField, FloatField, IntField
@@ -160,7 +160,7 @@ def _read_sync_status(data_dir: Path) -> dict[str, str]:
 
 
 def test_poly_notebook_flow_generates_headers_vectors_and_expected_outputs(tmp_path: Path):
-    cfg = CodeGenConfig(root_dir=tmp_path, util_dir=INCLUDE_DIR)
+    cfg = BuildConfig(root_dir=tmp_path, util_dir=INCLUDE_DIR)
 
     schema_classes = [
         PolyErrorField,
@@ -170,7 +170,7 @@ def test_poly_notebook_flow_generates_headers_vectors_and_expected_outputs(tmp_p
         PolyRespFtr,
     ]
     for schema_class in schema_classes:
-        schema_class.gen_include(cfg=cfg, word_bw_supported=WORD_BW_SUPPORTED)
+        schema_class.as_buildable(word_bw_supported=WORD_BW_SUPPORTED).run(cfg)
     gen_array_utils(Float32, WORD_BW_SUPPORTED, cfg=cfg)
     copy_streamutils(cfg)
 
@@ -227,7 +227,7 @@ def test_poly_notebook_flow_runs_vitis_csim(tmp_path: Path):
     if not vitis_path:
         pytest.skip("Vitis installation not found; skipping poly Vitis regression.")
 
-    cfg = CodeGenConfig(root_dir=tmp_path, util_dir=INCLUDE_DIR)
+    cfg = BuildConfig(root_dir=tmp_path, util_dir=INCLUDE_DIR)
     schema_classes = [
         PolyErrorField,
         CoeffArray,
@@ -236,7 +236,7 @@ def test_poly_notebook_flow_runs_vitis_csim(tmp_path: Path):
         PolyRespFtr,
     ]
     for schema_class in schema_classes:
-        schema_class.gen_include(cfg=cfg, word_bw_supported=WORD_BW_SUPPORTED)
+        schema_class.as_buildable(word_bw_supported=WORD_BW_SUPPORTED).run(cfg)
     gen_array_utils(Float32, WORD_BW_SUPPORTED, cfg=cfg)
     copy_streamutils(cfg)
     _copy_poly_vitis_resources(tmp_path)

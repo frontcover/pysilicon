@@ -5,8 +5,9 @@ The key design shift is:
 - schema structure lives on the class
 - runtime values live on the instance
 
-That allows structural code-generation APIs to operate directly on schema classes,
-for example ``Instruction.gen_include()``.
+Schema classes are ``Buildable`` build steps: call ``MySchema.as_buildable()``
+to obtain a :class:`DataSchemaStep` that generates C++ include headers when
+its ``run(cfg)`` method is invoked.
 """
 
 from __future__ import annotations
@@ -27,7 +28,7 @@ from numpy.typing import NDArray
 
 Words: TypeAlias = NDArray[np.uint32] | NDArray[np.uint64]
 
-from pysilicon.build.build import CodeGenConfig
+from pysilicon.build.build import Buildable, BuildConfig, BuildResult
 
 
 class DataSchema(ABC):
@@ -719,58 +720,12 @@ class DataSchema(ABC):
         return ""
 
     @classmethod
-    def gen_include(
-        cls,
-        cfg: CodeGenConfig | None = None,
-        word_bw_supported: list[int] | None = None,
-    ) -> Path:
-        """Render and write the generated header for this schema class.
-
-        Parameters
-        ----------
-        cfg : CodeGenConfig | None, optional
-            Code-generation configuration describing the root output directory.
-            If omitted, a default ``CodeGenConfig()`` is created, which uses the
-            current working directory as ``root_dir``.
-        word_bw_supported : list[int] | None, optional
-            Optional list of supported interface word widths to emit into the
-            generated header. When provided for ``DataList`` schemas, the header
-            includes generated read helpers for each width.
-
-        Returns
-        -------
-        pathlib.Path
-            The written header path, computed as
-            ``cfg.root_dir / cls.include_path()``.
-
-        Notes
-        -----
-        Parent directories are created automatically if they do not already
-        exist. If the destination header already exists, it is overwritten.
-        """
-        if not cls.can_gen_include:
-            raise ValueError(f"{cls.__name__} does not support standalone include generation.")
-
-        if cfg is None:
-            cfg = CodeGenConfig()
-
-        if word_bw_supported is None:
-            word_bw_supported = []
-
-        for bw in word_bw_supported:
-            if bw <= 0:
-                raise ValueError(f"word_bw values must be positive. Got {bw}.")
-
+    def _render_include(cls, cfg: BuildConfig, word_bw_supported: list[int]) -> str:
+        """Return the content of the synthesizable C++ include header."""
         out_path = cfg.root_dir / cls.include_path()
-        tb_out_path = cfg.root_dir / cls.tb_include_path()
         streamutils_hls_path = cfg.root_dir / cfg.util_dir / "streamutils_hls.h"
         streamutils_hls_include = os.path.relpath(streamutils_hls_path, start=out_path.parent)
         streamutils_hls_include = streamutils_hls_include.replace("\\", "/")
-        streamutils_tb_path = cfg.root_dir / cfg.util_dir / "streamutils_tb.h"
-        streamutils_tb_include = os.path.relpath(streamutils_tb_path, start=tb_out_path.parent)
-        streamutils_tb_include = streamutils_tb_include.replace("\\", "/")
-        synth_include_from_tb = os.path.relpath(out_path, start=tb_out_path.parent)
-        synth_include_from_tb = synth_include_from_tb.replace("\\", "/")
 
         lines = [
             f"#ifndef {cls.include_guard()}",
@@ -800,6 +755,18 @@ class DataSchema(ABC):
             "",
             f"#endif // {cls.include_guard()}",
         ])
+        return "\n".join(lines)
+
+    @classmethod
+    def _render_tb_include(cls, cfg: BuildConfig, word_bw_supported: list[int]) -> str:
+        """Return the content of the testbench C++ include header."""
+        out_path = cfg.root_dir / cls.include_path()
+        tb_out_path = cfg.root_dir / cls.tb_include_path()
+        streamutils_tb_path = cfg.root_dir / cfg.util_dir / "streamutils_tb.h"
+        streamutils_tb_include = os.path.relpath(streamutils_tb_path, start=tb_out_path.parent)
+        streamutils_tb_include = streamutils_tb_include.replace("\\", "/")
+        synth_include_from_tb = os.path.relpath(out_path, start=tb_out_path.parent)
+        synth_include_from_tb = synth_include_from_tb.replace("\\", "/")
 
         tb_lines = [
             f"#ifndef {cls.tb_include_guard()}",
@@ -843,12 +810,26 @@ class DataSchema(ABC):
             "",
             f"#endif // {cls.tb_include_guard()}",
         ])
+        return "\n".join(tb_lines)
 
-        out_path.parent.mkdir(parents=True, exist_ok=True)
-        out_path.write_text("\n".join(lines), encoding="utf-8")
-        tb_out_path.parent.mkdir(parents=True, exist_ok=True)
-        tb_out_path.write_text("\n".join(tb_lines), encoding="utf-8")
-        return out_path
+    @classmethod
+    def as_buildable(
+        cls,
+        word_bw_supported: list[int] | None = None,
+    ) -> "DataSchemaStep":
+        """Return a :class:`DataSchemaStep` that generates C++ headers for this schema.
+
+        Parameters
+        ----------
+        word_bw_supported : list[int] | None, optional
+            Word widths to emit read helpers for.  Validated on construction.
+
+        Returns
+        -------
+        DataSchemaStep
+            Call ``.run(cfg)`` on the result to write the headers to disk.
+        """
+        return DataSchemaStep(cls, word_bw_supported)
 
     @classmethod
     def _gen_json_member_declarations(cls, indent_level: int = 0) -> str:
@@ -3930,8 +3911,57 @@ class DataArray(DataSchema):
         return bool(np.array_equal(v1, v2))
 
 
+class DataSchemaStep(Buildable):
+    """Buildable that generates C++ include headers for a :class:`DataSchema` class.
+
+    Obtain one via :meth:`DataSchema.as_buildable` rather than instantiating
+    directly.
+
+    Outputs
+    -------
+    ``"include"``
+        The synthesizable ``*.h`` header.
+    ``"tb_include"``
+        The testbench ``*_tb.h`` header.
+    """
+
+    def __init__(
+        self,
+        schema_cls: type[DataSchema],
+        word_bw_supported: list[int] | None = None,
+    ) -> None:
+        if not schema_cls.can_gen_include:
+            raise ValueError(
+                f"{schema_cls.__name__} does not support standalone include generation."
+            )
+        for bw in (word_bw_supported or []):
+            if bw <= 0:
+                raise ValueError(f"word_bw values must be positive. Got {bw}.")
+        self._schema = schema_cls
+        self._word_bw: list[int] = list(word_bw_supported) if word_bw_supported else []
+
+    @property
+    def name(self) -> str:
+        return f"{self._schema.__name__}Step"
+
+    @property
+    def build_outputs(self) -> dict[str, Path]:
+        return {
+            "include": Path(self._schema.include_path()),
+            "tb_include": Path(self._schema.tb_include_path()),
+        }
+
+    def generate(self, key: str, config: BuildConfig) -> str:
+        if key == "include":
+            return self._schema._render_include(config, self._word_bw)
+        if key == "tb_include":
+            return self._schema._render_tb_include(config, self._word_bw)
+        raise KeyError(f"Unknown output key: {key!r}")
+
+
 __all__ = [
     "DataSchema",
+    "DataSchemaStep",
     "DataField",
     "IntField",
     "MemAddr",

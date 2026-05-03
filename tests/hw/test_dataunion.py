@@ -16,7 +16,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from pysilicon.build.build import CodeGenConfig
+from pysilicon.build.build import BuildConfig
 from pysilicon.hw.dataschema import DataList, IntField
 from pysilicon.hw.dataunion import (
     DataUnion,
@@ -448,7 +448,8 @@ class TestSchemaIDFieldCodegen:
         reg.register(Alpha, 1)
         reg.register(Beta, 2)
         F = SchemaIDField.specialize(reg, bitwidth=16)
-        out_path = F.gen_include(cfg=CodeGenConfig(root_dir=tmp_path))
+        result = F.as_buildable().run(BuildConfig(root_dir=tmp_path))
+        out_path = result.artifacts["include"]
         content = out_path.read_text(encoding="utf-8")
         assert "enum class SysSchemaID" in content
         assert "Alpha = 1," in content
@@ -1123,11 +1124,11 @@ class TestDataUnionCodegen:
     def test_gen_include_writes_file(self, tmp_path: Path):
         DU = self.DU
         _, DU = _make_du_registry("GenInc")
-        cfg = CodeGenConfig(root_dir=tmp_path)
+        cfg = BuildConfig(root_dir=tmp_path)
         # Generate dependencies first
         for _, schema_cls in DU.registry.items():
-            schema_cls.gen_include(cfg=cfg, word_bw_supported=[32])
-        DU.hdr_type.gen_include(cfg=cfg, word_bw_supported=[32])
+            schema_cls.as_buildable(word_bw_supported=[32]).run(cfg)
+        DU.hdr_type.as_buildable(word_bw_supported=[32]).run(cfg)
         out_path = DU.gen_include(cfg=cfg, word_bw_supported=[32])
         content = out_path.read_text(encoding="utf-8")
         assert f"struct {DU.cpp_class_name()}" in content

@@ -13,7 +13,7 @@ from pathlib import Path
 import numpy as np
 from scipy.signal import correlate2d
 
-from pysilicon.build.build import CodeGenConfig
+from pysilicon.build.build import BuildConfig
 from pysilicon.build.streamutils import copy_streamutils
 from pysilicon.hw.arrayutils import (
     gen_array_utils,
@@ -474,10 +474,11 @@ class Conv2DTest(object):
 
     def gen_vitis_code(self) -> list[Path]:
         """Generate schema and utility headers needed for the Vitis flow."""
-        cfg = CodeGenConfig(root_dir=self.example_dir, util_dir=self.include_dir)
+        cfg = BuildConfig(root_dir=self.example_dir, util_dir=self.include_dir)
         generated_paths: list[Path] = []
         for schema_class in SCHEMA_CLASSES:
-            generated_paths.append(schema_class.gen_include(cfg=cfg, word_bw_supported=WORD_BW_SUPPORTED))
+            result = schema_class.as_buildable(word_bw_supported=WORD_BW_SUPPORTED).run(cfg)
+            generated_paths.append(result.artifacts["include"])
         generated_paths.append(gen_array_utils(PixelField, WORD_BW_SUPPORTED, cfg=cfg))
         generated_paths.append(gen_array_utils(KernelField, WORD_BW_SUPPORTED, cfg=cfg))
         copy_streamutils(cfg)

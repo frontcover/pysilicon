@@ -2,7 +2,7 @@ from pathlib import Path
 
 import numpy as np
 
-from pysilicon.build.build import CodeGenConfig
+from pysilicon.build.build import BuildConfig
 from pysilicon.hw.arrayutils import gen_array_utils, get_nwords, read_uint32_file, write_array, write_uint32_file
 from pysilicon.hw.dataschema import FloatField, IntField
 
@@ -87,7 +87,7 @@ def test_nwords_matches_serialized_length_float_matrix() -> None:
 def test_gen_array_utils_writes_companion_tb_header(tmp_path: Path):
     Int16Inc = IntField.specialize(bitwidth=16, signed=True, include_dir="include")
 
-    out_path = gen_array_utils(Int16Inc, [32], cfg=CodeGenConfig(root_dir=tmp_path, util_dir="common"))
+    out_path = gen_array_utils(Int16Inc, [32], cfg=BuildConfig(root_dir=tmp_path, util_dir="common"))
     tb_path = tmp_path / "include" / "int16_array_utils_tb.h"
 
     content = out_path.read_text(encoding="utf-8")
@@ -151,7 +151,7 @@ def test_gen_array_utils_writes_companion_tb_header(tmp_path: Path):
 
 
 def test_gen_array_utils_tb_header_uses_local_streamutils_path(tmp_path: Path):
-    out_path = gen_array_utils(F32, [32], cfg=CodeGenConfig(root_dir=tmp_path))
+    out_path = gen_array_utils(F32, [32], cfg=BuildConfig(root_dir=tmp_path))
     tb_path = tmp_path / "float32_array_utils_tb.h"
     content = out_path.read_text(encoding="utf-8")
     tb_content = tb_path.read_text(encoding="utf-8")

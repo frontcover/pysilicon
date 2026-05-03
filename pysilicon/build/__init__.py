@@ -9,7 +9,6 @@ from pysilicon.build.build import (
     BuildConfig,
     BuildResult,
     BuildStep,
-    CodeGenConfig,
 )
 
 __all__ = [
@@ -17,7 +16,6 @@ __all__ = [
     "BuildResult",
     "BuildStep",
     "Buildable",
-    "CodeGenConfig",
     "gen_array_utils",
 ]
 

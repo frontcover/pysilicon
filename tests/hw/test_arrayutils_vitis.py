@@ -5,7 +5,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from pysilicon.build.build import CodeGenConfig
+from pysilicon.build.build import BuildConfig
 from pysilicon.build.streamutils import copy_streamutils
 from pysilicon.hw.arrayutils import gen_array_utils, read_array, write_array
 from pysilicon.hw.dataschema import FloatField, IntField
@@ -52,7 +52,7 @@ def test_arrayutils_float_roundtrip_vitis(tmp_path: Path, word_bw: int):
     save_dtype = np.uint32 if word_bw <= 32 else np.uint64
     np.savetxt(in_words_path, in_words.astype(save_dtype), fmt="%u")
 
-    cfg = CodeGenConfig(root_dir=tmp_path, util_dir="include")
+    cfg = BuildConfig(root_dir=tmp_path, util_dir="include")
     generated_header = gen_array_utils(F32, [word_bw], cfg=cfg)
     copy_streamutils(cfg)
 
@@ -101,7 +101,7 @@ def test_arrayutils_int16_pf2_roundtrip_vitis(tmp_path: Path):
     out_words_path = tmp_path / "array_words_out.txt"
     np.savetxt(in_words_path, in_words.astype(np.uint32), fmt="%u")
 
-    cfg = CodeGenConfig(root_dir=tmp_path, util_dir="include")
+    cfg = BuildConfig(root_dir=tmp_path, util_dir="include")
     generated_header = gen_array_utils(S16, [word_bw], cfg=cfg)
     copy_streamutils(cfg)
 

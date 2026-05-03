@@ -4,11 +4,11 @@ Example
 -------
 ```python
 from pysilicon.hw.arrayutils import gen_array_utils, read_array, write_array
-from pysilicon.build.build import CodeGenConfig
+from pysilicon.build.build import BuildConfig
 from pysilicon.hw.dataschema import IntField
 
 Int16 = IntField.specialize(16, signed=True)
-path = gen_array_utils(Int16, [32, 64], cfg=CodeGenConfig(root_dir="include"))
+path = gen_array_utils(Int16, [32, 64], cfg=BuildConfig(root_dir="include"))
 print(path)
 
 packed = write_array([1, 2, 3, 4], elem_type=Int16, word_bw=32)
@@ -26,7 +26,7 @@ from typing import Any
 
 import numpy as np
 
-from pysilicon.build.build import CodeGenConfig
+from pysilicon.build.build import BuildConfig
 from pysilicon.hw.dataschema import DataArray, DataList, DataSchema
 
 
@@ -303,7 +303,7 @@ def _relative_synth_include_from_tb(elem_type: type[DataSchema]) -> str:
     return posixpath.relpath(_array_utils_include_path(elem_type), start=current_dir)
 
 
-def _relative_streamutils_tb_include(elem_type: type[DataSchema], cfg: CodeGenConfig) -> str:
+def _relative_streamutils_tb_include(elem_type: type[DataSchema], cfg: BuildConfig) -> str:
     tb_out_path = cfg.root_dir / _array_utils_tb_include_path(elem_type)
     util_path = cfg.root_dir / cfg.util_dir / "streamutils_tb.h"
     include_path = os.path.relpath(util_path, start=tb_out_path.parent)
@@ -317,7 +317,7 @@ def _relative_include_for_elem(elem_type: type[DataSchema]) -> str | None:
     return posixpath.relpath(elem_type.include_path(), start=current_dir)
 
 
-def _relative_streamutils_include(elem_type: type[DataSchema], cfg: CodeGenConfig) -> str:
+def _relative_streamutils_include(elem_type: type[DataSchema], cfg: BuildConfig) -> str:
     out_path = cfg.root_dir / _array_utils_include_path(elem_type)
     util_path = cfg.root_dir / cfg.util_dir / "streamutils_hls.h"
     include_path = os.path.relpath(util_path, start=out_path.parent)
@@ -1240,7 +1240,7 @@ def _gen_tb_helpers(elem_type: type[DataSchema], indent_level: int = 0) -> str:
 def gen_array_utils(
     elem_type: type[DataSchema],
     word_bw_supported: list[int],
-    cfg: CodeGenConfig | None = None,
+    cfg: BuildConfig | None = None,
 ) -> Path:
     """Generate a Vitis HLS header that reads and writes packed arrays of one element type.
 
@@ -1250,8 +1250,8 @@ def gen_array_utils(
         Element schema class to decode.
     word_bw_supported : list[int]
         Word widths to specialize in the generated header.
-    cfg : CodeGenConfig | None, optional
-        Output configuration. If omitted, uses ``CodeGenConfig()``.
+    cfg : BuildConfig | None, optional
+        Output configuration. If omitted, uses ``BuildConfig()``.
 
     Returns
     -------
@@ -1262,7 +1262,7 @@ def gen_array_utils(
         raise TypeError("elem_type must be a DataSchema subclass.")
 
     if cfg is None:
-        cfg = CodeGenConfig()
+        cfg = BuildConfig()
 
     widths = sorted({int(bw) for bw in word_bw_supported})
     if not widths:

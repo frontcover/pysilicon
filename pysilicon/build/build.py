@@ -4,8 +4,7 @@ build.py — build configuration, pipeline primitives, and artifact generation.
 Classes
 -------
 BuildConfig
-    Dataclass holding paths and tool settings for a build.  Replaces the
-    old ``CodeGenConfig``; a backward-compat alias is provided at the bottom.
+    Dataclass holding paths and tool settings for a build.
 
 BuildResult
     Dataclass returned by every ``BuildStep.run()`` call.
@@ -196,9 +195,3 @@ class Buildable(BuildStep):
         except Exception as exc:
             return BuildResult(success=False, message=str(exc))
 
-
-# ---------------------------------------------------------------------------
-# Backward-compat alias
-# ---------------------------------------------------------------------------
-
-CodeGenConfig = BuildConfig

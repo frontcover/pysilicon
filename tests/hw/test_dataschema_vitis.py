@@ -5,7 +5,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from pysilicon.build.build import CodeGenConfig
+from pysilicon.build.build import BuildConfig
 from pysilicon.build.streamutils import copy_streamutils
 from pysilicon.hw.dataschema import DataArray, DataList, FloatField, IntField
 from pysilicon.toolchain import toolchain
@@ -132,7 +132,7 @@ def _run_vitis_tcl(tcl_path: Path, work_dir: Path, failure_prefix: str) -> None:
 
 def _generate_include_tree(
     schema_type: type[DataList] | type[DataArray],
-    cfg: CodeGenConfig,
+    cfg: BuildConfig,
     word_bw: int,
     seen: set[type[object]] | None = None,
 ) -> None:
@@ -145,7 +145,7 @@ def _generate_include_tree(
     for dependency in schema_type.get_dependencies():
         _generate_include_tree(dependency, cfg=cfg, word_bw=word_bw, seen=seen)
 
-    schema_type.gen_include(cfg=cfg, word_bw_supported=[word_bw])
+    schema_type.as_buildable(word_bw_supported=[word_bw]).run(cfg)
     seen.add(schema_type)
 
 
@@ -169,7 +169,7 @@ def test_dataschema2_python_to_vitis_serialization(
     save_dtype = np.uint32 if word_bw <= 32 else np.uint64
     np.savetxt(words_path, packed.astype(save_dtype), fmt="%u")
 
-    cfg = CodeGenConfig(root_dir=tmp_path)
+    cfg = BuildConfig(root_dir=tmp_path)
     _generate_include_tree(packet_type, cfg=cfg, word_bw=word_bw)
     copy_streamutils(cfg)
 
@@ -219,7 +219,7 @@ def test_dataschema2_vitis_to_python_serialization(
     ref_packet = _make_packet(packet_type)
     ref_packet.to_json(file_path=input_json_path, indent=2)
 
-    cfg = CodeGenConfig(root_dir=tmp_path)
+    cfg = BuildConfig(root_dir=tmp_path)
     _generate_include_tree(packet_type, cfg=cfg, word_bw=word_bw)
     copy_streamutils(cfg)
 
@@ -262,7 +262,7 @@ def test_streamutils_read_uint32_file_loopback(tmp_path: Path):
     out_json_path = tmp_path / "packet_out.json"
     packet.write_uint32_file(in_bin_path)
 
-    cfg = CodeGenConfig(root_dir=tmp_path)
+    cfg = BuildConfig(root_dir=tmp_path)
     _generate_include_tree(DemoPacket, cfg=cfg, word_bw=32)
     copy_streamutils(cfg)
 
@@ -298,7 +298,7 @@ def test_streamutils_read_uint32_file_len_loopback(tmp_path: Path):
     out_json_path = tmp_path / "packet_out.json"
     packet.write_uint32_file(in_bin_path, nwrite=nread)
 
-    cfg = CodeGenConfig(root_dir=tmp_path)
+    cfg = BuildConfig(root_dir=tmp_path)
     _generate_include_tree(DynSampData, cfg=cfg, word_bw=32)
     copy_streamutils(cfg)
 

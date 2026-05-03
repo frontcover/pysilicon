@@ -50,7 +50,7 @@ This example illustrates how interface data structures can be described in compa
 
 PySilicon can auto-generate an include file such as `poly_cmd_hdr.h` for each `DataSchema` class. Each generated header defines a Vitis HLS C++ data structure together with serialization and deserialization support.
 
-In this example, header generation is driven by a list of schema classes and a call to the `gen_include()` method for each one:
+In this example, header generation is driven by a list of schema classes. Each class exposes an `as_buildable()` factory that returns a `DataSchemaStep` build step, which is then executed with `run(cfg)`:
 
 ```python
 SCHEMA_CLASSES = [
@@ -64,10 +64,10 @@ SCHEMA_CLASSES = [
 ]
 
 def generate_headers(example_dir: Path) -> None:
-    cfg = CodeGenConfig(root_dir=example_dir, util_dir=INCLUDE_DIR)
+    cfg = BuildConfig(root_dir=example_dir, util_dir=INCLUDE_DIR)
     for schema_class in SCHEMA_CLASSES:
-        out_path = schema_class.gen_include(cfg=cfg, word_bw_supported=WORD_BW_SUPPORTED)
-        print(f"generated {out_path}")
+        result = schema_class.as_buildable(word_bw_supported=WORD_BW_SUPPORTED).run(cfg)
+        print(f"generated {result.artifacts['include']}")
     copy_streamutils(cfg)
 ```
 

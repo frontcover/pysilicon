@@ -10,7 +10,7 @@ from typing import Any, ClassVar
 
 import numpy as np
 
-from pysilicon.build.build import CodeGenConfig
+from pysilicon.build.build import BuildConfig
 from pysilicon.hw.dataschema import DataList, DataSchema, IntField, Words
 
 
@@ -562,21 +562,21 @@ class DataUnion:
     @classmethod
     def gen_include(
         cls,
-        cfg: CodeGenConfig | None = None,
+        cfg: BuildConfig | None = None,
         word_bw_supported: list[int] | None = None,
     ) -> Path:
         """Generate the DataUnion C++ header file and return its path.
 
         Parameters
         ----------
-        cfg : CodeGenConfig | None
+        cfg : BuildConfig | None
             Code-generation config. Uses current directory when omitted.
         word_bw_supported : list[int] | None
             Word widths to support in the generated read/write helpers. When
             omitted or empty, size helpers and read/write methods are not emitted.
         """
         if cfg is None:
-            cfg = CodeGenConfig()
+            cfg = BuildConfig()
         if word_bw_supported is None:
             word_bw_supported = []
 
