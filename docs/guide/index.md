@@ -14,3 +14,4 @@ Welcome to PySilicon.  This folder will have guides to use the PySilicon functio
 - [Memory Modeling](./memory/)
 - [Timing Analysis Tools](./timing)
 - [Hardware Interfaces](./interface/overview.md)
+- [Build System](./build/)

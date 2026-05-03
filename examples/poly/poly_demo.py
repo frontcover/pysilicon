@@ -10,10 +10,10 @@ from pathlib import Path
 import numpy as np
 import numpy.typing as npt
 
-from pysilicon.build.build import BuildConfig
-from pysilicon.build.streamutils import copy_streamutils
-from pysilicon.hw.arrayutils import gen_array_utils, read_uint32_file, write_uint32_file
-from pysilicon.hw.dataschema import DataArray, DataList, EnumField, FloatField, IntField
+from pysilicon.build.build import BuildConfig, BuildDag
+from pysilicon.build.streamutils import StreamUtilsStep
+from pysilicon.hw.arrayutils import ArrayUtilsStep, read_uint32_file, write_uint32_file
+from pysilicon.hw.dataschema import DataArray, DataList, DataSchemaStep, EnumField, FloatField, IntField
 from pysilicon.toolchain import toolchain
 
 
@@ -37,7 +37,7 @@ class PolyError(IntEnum):
     TLAST_EARLY_SAMP_IN = 3  # TLAST was asserted before all input samples were received
     NO_TLAST_SAMP_IN = 4  # All input samples were received but TLAST was never asserted
     WRONG_NSAMP = 5  # The number of samples received does not match the expected number
-PolyErrorField = EnumField.specialize(enum_type=PolyError, include_dir=INCLUDE_DIR)
+PolyErrorField = EnumField.specialize(enum_type=PolyError)
 
 
 
@@ -50,7 +50,6 @@ class CoeffArray(DataArray):
     element_type = Float32
     static = True
     max_shape = (ncoeff,)
-    include_dir = INCLUDE_DIR
 
 
 class PolyCmdHdr(DataList):
@@ -72,7 +71,6 @@ class PolyCmdHdr(DataList):
             "description": "Number of samples",
         },
     }
-    include_dir = INCLUDE_DIR
 
 
 class PolyRespHdr(DataList):
@@ -87,7 +85,6 @@ class PolyRespHdr(DataList):
             "description": "Echo of the transaction ID sent in the command",
         },
     }
-    include_dir = INCLUDE_DIR
 
 
 class PolyRespFtr(DataList):
@@ -104,7 +101,6 @@ class PolyRespFtr(DataList):
             "description": "Error code indicating success or type of failure",
         },
     }
-    include_dir = INCLUDE_DIR
 
 
 SCHEMA_CLASSES = [
@@ -238,14 +234,16 @@ class PolyTest(object):
 
     def gen_vitis_code(self) -> list[Path]:
         """Generate schema and utility headers needed for the Vitis flow."""
-        cfg = BuildConfig(root_dir=self.example_dir, util_dir=self.include_dir)
-        generated_paths: list[Path] = []
-        for schema_class in SCHEMA_CLASSES:
-            result = schema_class.as_buildable(word_bw_supported=WORD_BW_SUPPORTED).run(cfg)
-            generated_paths.append(result.artifacts["include"])
-        generated_paths.append(gen_array_utils(Float32, WORD_BW_SUPPORTED, cfg=cfg))
-        copy_streamutils(cfg)
-        return generated_paths
+        cfg = BuildConfig(root_dir=self.example_dir)
+        dag = BuildDag()
+        dag.add(StreamUtilsStep(output_dir=self.include_dir))
+        schema_steps = [
+            dag.add(DataSchemaStep(cls, word_bw_supported=WORD_BW_SUPPORTED, include_dir=self.include_dir))
+            for cls in SCHEMA_CLASSES
+        ]
+        dag.add(ArrayUtilsStep(Float32, WORD_BW_SUPPORTED))
+        results = dag.run(cfg)
+        return [results[step.name].artifacts["include"] for step in schema_steps]
 
     def write_input_files(self, data_dir: Path | None = None) -> Path:
         """Write binary test-vector files for the Vitis testbench.

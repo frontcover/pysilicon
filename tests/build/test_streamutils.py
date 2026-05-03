@@ -1,4 +1,4 @@
-"""Tests for version-aware streamutils copying."""
+"""Tests for StreamUtilsStep and MemMgrStep."""
 from __future__ import annotations
 
 from pathlib import Path
@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 
 from pysilicon.build.build import BuildConfig
-from pysilicon.build.streamutils import copy_streamutils
+from pysilicon.build.streamutils import MemMgrStep, StreamUtilsStep
 
 
 # ---------------------------------------------------------------------------
@@ -77,103 +77,140 @@ def test_needs_legacy_false_for_2026_1():
 
 
 # ---------------------------------------------------------------------------
-# copy_streamutils — default (no version specified)
+# StreamUtilsStep — default (no version specified)
 # ---------------------------------------------------------------------------
 
 
-def test_copy_streamutils_default_copies_headers(tmp_path: Path):
-    hls_path, tb_path, cpp_path = copy_streamutils(BuildConfig(root_dir=tmp_path))
-    assert Path(hls_path).exists()
-    assert Path(tb_path).exists()
+def test_streamutils_step_default_copies_headers(tmp_path: Path):
+    result = StreamUtilsStep().run(BuildConfig(root_dir=tmp_path))
+    assert result.success
+    assert result.artifacts["hls"].exists()
+    assert result.artifacts["tb"].exists()
 
 
-def test_copy_streamutils_default_copies_cpp(tmp_path: Path):
-    _, _, cpp_path = copy_streamutils(BuildConfig(root_dir=tmp_path))
-    assert cpp_path is not None
-    assert Path(cpp_path).exists()
+def test_streamutils_step_default_copies_cpp(tmp_path: Path):
+    result = StreamUtilsStep().run(BuildConfig(root_dir=tmp_path))
+    assert result.success
+    assert "cpp" in result.artifacts
+    assert result.artifacts["cpp"].exists()
 
 
 # ---------------------------------------------------------------------------
-# copy_streamutils — legacy version (2023.1)
+# StreamUtilsStep — legacy version (2023.1)
 # ---------------------------------------------------------------------------
 
 
-def test_copy_streamutils_2023_1_copies_headers(tmp_path: Path):
+def test_streamutils_step_2023_1_copies_headers(tmp_path: Path):
     cfg = BuildConfig(root_dir=tmp_path, vitis_version="2023.1")
-    hls_path, tb_path, _ = copy_streamutils(cfg)
-    assert Path(hls_path).exists()
-    assert Path(tb_path).exists()
+    result = StreamUtilsStep().run(cfg)
+    assert result.artifacts["hls"].exists()
+    assert result.artifacts["tb"].exists()
 
 
-def test_copy_streamutils_2023_1_copies_cpp(tmp_path: Path):
+def test_streamutils_step_2023_1_copies_cpp(tmp_path: Path):
     cfg = BuildConfig(root_dir=tmp_path, vitis_version="2023.1")
-    _, _, cpp_path = copy_streamutils(cfg)
-    assert cpp_path is not None
-    assert Path(cpp_path).exists()
+    result = StreamUtilsStep().run(cfg)
+    assert "cpp" in result.artifacts
+    assert result.artifacts["cpp"].exists()
 
 
 # ---------------------------------------------------------------------------
-# copy_streamutils — new version (2025.1)
+# StreamUtilsStep — new version (2025.1)
 # ---------------------------------------------------------------------------
 
 
-def test_copy_streamutils_2025_1_copies_headers(tmp_path: Path):
+def test_streamutils_step_2025_1_copies_headers(tmp_path: Path):
     cfg = BuildConfig(root_dir=tmp_path, vitis_version="2025.1")
-    hls_path, tb_path, _ = copy_streamutils(cfg)
-    assert Path(hls_path).exists()
-    assert Path(tb_path).exists()
+    result = StreamUtilsStep().run(cfg)
+    assert result.artifacts["hls"].exists()
+    assert result.artifacts["tb"].exists()
 
 
-def test_copy_streamutils_2025_1_does_not_copy_cpp(tmp_path: Path):
+def test_streamutils_step_2025_1_does_not_copy_cpp(tmp_path: Path):
     cfg = BuildConfig(root_dir=tmp_path, vitis_version="2025.1")
-    _, _, cpp_path = copy_streamutils(cfg)
-    assert cpp_path is None
+    result = StreamUtilsStep().run(cfg)
+    assert "cpp" not in result.artifacts
     assert not (tmp_path / "streamutils.cpp").exists()
 
 
-def test_copy_streamutils_2025_2_does_not_copy_cpp(tmp_path: Path):
+def test_streamutils_step_2025_2_does_not_copy_cpp(tmp_path: Path):
     cfg = BuildConfig(root_dir=tmp_path, vitis_version="2025.2")
-    _, _, cpp_path = copy_streamutils(cfg)
-    assert cpp_path is None
+    result = StreamUtilsStep().run(cfg)
+    assert "cpp" not in result.artifacts
     assert not (tmp_path / "streamutils.cpp").exists()
 
 
 # ---------------------------------------------------------------------------
-# copy_streamutils — stale-file cleanup
+# StreamUtilsStep — stale-file cleanup
 # ---------------------------------------------------------------------------
 
 
-def test_copy_streamutils_removes_stale_cpp_for_2025_1(tmp_path: Path):
-    # Simulate a previous run with an older version that copied streamutils.cpp
+def test_streamutils_step_removes_stale_cpp_for_2025_1(tmp_path: Path):
     stale = tmp_path / "streamutils.cpp"
     stale.write_text("stale content", encoding="utf-8")
 
     cfg = BuildConfig(root_dir=tmp_path, vitis_version="2025.1")
-    _, _, cpp_path = copy_streamutils(cfg)
+    result = StreamUtilsStep().run(cfg)
 
-    assert cpp_path is None
+    assert "cpp" not in result.artifacts
     assert not stale.exists()
 
 
-def test_copy_streamutils_removes_stale_cpp_in_util_subdir(tmp_path: Path):
+def test_streamutils_step_removes_stale_cpp_in_subdir(tmp_path: Path):
     util_dir = tmp_path / "common"
     util_dir.mkdir()
     stale = util_dir / "streamutils.cpp"
     stale.write_text("stale content", encoding="utf-8")
 
-    cfg = BuildConfig(root_dir=tmp_path, util_dir="common", vitis_version="2025.1")
-    _, _, cpp_path = copy_streamutils(cfg)
+    cfg = BuildConfig(root_dir=tmp_path, vitis_version="2025.1")
+    result = StreamUtilsStep(output_dir="common").run(cfg)
 
-    assert cpp_path is None
+    assert "cpp" not in result.artifacts
     assert not stale.exists()
 
 
 # ---------------------------------------------------------------------------
-# copy_streamutils — invalid version format
+# StreamUtilsStep — output_dir
 # ---------------------------------------------------------------------------
 
 
-def test_copy_streamutils_invalid_version_raises(tmp_path: Path):
+def test_streamutils_step_output_dir_property():
+    step = StreamUtilsStep(output_dir="include/util")
+    assert step.output_dir == Path("include/util")
+
+
+def test_streamutils_step_writes_to_output_dir(tmp_path: Path):
+    cfg = BuildConfig(root_dir=tmp_path)
+    result = StreamUtilsStep(output_dir="util").run(cfg)
+    assert (tmp_path / "util" / "streamutils_hls.h").exists()
+    assert (tmp_path / "util" / "streamutils_tb.h").exists()
+
+
+# ---------------------------------------------------------------------------
+# StreamUtilsStep — invalid version format raises at run time
+# ---------------------------------------------------------------------------
+
+
+def test_streamutils_step_invalid_version_returns_failure(tmp_path: Path):
     cfg = BuildConfig(root_dir=tmp_path, vitis_version="2025")
-    with pytest.raises(ValueError, match="Invalid vitis_version"):
-        copy_streamutils(cfg)
+    result = StreamUtilsStep().run(cfg)
+    assert result.success is False
+    assert "Invalid vitis_version" in result.message
+
+
+# ---------------------------------------------------------------------------
+# MemMgrStep
+# ---------------------------------------------------------------------------
+
+
+def test_memmgr_step_copies_headers(tmp_path: Path):
+    result = MemMgrStep().run(BuildConfig(root_dir=tmp_path))
+    assert result.success
+    assert result.artifacts["memmgr"].exists()
+    assert result.artifacts["memmgr_tb"].exists()
+
+
+def test_memmgr_step_output_dir(tmp_path: Path):
+    result = MemMgrStep(output_dir="util").run(BuildConfig(root_dir=tmp_path))
+    assert (tmp_path / "util" / "memmgr.hpp").exists()
+    assert (tmp_path / "util" / "memmgr_tb.hpp").exists()

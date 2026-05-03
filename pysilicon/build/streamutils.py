@@ -1,93 +1,121 @@
 from __future__ import annotations
 
 from pathlib import Path
-import shutil
 
-from pysilicon.build.build import BuildConfig
+from pysilicon.build.build import Buildable, BuildConfig, BuildResult
 
 
-def copy_streamutils(
-    cfg: BuildConfig,
-) -> tuple[str, str, str | None]:
-    """Copy streamutils support files into the configured utility directory.
+_SRC_DIR = Path(__file__).resolve().parent
 
-    ``streamutils_hls.h`` and ``streamutils_tb.h`` are always copied because
-    generated Vitis HLS code references them unconditionally.
 
-    ``streamutils.cpp`` is only copied when the configured Vitis version is
-    strictly older than ``2025.1`` (or when no version is specified, in which
-    case the conservative default is to copy it).  If the version is ``2025.1``
-    or newer and a stale ``streamutils.cpp`` already exists in the output
-    directory it is removed so the output remains reproducible.
+class StreamUtilsStep(Buildable):
+    """Build step that copies the streamutils support files to an output directory.
 
-    When ``cfg.copy_memmgr`` is ``True``, ``memmgr.hpp`` and ``memmgr_tb.hpp``
-    are also copied into the same utility directory. When it is ``False``,
-    stale output copies of those files are removed if present.
+    ``streamutils_hls.h`` and ``streamutils_tb.h`` are always written.
+    ``streamutils.cpp`` is written only for Vitis versions older than 2025.1
+    (the conservative default when no version is specified).  If the version is
+    2025.1 or newer and a stale ``streamutils.cpp`` exists in the output
+    directory it is removed.
 
     Parameters
     ----------
-    cfg : BuildConfig
-        Code-generation configuration describing the output root and utility
-        directory.  Files are written to ``cfg.root_dir / cfg.util_dir``.
-
-    Returns
-    -------
-    tuple[str, str, str | None]
-        A three-element tuple:
-
-        * Absolute path to the copied ``streamutils_hls.h``.
-        * Absolute path to the copied ``streamutils_tb.h``.
-        * Absolute path to the copied ``streamutils.cpp``, or ``None`` when
-          the file was not copied (i.e. Vitis >= 2025.1).
+    output_dir : str | Path
+        Directory path **relative to** ``BuildConfig.root_dir`` where the
+        streamutils files will be written.  Defaults to ``"."`` (the root
+        directory itself).
     """
-    src_path_hls = Path(__file__).resolve().with_name("streamutils_hls.h")
-    src_path_tb = Path(__file__).resolve().with_name("streamutils_tb.h")
-    src_path_cpp = Path(__file__).resolve().with_name("streamutils.cpp")
-    src_path_memmgr_hpp = Path(__file__).resolve().with_name("memmgr.hpp")
-    src_path_memmgr_tb_hpp = Path(__file__).resolve().with_name("memmgr_tb.hpp")
-    if not src_path_hls.exists():
-        raise FileNotFoundError(f"Could not find source header: {src_path_hls}")
-    if not src_path_tb.exists():
-        raise FileNotFoundError(f"Could not find source header: {src_path_tb}")
 
-    out_dir = cfg.root_dir / cfg.util_dir
-    out_dir.mkdir(parents=True, exist_ok=True)
+    def __init__(self, output_dir: str | Path = ".") -> None:
+        super().__init__()
+        self._output_dir = Path(output_dir)
 
-    out_file_hls = out_dir / "streamutils_hls.h"
-    out_file_tb = out_dir / "streamutils_tb.h"
-    shutil.copy2(src_path_hls, out_file_hls)
-    shutil.copy2(src_path_tb, out_file_tb)
+    @property
+    def output_dir(self) -> Path:
+        """Output directory path relative to ``BuildConfig.root_dir``."""
+        return self._output_dir
 
-    out_file_cpp = out_dir / "streamutils.cpp"
-    if cfg.needs_legacy_streamutils_cpp():
-        if not src_path_cpp.exists():
-            raise FileNotFoundError(f"Could not find source file: {src_path_cpp}")
-        shutil.copy2(src_path_cpp, out_file_cpp)
-        out_cpp: str | None = str(out_file_cpp.resolve())
-    else:
-        if out_file_cpp.exists():
-            out_file_cpp.unlink()
-        out_cpp = None
+    @property
+    def build_outputs(self) -> dict[str, Path]:
+        return {
+            "hls": self._output_dir / "streamutils_hls.h",
+            "tb": self._output_dir / "streamutils_tb.h",
+        }
 
-    out_file_memmgr_hpp = out_dir / "memmgr.hpp"
-    out_file_memmgr_tb_hpp = out_dir / "memmgr_tb.hpp"
-    if cfg.copy_memmgr:
-        if not src_path_memmgr_hpp.exists():
-            raise FileNotFoundError(f"Could not find source header: {src_path_memmgr_hpp}")
-        if not src_path_memmgr_tb_hpp.exists():
-            raise FileNotFoundError(f"Could not find source header: {src_path_memmgr_tb_hpp}")
-        shutil.copy2(src_path_memmgr_hpp, out_file_memmgr_hpp)
-        shutil.copy2(src_path_memmgr_tb_hpp, out_file_memmgr_tb_hpp)
-    else:
-        if out_file_memmgr_hpp.exists():
-            out_file_memmgr_hpp.unlink()
-        if out_file_memmgr_tb_hpp.exists():
-            out_file_memmgr_tb_hpp.unlink()
+    def generate(self, key: str, config: BuildConfig) -> str:
+        src_names: dict[str, str] = {
+            "hls": "streamutils_hls.h",
+            "tb": "streamutils_tb.h",
+            "cpp": "streamutils.cpp",
+        }
+        if key not in src_names:
+            raise KeyError(f"Unknown StreamUtilsStep output key: {key!r}")
+        src_path = _SRC_DIR / src_names[key]
+        if not src_path.exists():
+            raise FileNotFoundError(f"StreamUtils source file not found: {src_path}")
+        return src_path.read_text(encoding="utf-8")
 
-        out_file_memmgr_cpp = out_dir / "memmgr.cpp"
-        if out_file_memmgr_cpp.exists():
-            out_file_memmgr_cpp.unlink()
+    def run(self, config: BuildConfig) -> BuildResult:
+        artifacts: dict[str, Path] = {}
+        try:
+            out_dir = config.root_dir / self._output_dir
+            out_dir.mkdir(parents=True, exist_ok=True)
 
-    return str(out_file_hls.resolve()), str(out_file_tb.resolve()), out_cpp
+            for key in ("hls", "tb"):
+                content = self.generate(key, config)
+                out_path = config.root_dir / self.build_outputs[key]
+                out_path.write_text(content, encoding="utf-8")
+                artifacts[key] = out_path
+
+            cpp_path = out_dir / "streamutils.cpp"
+            if config.needs_legacy_streamutils_cpp():
+                content = self.generate("cpp", config)
+                cpp_path.write_text(content, encoding="utf-8")
+                artifacts["cpp"] = cpp_path
+            else:
+                if cpp_path.exists():
+                    cpp_path.unlink()
+
+            return BuildResult(success=True, artifacts=artifacts)
+        except Exception as exc:
+            return BuildResult(success=False, message=str(exc))
 
 
+class MemMgrStep(Buildable):
+    """Build step that copies the memory-manager headers to an output directory.
+
+    Writes ``memmgr.hpp`` and ``memmgr_tb.hpp``.
+
+    Parameters
+    ----------
+    output_dir : str | Path
+        Directory path **relative to** ``BuildConfig.root_dir`` where the
+        memmgr files will be written.  Defaults to ``"."`` (the root directory).
+    """
+
+    def __init__(self, output_dir: str | Path = ".") -> None:
+        super().__init__()
+        self._output_dir = Path(output_dir)
+
+    @property
+    def output_dir(self) -> Path:
+        """Output directory path relative to ``BuildConfig.root_dir``."""
+        return self._output_dir
+
+    @property
+    def build_outputs(self) -> dict[str, Path]:
+        return {
+            "memmgr": self._output_dir / "memmgr.hpp",
+            "memmgr_tb": self._output_dir / "memmgr_tb.hpp",
+        }
+
+    def generate(self, key: str, config: BuildConfig) -> str:
+        src_names: dict[str, str] = {
+            "memmgr": "memmgr.hpp",
+            "memmgr_tb": "memmgr_tb.hpp",
+        }
+        if key not in src_names:
+            raise KeyError(f"Unknown MemMgrStep output key: {key!r}")
+        src_path = _SRC_DIR / src_names[key]
+        if not src_path.exists():
+            raise FileNotFoundError(f"MemMgr source file not found: {src_path}")
+        return src_path.read_text(encoding="utf-8")

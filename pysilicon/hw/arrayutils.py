@@ -26,7 +26,7 @@ from typing import Any
 
 import numpy as np
 
-from pysilicon.build.build import BuildConfig
+from pysilicon.build.build import Buildable, BuildConfig, BuildResult
 from pysilicon.hw.dataschema import DataArray, DataList, DataSchema
 
 
@@ -303,9 +303,11 @@ def _relative_synth_include_from_tb(elem_type: type[DataSchema]) -> str:
     return posixpath.relpath(_array_utils_include_path(elem_type), start=current_dir)
 
 
-def _relative_streamutils_tb_include(elem_type: type[DataSchema], cfg: BuildConfig) -> str:
-    tb_out_path = cfg.root_dir / _array_utils_tb_include_path(elem_type)
-    util_path = cfg.root_dir / cfg.util_dir / "streamutils_tb.h"
+def _relative_streamutils_tb_include(
+    elem_type: type[DataSchema], root_dir: Path, su_dir: Path
+) -> str:
+    tb_out_path = root_dir / _array_utils_tb_include_path(elem_type)
+    util_path = root_dir / su_dir / "streamutils_tb.h"
     include_path = os.path.relpath(util_path, start=tb_out_path.parent)
     return include_path.replace("\\", "/")
 
@@ -317,9 +319,11 @@ def _relative_include_for_elem(elem_type: type[DataSchema]) -> str | None:
     return posixpath.relpath(elem_type.include_path(), start=current_dir)
 
 
-def _relative_streamutils_include(elem_type: type[DataSchema], cfg: BuildConfig) -> str:
-    out_path = cfg.root_dir / _array_utils_include_path(elem_type)
-    util_path = cfg.root_dir / cfg.util_dir / "streamutils_hls.h"
+def _relative_streamutils_include(
+    elem_type: type[DataSchema], root_dir: Path, su_dir: Path
+) -> str:
+    out_path = root_dir / _array_utils_include_path(elem_type)
+    util_path = root_dir / su_dir / "streamutils_hls.h"
     include_path = os.path.relpath(util_path, start=out_path.parent)
     return include_path.replace("\\", "/")
 
@@ -1237,45 +1241,13 @@ def _gen_tb_helpers(elem_type: type[DataSchema], indent_level: int = 0) -> str:
     return "\n".join(lines)
 
 
-def gen_array_utils(
+def _gen_array_utils_content(
     elem_type: type[DataSchema],
-    word_bw_supported: list[int],
-    cfg: BuildConfig | None = None,
-) -> Path:
-    """Generate a Vitis HLS header that reads and writes packed arrays of one element type.
-
-    Parameters
-    ----------
-    elem_type : type[DataSchema]
-        Element schema class to decode.
-    word_bw_supported : list[int]
-        Word widths to specialize in the generated header.
-    cfg : BuildConfig | None, optional
-        Output configuration. If omitted, uses ``BuildConfig()``.
-
-    Returns
-    -------
-    pathlib.Path
-        The generated header path.
-    """
-    if not isinstance(elem_type, type) or not issubclass(elem_type, DataSchema):
-        raise TypeError("elem_type must be a DataSchema subclass.")
-
-    if cfg is None:
-        cfg = BuildConfig()
-
-    widths = sorted({int(bw) for bw in word_bw_supported})
-    if not widths:
-        raise ValueError("word_bw_supported must contain at least one positive width.")
-
-    for bw in widths:
-        if bw <= 0:
-            raise ValueError(f"word_bw values must be positive. Got {bw}.")
-
-    out_path = cfg.root_dir / _array_utils_include_path(elem_type)
-    tb_out_path = cfg.root_dir / _array_utils_tb_include_path(elem_type)
-    out_path.parent.mkdir(parents=True, exist_ok=True)
-
+    widths: list[int],
+    root_dir: Path,
+    su_dir: Path,
+) -> tuple[str, str]:
+    """Return (hls_content, tb_content) for the given element type and widths."""
     elem_include = _relative_include_for_elem(elem_type)
     include_guard = _array_utils_include_guard(elem_type)
     tb_include_guard = _array_utils_tb_include_guard(elem_type)
@@ -1293,10 +1265,8 @@ def gen_array_utils(
         "#else",
         "#include <ap_axi_sdata.h>",
         "#endif",
+        f'#include "{_relative_streamutils_include(elem_type, root_dir, su_dir)}"',
     ]
-
-    if True:
-        lines.append(f'#include "{_relative_streamutils_include(elem_type, cfg)}"')
 
     if elem_include is not None:
         lines.append(f'#include "{elem_include}"')
@@ -1378,7 +1348,7 @@ def gen_array_utils(
         f"#ifndef {tb_include_guard}",
         f"#define {tb_include_guard}",
         "",
-        f'#include "{_relative_streamutils_tb_include(elem_type, cfg)}"',
+        f'#include "{_relative_streamutils_tb_include(elem_type, root_dir, su_dir)}"',
         f'#include "{_relative_synth_include_from_tb(elem_type)}"',
         "",
         f"namespace {namespace} {{",
@@ -1390,7 +1360,152 @@ def gen_array_utils(
         f"#endif // {tb_include_guard}",
     ]
 
-    out_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return "\n".join(lines) + "\n", "\n".join(tb_lines) + "\n"
+
+
+def gen_array_utils(
+    elem_type: type[DataSchema],
+    word_bw_supported: list[int],
+    cfg: BuildConfig | None = None,
+    streamutils_dir: Path | str | None = None,
+) -> Path:
+    """Generate a Vitis HLS header that reads and writes packed arrays of one element type.
+
+    Parameters
+    ----------
+    elem_type : type[DataSchema]
+        Element schema class to decode.
+    word_bw_supported : list[int]
+        Word widths to specialize in the generated header.
+    cfg : BuildConfig | None, optional
+        Output configuration. If omitted, uses ``BuildConfig()``.
+    streamutils_dir : Path | str | None, optional
+        Directory containing ``streamutils_hls.h`` relative to
+        ``cfg.root_dir``.  Defaults to ``"."`` (the build root itself).
+
+    Returns
+    -------
+    pathlib.Path
+        The generated header path.
+    """
+    if not isinstance(elem_type, type) or not issubclass(elem_type, DataSchema):
+        raise TypeError("elem_type must be a DataSchema subclass.")
+
+    if cfg is None:
+        cfg = BuildConfig()
+
+    su_dir = Path(streamutils_dir) if streamutils_dir is not None else Path(".")
+
+    widths = sorted({int(bw) for bw in word_bw_supported})
+    if not widths:
+        raise ValueError("word_bw_supported must contain at least one positive width.")
+
+    for bw in widths:
+        if bw <= 0:
+            raise ValueError(f"word_bw values must be positive. Got {bw}.")
+
+    out_path = cfg.root_dir / _array_utils_include_path(elem_type)
+    tb_out_path = cfg.root_dir / _array_utils_tb_include_path(elem_type)
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+
+    hls_content, tb_content = _gen_array_utils_content(
+        elem_type=elem_type,
+        widths=widths,
+        root_dir=cfg.root_dir,
+        su_dir=su_dir,
+    )
+
+    out_path.write_text(hls_content, encoding="utf-8")
     tb_out_path.parent.mkdir(parents=True, exist_ok=True)
-    tb_out_path.write_text("\n".join(tb_lines) + "\n", encoding="utf-8")
+    tb_out_path.write_text(tb_content, encoding="utf-8")
     return out_path
+
+
+class ArrayUtilsStep(Buildable):
+    """Build step that generates packed-array helper headers for one element type.
+
+    Wraps :func:`gen_array_utils` as a DAG-aware :class:`~pysilicon.build.build.Buildable`.
+    Add a :class:`~pysilicon.build.streamutils.StreamUtilsStep` to the same
+    :class:`~pysilicon.build.build.BuildDag` before this step; it is
+    discovered automatically by :meth:`resolve_deps`.
+
+    Parameters
+    ----------
+    elem_type : type[DataSchema]
+        Element schema class to decode.
+    word_bw_supported : list[int]
+        Word widths to specialize in the generated header.
+    """
+
+    def __init__(
+        self,
+        elem_type: type[DataSchema],
+        word_bw_supported: list[int],
+    ) -> None:
+        super().__init__()
+        if not isinstance(elem_type, type) or not issubclass(elem_type, DataSchema):
+            raise TypeError("elem_type must be a DataSchema subclass.")
+        widths = sorted({int(bw) for bw in word_bw_supported})
+        if not widths:
+            raise ValueError("word_bw_supported must contain at least one positive width.")
+        for bw in widths:
+            if bw <= 0:
+                raise ValueError(f"word_bw values must be positive. Got {bw}.")
+        self._elem_type = elem_type
+        self._widths = widths
+        self._su_dir: Path = Path(".")
+
+    @property
+    def name(self) -> str:
+        return f"{_array_utils_stem(self._elem_type)}ArrayUtilsStep"
+
+    @property
+    def build_outputs(self) -> dict[str, Path]:
+        return {
+            "include": Path(_array_utils_include_path(self._elem_type)),
+            "tb_include": Path(_array_utils_tb_include_path(self._elem_type)),
+        }
+
+    def generate(self, key: str, config: BuildConfig) -> str:
+        hls, tb = _gen_array_utils_content(
+            elem_type=self._elem_type,
+            widths=self._widths,
+            root_dir=config.root_dir,
+            su_dir=self._su_dir,
+        )
+        if key == "include":
+            return hls
+        if key == "tb_include":
+            return tb
+        raise KeyError(f"Unknown ArrayUtilsStep output key: {key!r}")
+
+    def resolve_deps(self, other_steps: list) -> None:
+        from pysilicon.build.streamutils import StreamUtilsStep
+        from pysilicon.hw.dataschema import DataSchemaStep
+
+        self._deps = []
+
+        su_steps = [s for s in other_steps if isinstance(s, StreamUtilsStep)]
+        if not su_steps:
+            raise ValueError(
+                f"{self.name}: No StreamUtilsStep found. "
+                "Register a StreamUtilsStep before this ArrayUtilsStep."
+            )
+        if len(su_steps) > 1:
+            raise ValueError(
+                f"{self.name}: Multiple StreamUtilsStep instances found. "
+                "Only one is supported per BuildDag."
+            )
+        self._su_dir = su_steps[0].output_dir
+        self._deps.append(su_steps[0])
+
+        if self._elem_type.can_gen_include:
+            dep_step = next(
+                (
+                    s for s in other_steps
+                    if isinstance(s, DataSchemaStep) and s._schema is self._elem_type
+                ),
+                None,
+            )
+            if dep_step is not None:
+                self._deps.append(dep_step)

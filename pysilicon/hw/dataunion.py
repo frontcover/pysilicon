@@ -564,6 +564,7 @@ class DataUnion:
         cls,
         cfg: BuildConfig | None = None,
         word_bw_supported: list[int] | None = None,
+        streamutils_dir: Path | str | None = None,
     ) -> Path:
         """Generate the DataUnion C++ header file and return its path.
 
@@ -574,16 +575,21 @@ class DataUnion:
         word_bw_supported : list[int] | None
             Word widths to support in the generated read/write helpers. When
             omitted or empty, size helpers and read/write methods are not emitted.
+        streamutils_dir : Path | str | None
+            Directory containing ``streamutils_hls.h``, **relative to**
+            ``cfg.root_dir``.  Defaults to ``"."`` (the build root itself).
         """
         if cfg is None:
             cfg = BuildConfig()
         if word_bw_supported is None:
             word_bw_supported = []
 
+        sutils_dir = Path(streamutils_dir) if streamutils_dir is not None else Path(".")
+
         out_path = cfg.root_dir / cls.include_path()
         out_path.parent.mkdir(parents=True, exist_ok=True)
 
-        streamutils_hls_path = cfg.root_dir / cfg.util_dir / "streamutils_hls.h"
+        streamutils_hls_path = cfg.root_dir / sutils_dir / "streamutils_hls.h"
         streamutils_hls_include = os.path.relpath(
             streamutils_hls_path, start=out_path.parent
         ).replace("\\", "/")

@@ -720,99 +720,6 @@ class DataSchema(ABC):
         return ""
 
     @classmethod
-    def _render_include(cls, cfg: BuildConfig, word_bw_supported: list[int]) -> str:
-        """Return the content of the synthesizable C++ include header."""
-        out_path = cfg.root_dir / cls.include_path()
-        streamutils_hls_path = cfg.root_dir / cfg.util_dir / "streamutils_hls.h"
-        streamutils_hls_include = os.path.relpath(streamutils_hls_path, start=out_path.parent)
-        streamutils_hls_include = streamutils_hls_include.replace("\\", "/")
-
-        lines = [
-            f"#ifndef {cls.include_guard()}",
-            f"#define {cls.include_guard()}",
-            "",
-            "#include <ap_int.h>",
-            "#include <hls_stream.h>",
-            "#if __has_include(<hls_axi_stream.h>)",
-            "#include <hls_axi_stream.h>",
-            "#else",
-            "#include <ap_axi_sdata.h>",
-            "#endif",
-            f'#include "{streamutils_hls_include}"',
-            "",
-        ]
-
-        dependency_lines = [
-            f'#include "{cls.relative_include_path_to(dependency)}"'
-            for dependency in cls.get_dependencies()
-        ]
-        if dependency_lines:
-            lines.extend(dependency_lines)
-            lines.append("")
-
-        lines.append(cls._gen_include_decl(word_bw_supported=word_bw_supported))
-        lines.extend([
-            "",
-            f"#endif // {cls.include_guard()}",
-        ])
-        return "\n".join(lines)
-
-    @classmethod
-    def _render_tb_include(cls, cfg: BuildConfig, word_bw_supported: list[int]) -> str:
-        """Return the content of the testbench C++ include header."""
-        out_path = cfg.root_dir / cls.include_path()
-        tb_out_path = cfg.root_dir / cls.tb_include_path()
-        streamutils_tb_path = cfg.root_dir / cfg.util_dir / "streamutils_tb.h"
-        streamutils_tb_include = os.path.relpath(streamutils_tb_path, start=tb_out_path.parent)
-        streamutils_tb_include = streamutils_tb_include.replace("\\", "/")
-        synth_include_from_tb = os.path.relpath(out_path, start=tb_out_path.parent)
-        synth_include_from_tb = synth_include_from_tb.replace("\\", "/")
-
-        tb_lines = [
-            f"#ifndef {cls.tb_include_guard()}",
-            f"#define {cls.tb_include_guard()}",
-            "",
-        ]
-
-        tb_member_definitions = cls._gen_tb_member_definitions(indent_level=0)
-        if tb_member_definitions:
-            tb_lines.extend([
-                "#include <cctype>",
-                "#include <cstdlib>",
-                "#include <fstream>",
-                "#include <iostream>",
-                "#include <iterator>",
-                "#include <stdexcept>",
-                "#include <string>",
-                f'#include "{streamutils_tb_include}"',
-                "",
-            ])
-
-            dependency_tb_lines = [
-                f'#include "{cls.relative_tb_include_path_to(dependency)}"'
-                for dependency in cls.get_dependencies()
-            ]
-            if dependency_tb_lines:
-                tb_lines.extend(dependency_tb_lines)
-                tb_lines.append("")
-
-            tb_lines.extend([
-                f"#define {cls.tb_member_macro()}",
-                f'#include "{synth_include_from_tb}"',
-                f"#undef {cls.tb_member_macro()}",
-                "",
-                tb_member_definitions,
-            ])
-        else:
-            tb_lines.append(f'#include "{synth_include_from_tb}"')
-
-        tb_lines.extend([
-            "",
-            f"#endif // {cls.tb_include_guard()}",
-        ])
-        return "\n".join(tb_lines)
-
-    @classmethod
     def as_buildable(
         cls,
         word_bw_supported: list[int] | None = None,
@@ -3917,6 +3824,12 @@ class DataSchemaStep(Buildable):
     Obtain one via :meth:`DataSchema.as_buildable` rather than instantiating
     directly.
 
+    When used standalone (without a :class:`~pysilicon.build.build.BuildDag`),
+    streamutils is assumed to reside at the build root (``output_dir="."``).
+    For full dependency tracking and a configurable streamutils location, add
+    this step to a ``BuildDag`` that already contains a
+    :class:`~pysilicon.build.streamutils.StreamUtilsStep`.
+
     Outputs
     -------
     ``"include"``
@@ -3929,7 +3842,10 @@ class DataSchemaStep(Buildable):
         self,
         schema_cls: type[DataSchema],
         word_bw_supported: list[int] | None = None,
+        include_dir: str | None = None,
+        include_filename: str | None = None,
     ) -> None:
+        super().__init__()
         if not schema_cls.can_gen_include:
             raise ValueError(
                 f"{schema_cls.__name__} does not support standalone include generation."
@@ -3939,24 +3855,217 @@ class DataSchemaStep(Buildable):
                 raise ValueError(f"word_bw values must be positive. Got {bw}.")
         self._schema = schema_cls
         self._word_bw: list[int] = list(word_bw_supported) if word_bw_supported else []
+        self._include_dir: str = include_dir if include_dir is not None else schema_cls.include_dir
+        self._include_filename: str | None = include_filename
+        self._streamutils_output_dir: Path = Path(".")
 
     @property
     def name(self) -> str:
         return f"{self._schema.__name__}Step"
 
+    # ------------------------------------------------------------------
+    # Path helpers (instance-level, respect _include_dir/_include_filename)
+    # ------------------------------------------------------------------
+
+    def include_path(self) -> str:
+        """Return the header path relative to the build root."""
+        include_root = PurePosixPath((self._include_dir or ".").replace("\\", "/"))
+        filename = self._include_filename or self._schema.resolved_include_filename()
+        if include_root.as_posix() == ".":
+            return filename
+        return f"{include_root.as_posix()}/{filename}"
+
+    def tb_include_path(self) -> str:
+        """Return the TB header path relative to the build root."""
+        include_root = PurePosixPath((self._include_dir or ".").replace("\\", "/"))
+        filename = self._schema.resolved_tb_include_filename()
+        if include_root.as_posix() == ".":
+            return filename
+        return f"{include_root.as_posix()}/{filename}"
+
+    def include_guard(self) -> str:
+        """Return the include guard macro name for the synthesizable header."""
+        guard = re.sub(r"[^A-Za-z0-9]+", "_", self.include_path()).strip("_").upper()
+        return re.sub(r"_+", "_", guard)
+
+    def tb_include_guard(self) -> str:
+        """Return the include guard macro name for the TB header."""
+        guard = re.sub(r"[^A-Za-z0-9]+", "_", self.tb_include_path()).strip("_").upper()
+        return re.sub(r"_+", "_", guard)
+
+    def _relative_include_path_to(self, dep_step: DataSchemaStep) -> str:
+        current_dir = posixpath.dirname(self.include_path()) or "."
+        return posixpath.relpath(dep_step.include_path(), start=current_dir)
+
+    def _relative_tb_include_path_to(self, dep_step: DataSchemaStep) -> str:
+        current_dir = posixpath.dirname(self.tb_include_path()) or "."
+        return posixpath.relpath(dep_step.tb_include_path(), start=current_dir)
+
+    # ------------------------------------------------------------------
+    # Buildable contract
+    # ------------------------------------------------------------------
+
     @property
     def build_outputs(self) -> dict[str, Path]:
         return {
-            "include": Path(self._schema.include_path()),
-            "tb_include": Path(self._schema.tb_include_path()),
+            "include": Path(self.include_path()),
+            "tb_include": Path(self.tb_include_path()),
         }
+
+    def _dep_include_lines(self) -> list[str]:
+        """Return ``#include`` lines for schema dependencies."""
+        dep_step_map = {d._schema: d for d in self._deps if isinstance(d, DataSchemaStep)}
+        lines = []
+        for dep_schema in self._schema.get_dependencies():
+            if dep_schema in dep_step_map:
+                rel = self._relative_include_path_to(dep_step_map[dep_schema])
+            else:
+                rel = self._schema.relative_include_path_to(dep_schema)
+            lines.append(f'#include "{rel}"')
+        return lines
+
+    def _dep_tb_include_lines(self) -> list[str]:
+        """Return TB ``#include`` lines for schema dependencies."""
+        dep_step_map = {d._schema: d for d in self._deps if isinstance(d, DataSchemaStep)}
+        lines = []
+        for dep_schema in self._schema.get_dependencies():
+            if dep_schema in dep_step_map:
+                rel = self._relative_tb_include_path_to(dep_step_map[dep_schema])
+            else:
+                rel = self._schema.relative_tb_include_path_to(dep_schema)
+            lines.append(f'#include "{rel}"')
+        return lines
+
+    def _render_include(self, config: BuildConfig) -> str:
+        out_path = config.root_dir / self.include_path()
+        sutils_hls = (
+            config.root_dir / self._streamutils_output_dir / "streamutils_hls.h"
+        )
+        sutils_hls_rel = os.path.relpath(sutils_hls, start=out_path.parent).replace("\\", "/")
+
+        lines = [
+            f"#ifndef {self.include_guard()}",
+            f"#define {self.include_guard()}",
+            "",
+            "#include <ap_int.h>",
+            "#include <hls_stream.h>",
+            "#if __has_include(<hls_axi_stream.h>)",
+            "#include <hls_axi_stream.h>",
+            "#else",
+            "#include <ap_axi_sdata.h>",
+            "#endif",
+            f'#include "{sutils_hls_rel}"',
+            "",
+        ]
+
+        dep_include_lines = self._dep_include_lines()
+        if dep_include_lines:
+            lines.extend(dep_include_lines)
+            lines.append("")
+
+        lines.append(self._schema._gen_include_decl(word_bw_supported=self._word_bw))
+        lines.extend([
+            "",
+            f"#endif // {self.include_guard()}",
+        ])
+        return "\n".join(lines)
+
+    def _render_tb_include(self, config: BuildConfig) -> str:
+        out_path = config.root_dir / self.include_path()
+        tb_out_path = config.root_dir / self.tb_include_path()
+        sutils_tb = (
+            config.root_dir / self._streamutils_output_dir / "streamutils_tb.h"
+        )
+        sutils_tb_rel = os.path.relpath(sutils_tb, start=tb_out_path.parent).replace("\\", "/")
+        synth_from_tb = os.path.relpath(out_path, start=tb_out_path.parent).replace("\\", "/")
+
+        dep_tb_lines = self._dep_tb_include_lines()
+
+        tb_lines = [
+            f"#ifndef {self.tb_include_guard()}",
+            f"#define {self.tb_include_guard()}",
+            "",
+        ]
+
+        tb_member_definitions = self._schema._gen_tb_member_definitions(indent_level=0)
+        if tb_member_definitions:
+            tb_lines.extend([
+                "#include <cctype>",
+                "#include <cstdlib>",
+                "#include <fstream>",
+                "#include <iostream>",
+                "#include <iterator>",
+                "#include <stdexcept>",
+                "#include <string>",
+                f'#include "{sutils_tb_rel}"',
+                "",
+            ])
+            if dep_tb_lines:
+                tb_lines.extend(dep_tb_lines)
+                tb_lines.append("")
+            tb_lines.extend([
+                f"#define {self._schema.tb_member_macro()}",
+                f'#include "{synth_from_tb}"',
+                f"#undef {self._schema.tb_member_macro()}",
+                "",
+                tb_member_definitions,
+            ])
+        else:
+            tb_lines.append(f'#include "{synth_from_tb}"')
+
+        tb_lines.extend([
+            "",
+            f"#endif // {self.tb_include_guard()}",
+        ])
+        return "\n".join(tb_lines)
 
     def generate(self, key: str, config: BuildConfig) -> str:
         if key == "include":
-            return self._schema._render_include(config, self._word_bw)
+            return self._render_include(config)
         if key == "tb_include":
-            return self._schema._render_tb_include(config, self._word_bw)
+            return self._render_tb_include(config)
         raise KeyError(f"Unknown output key: {key!r}")
+
+    # ------------------------------------------------------------------
+    # Dependency resolution
+    # ------------------------------------------------------------------
+
+    def resolve_deps(self, other_steps: list) -> None:
+        """Wire this step to its antecedents in *other_steps*.
+
+        Finds the single :class:`~pysilicon.build.streamutils.StreamUtilsStep`
+        and the :class:`DataSchemaStep` for each schema dependency.  Raises
+        ``ValueError`` when required steps are missing.
+        """
+        from pysilicon.build.streamutils import StreamUtilsStep
+
+        self._deps = []
+
+        su_steps = [s for s in other_steps if isinstance(s, StreamUtilsStep)]
+        if not su_steps:
+            raise ValueError(
+                f"{self.name}: No StreamUtilsStep found. "
+                "Register a StreamUtilsStep before this DataSchemaStep."
+            )
+        if len(su_steps) > 1:
+            raise ValueError(
+                f"{self.name}: Multiple StreamUtilsStep instances found. "
+                "Only one is supported per BuildDag."
+            )
+        su_step = su_steps[0]
+        self._streamutils_output_dir = su_step.output_dir
+        self._deps.append(su_step)
+
+        for dep_schema in self._schema.get_dependencies():
+            dep_step = next(
+                (
+                    s for s in other_steps
+                    if isinstance(s, DataSchemaStep) and s._schema is dep_schema
+                ),
+                None,
+            )
+            if dep_step is not None:
+                self._deps.append(dep_step)
 
 
 __all__ = [

@@ -12,7 +12,7 @@ import numpy as np
 import pytest
 
 from pysilicon.build.build import BuildConfig
-from pysilicon.build.streamutils import copy_streamutils
+from pysilicon.build.streamutils import StreamUtilsStep
 from pysilicon.hw.dataschema import DataList, IntField
 from pysilicon.hw.dataunion import (
     DataUnion,
@@ -143,7 +143,7 @@ def test_dataunion_vitis_loopback(tmp_path: Path, word_bw: int):
     # 2. Generate C++ includes
     cfg = BuildConfig(root_dir=tmp_path)
     _generate_all_includes(SensorDataUnion, cfg, [word_bw])
-    copy_streamutils(cfg)
+    StreamUtilsStep().run(cfg)
 
     # 3. Render C++ loopback template
     hdr_inc = SensorDataUnion.include_path()

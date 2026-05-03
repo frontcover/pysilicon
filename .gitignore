@@ -134,3 +134,4 @@ experiment/
 
 # Allow build directory in pysilicon
 !pysilicon/build/
+!**/guide/build/

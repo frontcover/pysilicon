@@ -9,7 +9,7 @@ import numpy as np
 import pytest
 
 from pysilicon.build.build import BuildConfig
-from pysilicon.build.streamutils import copy_streamutils
+from pysilicon.build.streamutils import StreamUtilsStep
 from pysilicon.hw.arrayutils import gen_array_utils, write_uint32_file
 from pysilicon.hw.dataschema import DataArray, DataList, EnumField, FloatField, IntField
 from pysilicon.toolchain import toolchain
@@ -160,7 +160,7 @@ def _read_sync_status(data_dir: Path) -> dict[str, str]:
 
 
 def test_poly_notebook_flow_generates_headers_vectors_and_expected_outputs(tmp_path: Path):
-    cfg = BuildConfig(root_dir=tmp_path, util_dir=INCLUDE_DIR)
+    cfg = BuildConfig(root_dir=tmp_path)
 
     schema_classes = [
         PolyErrorField,
@@ -171,8 +171,8 @@ def test_poly_notebook_flow_generates_headers_vectors_and_expected_outputs(tmp_p
     ]
     for schema_class in schema_classes:
         schema_class.as_buildable(word_bw_supported=WORD_BW_SUPPORTED).run(cfg)
-    gen_array_utils(Float32, WORD_BW_SUPPORTED, cfg=cfg)
-    copy_streamutils(cfg)
+    gen_array_utils(Float32, WORD_BW_SUPPORTED, cfg=cfg, streamutils_dir=INCLUDE_DIR)
+    StreamUtilsStep(output_dir=INCLUDE_DIR).run(cfg)
 
     include_root = tmp_path / INCLUDE_DIR
     generated_headers = {path.name for path in include_root.iterdir() if path.is_file()}
@@ -227,7 +227,7 @@ def test_poly_notebook_flow_runs_vitis_csim(tmp_path: Path):
     if not vitis_path:
         pytest.skip("Vitis installation not found; skipping poly Vitis regression.")
 
-    cfg = BuildConfig(root_dir=tmp_path, util_dir=INCLUDE_DIR)
+    cfg = BuildConfig(root_dir=tmp_path)
     schema_classes = [
         PolyErrorField,
         CoeffArray,
@@ -237,8 +237,8 @@ def test_poly_notebook_flow_runs_vitis_csim(tmp_path: Path):
     ]
     for schema_class in schema_classes:
         schema_class.as_buildable(word_bw_supported=WORD_BW_SUPPORTED).run(cfg)
-    gen_array_utils(Float32, WORD_BW_SUPPORTED, cfg=cfg)
-    copy_streamutils(cfg)
+    gen_array_utils(Float32, WORD_BW_SUPPORTED, cfg=cfg, streamutils_dir=INCLUDE_DIR)
+    StreamUtilsStep(output_dir=INCLUDE_DIR).run(cfg)
     _copy_poly_vitis_resources(tmp_path)
 
     coeffs = CoeffArray()

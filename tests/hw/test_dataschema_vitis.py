@@ -6,7 +6,7 @@ import numpy as np
 import pytest
 
 from pysilicon.build.build import BuildConfig
-from pysilicon.build.streamutils import copy_streamutils
+from pysilicon.build.streamutils import StreamUtilsStep
 from pysilicon.hw.dataschema import DataArray, DataList, FloatField, IntField
 from pysilicon.toolchain import toolchain
 
@@ -171,7 +171,7 @@ def test_dataschema2_python_to_vitis_serialization(
 
     cfg = BuildConfig(root_dir=tmp_path)
     _generate_include_tree(packet_type, cfg=cfg, word_bw=word_bw)
-    copy_streamutils(cfg)
+    StreamUtilsStep().run(cfg)
 
     cpp_src = (
         SERIALIZE_CPP_PATH.read_text(encoding="utf-8")
@@ -221,7 +221,7 @@ def test_dataschema2_vitis_to_python_serialization(
 
     cfg = BuildConfig(root_dir=tmp_path)
     _generate_include_tree(packet_type, cfg=cfg, word_bw=word_bw)
-    copy_streamutils(cfg)
+    StreamUtilsStep().run(cfg)
 
     cpp_src = (
         DESERIALIZE_CPP_PATH.read_text(encoding="utf-8")
@@ -264,7 +264,7 @@ def test_streamutils_read_uint32_file_loopback(tmp_path: Path):
 
     cfg = BuildConfig(root_dir=tmp_path)
     _generate_include_tree(DemoPacket, cfg=cfg, word_bw=32)
-    copy_streamutils(cfg)
+    StreamUtilsStep().run(cfg)
 
     cpp_src = (
         UINT32_FILE_READ_CPP_PATH.read_text(encoding="utf-8")
@@ -300,7 +300,7 @@ def test_streamutils_read_uint32_file_len_loopback(tmp_path: Path):
 
     cfg = BuildConfig(root_dir=tmp_path)
     _generate_include_tree(DynSampData, cfg=cfg, word_bw=32)
-    copy_streamutils(cfg)
+    StreamUtilsStep().run(cfg)
 
     cpp_src = (
         UINT32_FILE_READ_CPP_PATH.read_text(encoding="utf-8")

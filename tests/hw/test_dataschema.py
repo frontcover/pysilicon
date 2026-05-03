@@ -5,7 +5,7 @@ import numpy as np
 import pytest
 
 from pysilicon.build.build import BuildConfig
-from pysilicon.build.streamutils import copy_streamutils
+from pysilicon.build.streamutils import MemMgrStep, StreamUtilsStep
 from pysilicon.hw import (
     DataArray as PublicDataArray,
     DataField as PublicDataField,
@@ -681,11 +681,12 @@ def test_gen_include_writes_under_cfg_root_and_include_dir(tmp_path: Path):
     assert '#include "../streamutils_tb.h"' in tb_content
 
 
-def test_gen_include_uses_cfg_util_dir_for_streamutils_include(tmp_path: Path):
-    cfg = BuildConfig(root_dir=tmp_path, util_dir="common")
-    result = Packet.as_buildable().run(cfg)
-    out_path = result.artifacts["include"]
-    content = out_path.read_text(encoding="utf-8")
+def test_gen_include_uses_streamutils_step_output_dir(tmp_path: Path):
+    su_step = StreamUtilsStep(output_dir="common")
+    schema_step = Packet.as_buildable()
+    schema_step.resolve_deps([su_step])
+    result = schema_step.run(BuildConfig(root_dir=tmp_path))
+    content = result.artifacts["include"].read_text(encoding="utf-8")
     tb_content = result.artifacts["tb_include"].read_text(encoding="utf-8")
 
     assert '#include "common/streamutils_hls.h"' in content
@@ -703,8 +704,10 @@ def test_gen_include_overwrites_existing_file(tmp_path: Path):
     assert "stale" not in out_path.read_text(encoding="utf-8")
 
 
-def test_copy_streamutils_hls_emits_tlast_status_enum(tmp_path: Path):
-    copy_streamutils(BuildConfig(root_dir=tmp_path))
+def test_streamutils_step_emits_tlast_status_enum(tmp_path: Path):
+    cfg = BuildConfig(root_dir=tmp_path)
+    StreamUtilsStep().run(cfg)
+    MemMgrStep().run(cfg)
     content = (tmp_path / "streamutils_hls.h").read_text(encoding="utf-8")
     cpp_content = (tmp_path / "streamutils.cpp").read_text(encoding="utf-8")
     memmgr_hpp = (tmp_path / "memmgr.hpp").read_text(encoding="utf-8")
@@ -727,14 +730,13 @@ def test_copy_streamutils_hls_emits_tlast_status_enum(tmp_path: Path):
     assert '#include "memmgr.hpp"' in memmgr_tb_hpp
 
 
-def test_copy_streamutils_can_skip_memmgr(tmp_path: Path):
-    copy_streamutils(BuildConfig(root_dir=tmp_path, copy_memmgr=False))
+def test_streamutils_step_without_memmgr(tmp_path: Path):
+    StreamUtilsStep().run(BuildConfig(root_dir=tmp_path))
 
     assert (tmp_path / "streamutils_hls.h").exists()
     assert (tmp_path / "streamutils_tb.h").exists()
     assert not (tmp_path / "memmgr.hpp").exists()
     assert not (tmp_path / "memmgr_tb.hpp").exists()
-    assert not (tmp_path / "memmgr.cpp").exists()
 
 
 def test_primitive_field_pack_unpack_helpers_are_empty():

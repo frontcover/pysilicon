@@ -13,17 +13,17 @@ from pathlib import Path
 import numpy as np
 from scipy.signal import correlate2d
 
-from pysilicon.build.build import BuildConfig
-from pysilicon.build.streamutils import copy_streamutils
+from pysilicon.build.build import BuildConfig, BuildDag
+from pysilicon.build.streamutils import StreamUtilsStep
 from pysilicon.hw.arrayutils import (
-    gen_array_utils,
+    ArrayUtilsStep,
     get_nwords,
     read_array,
     read_uint32_file,
     write_array,
     write_uint32_file,
 )
-from pysilicon.hw.dataschema import DataList, EnumField, IntField, MemAddr
+from pysilicon.hw.dataschema import DataList, DataSchemaStep, EnumField, IntField, MemAddr
 from pysilicon.hw.memory import AddrUnit, Memory
 from pysilicon.toolchain import toolchain
 from pysilicon.toolchain.stagetest import StageTest
@@ -53,12 +53,12 @@ MEM_AWIDTH = 64        # Memory address width for the external image memory
 MEM_AUNIT = AddrUnit.byte
 
 
-AddrField = MemAddr.specialize(bitwidth=MEM_AWIDTH, include_dir=INCLUDE_DIR)
+AddrField = MemAddr.specialize(bitwidth=MEM_AWIDTH)
 PixelField = IntField.specialize(bitwidth=PIXEL_BITWIDTH, signed=False, include_dir=INCLUDE_DIR)
 KernelField = IntField.specialize(bitwidth=KERNEL_BITWIDTH, signed=True, include_dir=INCLUDE_DIR)
-NrowField = IntField.specialize(bitwidth=16, signed=False, include_dir=INCLUDE_DIR)
-NcolField = IntField.specialize(bitwidth=16, signed=False, include_dir=INCLUDE_DIR)
-KernelSizeField = IntField.specialize(bitwidth=8, signed=False, include_dir=INCLUDE_DIR)
+NrowField = IntField.specialize(bitwidth=16, signed=False)
+NcolField = IntField.specialize(bitwidth=16, signed=False)
+KernelSizeField = IntField.specialize(bitwidth=8, signed=False)
 
 
 """
@@ -87,13 +87,11 @@ class Conv2DEvent(IntEnum):
 
 Conv2DErrorField = EnumField.specialize(
     enum_type=Conv2DError,
-    include_dir=INCLUDE_DIR,
     include_filename="conv2d_error.h",
 )
 Conv2DEventField = EnumField.specialize(
     enum_type=Conv2DEvent,
     bitwidth=3,
-    include_dir=INCLUDE_DIR,
     include_filename="conv2d_event.h",
 )
 
@@ -136,7 +134,6 @@ class Conv2DCmd(DataList):
                 "with each element represented as a fixed point integer of bit width specified by KERNEL_BITWIDTH with KERNEL_FBITS fractional bits."),
         },
     }
-    include_dir = INCLUDE_DIR
     include_filename = "conv2d_cmd.h"
 
 
@@ -147,12 +144,11 @@ class Conv2DResp(DataList):
             "description": "Error code indicating the status of the convolution operation",
         }
     }
-    include_dir = INCLUDE_DIR
     include_filename = "conv2d_resp.h"
 
 class Conv2DDebug(DataList):
     """
-    A schema for sending internal debug information from the 
+    A schema for sending internal debug information from the
     accelerator back to the testbench during co-simuation.
     """
     elements = {
@@ -165,7 +161,6 @@ class Conv2DDebug(DataList):
             "description": "Debug event emitted by the convolution accelerator",
         }
     }
-    include_dir = INCLUDE_DIR
     include_filename = "conv2d_debug.h"
 
 
@@ -474,15 +469,17 @@ class Conv2DTest(object):
 
     def gen_vitis_code(self) -> list[Path]:
         """Generate schema and utility headers needed for the Vitis flow."""
-        cfg = BuildConfig(root_dir=self.example_dir, util_dir=self.include_dir)
-        generated_paths: list[Path] = []
-        for schema_class in SCHEMA_CLASSES:
-            result = schema_class.as_buildable(word_bw_supported=WORD_BW_SUPPORTED).run(cfg)
-            generated_paths.append(result.artifacts["include"])
-        generated_paths.append(gen_array_utils(PixelField, WORD_BW_SUPPORTED, cfg=cfg))
-        generated_paths.append(gen_array_utils(KernelField, WORD_BW_SUPPORTED, cfg=cfg))
-        copy_streamutils(cfg)
-        return generated_paths
+        cfg = BuildConfig(root_dir=self.example_dir)
+        dag = BuildDag()
+        dag.add(StreamUtilsStep(output_dir=self.include_dir))
+        schema_steps = [
+            dag.add(DataSchemaStep(cls, word_bw_supported=WORD_BW_SUPPORTED, include_dir=self.include_dir))
+            for cls in SCHEMA_CLASSES
+        ]
+        dag.add(ArrayUtilsStep(PixelField, WORD_BW_SUPPORTED))
+        dag.add(ArrayUtilsStep(KernelField, WORD_BW_SUPPORTED))
+        results = dag.run(cfg)
+        return [results[step.name].artifacts["include"] for step in schema_steps]
 
     def write_input_files(self, data_dir: Path | None = None) -> Path:
         """Write Conv2D test inputs for the file-based Vitis testbench."""

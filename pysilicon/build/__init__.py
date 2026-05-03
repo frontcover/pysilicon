@@ -7,15 +7,20 @@ from typing import Any
 from pysilicon.build.build import (
     Buildable,
     BuildConfig,
+    BuildDag,
     BuildResult,
     BuildStep,
 )
+from pysilicon.build.streamutils import MemMgrStep, StreamUtilsStep
 
 __all__ = [
     "BuildConfig",
+    "BuildDag",
     "BuildResult",
     "BuildStep",
     "Buildable",
+    "MemMgrStep",
+    "StreamUtilsStep",
     "gen_array_utils",
 ]
 

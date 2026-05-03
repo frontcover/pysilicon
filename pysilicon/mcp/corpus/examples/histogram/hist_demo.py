@@ -15,7 +15,7 @@ import numpy as np
 import numpy.typing as npt
 
 from pysilicon.build.build import BuildConfig
-from pysilicon.build.streamutils import copy_streamutils
+from pysilicon.build.streamutils import StreamUtilsStep
 from pysilicon.hw.arrayutils import (
     gen_array_utils,
     get_nwords,
@@ -407,14 +407,14 @@ class HistTest(object):
         
     def gen_vitis_code(self) -> list[Path]:
         """Generate schema and utility headers needed for the Vitis flow."""
-        cfg = BuildConfig(root_dir=self.example_dir, util_dir=self.include_dir)
+        cfg = BuildConfig(root_dir=self.example_dir)
         generated_paths: list[Path] = []
         for schema_class in SCHEMA_CLASSES:
             result = schema_class.as_buildable(word_bw_supported=WORD_BW_SUPPORTED).run(cfg)
             generated_paths.append(result.artifacts["include"])
-        generated_paths.append(gen_array_utils(Float32, WORD_BW_SUPPORTED, cfg=cfg))
-        generated_paths.append(gen_array_utils(Uint32Field, WORD_BW_SUPPORTED, cfg=cfg))
-        copy_streamutils(cfg)
+        generated_paths.append(gen_array_utils(Float32, WORD_BW_SUPPORTED, cfg=cfg, streamutils_dir=self.include_dir))
+        generated_paths.append(gen_array_utils(Uint32Field, WORD_BW_SUPPORTED, cfg=cfg, streamutils_dir=self.include_dir))
+        StreamUtilsStep(output_dir=self.include_dir).run(cfg)
         return generated_paths
 
     def write_input_files(self, data_dir: Path | None = None) -> Path:

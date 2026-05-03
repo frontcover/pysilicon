@@ -14,17 +14,17 @@ from pathlib import Path
 import numpy as np
 import numpy.typing as npt
 
-from pysilicon.build.build import BuildConfig
-from pysilicon.build.streamutils import copy_streamutils
+from pysilicon.build.build import BuildConfig, BuildDag
+from pysilicon.build.streamutils import StreamUtilsStep
 from pysilicon.hw.arrayutils import (
-    gen_array_utils,
+    ArrayUtilsStep,
     get_nwords,
     read_array,
     read_uint32_file,
     write_array,
     write_uint32_file,
 )
-from pysilicon.hw.dataschema import DataArray, DataList, EnumField, FloatField, IntField, MemAddr
+from pysilicon.hw.dataschema import DataArray, DataList, DataSchemaStep, EnumField, FloatField, IntField, MemAddr
 from pysilicon.hw.memory import AddrUnit, Memory
 from pysilicon.toolchain import toolchain
 from pysilicon.toolchain.stagetest import StageTest
@@ -98,7 +98,7 @@ MEM_DWIDTH = 32         # memory data width
 MEM_AWIDTH = 64         # memory address width
 MEM_AUNIT = AddrUnit.byte  # memory address unit
 
-AddrField = MemAddr.specialize(bitwidth=MEM_AWIDTH, include_dir=INCLUDE_DIR)
+AddrField = MemAddr.specialize(bitwidth=MEM_AWIDTH)
 Float32 = FloatField.specialize(bitwidth=32, include_dir=INCLUDE_DIR)
 
 """
@@ -113,7 +113,7 @@ class HistError(IntEnum):
     ADDRESS_ERROR = 3
 
 
-HistErrorField = EnumField.specialize(enum_type=HistError, include_dir=INCLUDE_DIR)
+HistErrorField = EnumField.specialize(enum_type=HistError)
 
 
 class HistCmd(DataList):
@@ -149,7 +149,6 @@ class HistCmd(DataList):
             "description": "Base address of the output histogram counts buffer",
         },
     }
-    include_dir = INCLUDE_DIR
 
 
 class HistResp(DataList):
@@ -165,7 +164,6 @@ class HistResp(DataList):
             "description": "Histogram execution status code",
         },
     }
-    include_dir = INCLUDE_DIR
 
 
 SCHEMA_CLASSES = [
@@ -407,15 +405,17 @@ class HistTest(object):
         
     def gen_vitis_code(self) -> list[Path]:
         """Generate schema and utility headers needed for the Vitis flow."""
-        cfg = BuildConfig(root_dir=self.example_dir, util_dir=self.include_dir)
-        generated_paths: list[Path] = []
-        for schema_class in SCHEMA_CLASSES:
-            result = schema_class.as_buildable(word_bw_supported=WORD_BW_SUPPORTED).run(cfg)
-            generated_paths.append(result.artifacts["include"])
-        generated_paths.append(gen_array_utils(Float32, WORD_BW_SUPPORTED, cfg=cfg))
-        generated_paths.append(gen_array_utils(Uint32Field, WORD_BW_SUPPORTED, cfg=cfg))
-        copy_streamutils(cfg)
-        return generated_paths
+        cfg = BuildConfig(root_dir=self.example_dir)
+        dag = BuildDag()
+        dag.add(StreamUtilsStep(output_dir=self.include_dir))
+        schema_steps = [
+            dag.add(DataSchemaStep(cls, word_bw_supported=WORD_BW_SUPPORTED, include_dir=self.include_dir))
+            for cls in SCHEMA_CLASSES
+        ]
+        dag.add(ArrayUtilsStep(Float32, WORD_BW_SUPPORTED))
+        dag.add(ArrayUtilsStep(Uint32Field, WORD_BW_SUPPORTED))
+        results = dag.run(cfg)
+        return [results[step.name].artifacts["include"] for step in schema_steps]
 
     def write_input_files(self, data_dir: Path | None = None) -> Path:
         """Write test data files for the Vitis testbench.

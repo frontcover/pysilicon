@@ -87,7 +87,7 @@ def test_nwords_matches_serialized_length_float_matrix() -> None:
 def test_gen_array_utils_writes_companion_tb_header(tmp_path: Path):
     Int16Inc = IntField.specialize(bitwidth=16, signed=True, include_dir="include")
 
-    out_path = gen_array_utils(Int16Inc, [32], cfg=BuildConfig(root_dir=tmp_path, util_dir="common"))
+    out_path = gen_array_utils(Int16Inc, [32], cfg=BuildConfig(root_dir=tmp_path), streamutils_dir="common")
     tb_path = tmp_path / "include" / "int16_array_utils_tb.h"
 
     content = out_path.read_text(encoding="utf-8")
