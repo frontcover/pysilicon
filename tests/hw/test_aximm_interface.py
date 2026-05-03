@@ -13,6 +13,8 @@ read  (LITE)              — per-word sequential reads, correct return value
 Address out of range      — RuntimeError on write and read
 Concurrent masters        — serialization on same slave bus
 Validation                — missing clock, missing binding
+DirectMMIF                — write, read, latency
+MMIFMaster schema helpers — read_schema, write_schema, read_array, write_array
 """
 from __future__ import annotations
 
@@ -25,9 +27,10 @@ import pytest
 from pysilicon.hw.aximm import (
     AXIMMAddressRange,
     AXIMMCrossBarIF,
-    AXIMMCrossBarIFMaster,
-    AXIMMCrossBarIFSlave,
     AXIMMProtocol,
+    DirectMMIF,
+    MMIFMaster,
+    MMIFSlave,
     assign_address_ranges,
     Words,
 )
@@ -97,8 +100,8 @@ class TestAXIMMAddressRange:
 # ---------------------------------------------------------------------------
 
 class TestAssignAddressRanges:
-    def _make_slave(self, sim: Simulation) -> AXIMMCrossBarIFSlave:
-        return AXIMMCrossBarIFSlave(sim=sim, bitwidth=32)
+    def _make_slave(self, sim: Simulation) -> MMIFSlave:
+        return MMIFSlave(sim=sim, bitwidth=32)
 
     def test_basic_assignment(self):
         sim = _make_sim()
@@ -141,50 +144,50 @@ class TestBind:
     def test_wrong_type_master_slot(self):
         sim = _make_sim()
         xbar = _make_xbar(sim, _make_clk(), nports_master=1, nports_slave=1)
-        wrong = AXIMMCrossBarIFSlave(sim=sim, bitwidth=32)
+        wrong = MMIFSlave(sim=sim, bitwidth=32)
         with pytest.raises(TypeError):
             xbar.bind("master_0", wrong)
 
     def test_wrong_type_slave_slot(self):
         sim = _make_sim()
         xbar = _make_xbar(sim, _make_clk(), nports_master=1, nports_slave=1)
-        wrong = AXIMMCrossBarIFMaster(sim=sim, bitwidth=32)
+        wrong = MMIFMaster(sim=sim, bitwidth=32)
         with pytest.raises(TypeError):
             xbar.bind("slave_0", wrong)
 
     def test_master_out_of_range(self):
         sim = _make_sim()
         xbar = _make_xbar(sim, _make_clk(), nports_master=1, nports_slave=1)
-        ep = AXIMMCrossBarIFMaster(sim=sim, bitwidth=32)
+        ep = MMIFMaster(sim=sim, bitwidth=32)
         with pytest.raises(KeyError):
             xbar.bind("master_5", ep)
 
     def test_slave_out_of_range(self):
         sim = _make_sim()
         xbar = _make_xbar(sim, _make_clk(), nports_master=1, nports_slave=1)
-        ep = AXIMMCrossBarIFSlave(sim=sim, bitwidth=32)
+        ep = MMIFSlave(sim=sim, bitwidth=32)
         with pytest.raises(KeyError):
             xbar.bind("slave_5", ep)
 
     def test_invalid_ep_name(self):
         sim = _make_sim()
         xbar = _make_xbar(sim, _make_clk())
-        ep = AXIMMCrossBarIFMaster(sim=sim, bitwidth=32)
+        ep = MMIFMaster(sim=sim, bitwidth=32)
         with pytest.raises(KeyError):
             xbar.bind("port_0", ep)
 
     def test_bitwidth_mismatch(self):
         sim = _make_sim()
         xbar = _make_xbar(sim, _make_clk(), bitwidth=32)
-        ep = AXIMMCrossBarIFMaster(sim=sim, bitwidth=64)
+        ep = MMIFMaster(sim=sim, bitwidth=64)
         with pytest.raises(ValueError, match="bitwidth"):
             xbar.bind("master_0", ep)
 
     def test_double_bind_raises(self):
         sim = _make_sim()
         xbar = _make_xbar(sim, _make_clk())
-        ep1 = AXIMMCrossBarIFMaster(sim=sim, bitwidth=32)
-        ep2 = AXIMMCrossBarIFMaster(sim=sim, bitwidth=32)
+        ep1 = MMIFMaster(sim=sim, bitwidth=32)
+        ep2 = MMIFMaster(sim=sim, bitwidth=32)
         xbar.bind("master_0", ep1)
         with pytest.raises(ValueError):
             xbar.bind("master_0", ep2)
@@ -197,12 +200,23 @@ class TestBind:
     def test_master_port_index_set_on_bind(self):
         sim = _make_sim()
         xbar = _make_xbar(sim, _make_clk(), nports_master=2, nports_slave=1)
-        ep0 = AXIMMCrossBarIFMaster(sim=sim, bitwidth=32)
-        ep1 = AXIMMCrossBarIFMaster(sim=sim, bitwidth=32)
+        ep0 = MMIFMaster(sim=sim, bitwidth=32)
+        ep1 = MMIFMaster(sim=sim, bitwidth=32)
         xbar.bind("master_0", ep0)
         xbar.bind("master_1", ep1)
         assert ep0.master_port == 0
         assert ep1.master_port == 1
+
+    def test_protocol_stored_per_slave(self):
+        """Protocol kwarg on bind() is stored per slave port."""
+        sim = _make_sim()
+        xbar = _make_xbar(sim, _make_clk(), nports_master=1, nports_slave=2)
+        s0 = MMIFSlave(sim=sim, bitwidth=32)
+        s1 = MMIFSlave(sim=sim, bitwidth=32)
+        xbar.bind("slave_0", s0)                                   # default FULL
+        xbar.bind("slave_1", s1, protocol=AXIMMProtocol.LITE)
+        assert xbar._slave_protocols["slave_0"] == AXIMMProtocol.FULL
+        assert xbar._slave_protocols["slave_1"] == AXIMMProtocol.LITE
 
 
 # ---------------------------------------------------------------------------
@@ -244,22 +258,21 @@ class AXIMMHarness:
         self.write_calls: list[list[tuple[np.ndarray, int]]] = [[] for _ in range(nports_slave)]
         self.read_calls:  list[list[tuple[int, int]]]       = [[] for _ in range(nports_slave)]
 
-        self.slave_eps: list[AXIMMCrossBarIFSlave] = []
+        self.slave_eps: list[MMIFSlave] = []
         for j in range(nports_slave):
-            ep = AXIMMCrossBarIFSlave(
+            ep = MMIFSlave(
                 sim=self.sim,
-                protocol=protocol,
                 bitwidth=32,
                 rx_write_proc=self._make_write_proc(j),
                 rx_read_proc=self._make_read_proc(j),
                 latency_per_word=latency_per_word,
             )
             self.slave_eps.append(ep)
-            self.xbar.bind(f"slave_{j}", ep)
+            self.xbar.bind(f"slave_{j}", ep, protocol=protocol)
 
-        self.master_eps: list[AXIMMCrossBarIFMaster] = []
+        self.master_eps: list[MMIFMaster] = []
         for i in range(nports_master):
-            ep = AXIMMCrossBarIFMaster(sim=self.sim, bitwidth=32)
+            ep = MMIFMaster(sim=self.sim, bitwidth=32)
             self.master_eps.append(ep)
             self.xbar.bind(f"master_{i}", ep)
 
@@ -680,7 +693,7 @@ class TestConcurrentMasters:
 class TestUnbound:
     def test_write_unbound_raises(self):
         sim = _make_sim()
-        ep = AXIMMCrossBarIFMaster(sim=sim, bitwidth=32)
+        ep = MMIFMaster(sim=sim, bitwidth=32)
         words = np.array([1], dtype=np.uint32)
         errors: list[Exception] = []
 
@@ -697,7 +710,7 @@ class TestUnbound:
 
     def test_read_unbound_raises(self):
         sim = _make_sim()
-        ep = AXIMMCrossBarIFMaster(sim=sim, bitwidth=32)
+        ep = MMIFMaster(sim=sim, bitwidth=32)
         errors: list[Exception] = []
 
         def proc():
@@ -709,3 +722,195 @@ class TestUnbound:
         sim.env.process(proc())
         sim.env.run()
         assert len(errors) == 1
+
+
+# ---------------------------------------------------------------------------
+# DirectMMIF tests
+# ---------------------------------------------------------------------------
+
+class TestDirectMMIF:
+    def _make_direct(self, latency_write=0., latency_read=0., latency_read_return=0.):
+        sim = _make_sim()
+        clk = _make_clk(freq=1.0)
+        mem: dict[int, int] = {}
+        write_calls: list[tuple] = []
+        read_calls:  list[tuple] = []
+
+        def rx_write(words: Words, addr: int):
+            write_calls.append((np.array(words, copy=True), addr))
+            for i, w in enumerate(words):
+                mem[addr + i] = int(w)
+            yield sim.env.timeout(0)
+
+        def rx_read(nwords: int, addr: int):
+            read_calls.append((nwords, addr))
+            yield sim.env.timeout(0)
+            return np.array([mem.get(addr + i, 0) for i in range(nwords)], dtype=np.uint32)
+
+        master_ep = MMIFMaster(sim=sim, bitwidth=32)
+        slave_ep  = MMIFSlave(sim=sim, bitwidth=32, rx_write_proc=rx_write, rx_read_proc=rx_read)
+
+        direct = DirectMMIF(
+            sim=sim, clk=clk,
+            latency_write=latency_write,
+            latency_read=latency_read,
+            latency_read_return=latency_read_return,
+        )
+        direct.bind("master", master_ep)
+        direct.bind("slave",  slave_ep)
+
+        return sim, sim.env, master_ep, slave_ep, direct, mem, write_calls, read_calls
+
+    def test_wrong_type_master(self):
+        sim = _make_sim()
+        direct = DirectMMIF(sim=sim, clk=_make_clk())
+        with pytest.raises(TypeError):
+            direct.bind("master", MMIFSlave(sim=sim, bitwidth=32))
+
+    def test_wrong_type_slave(self):
+        sim = _make_sim()
+        direct = DirectMMIF(sim=sim, clk=_make_clk())
+        with pytest.raises(TypeError):
+            direct.bind("slave", MMIFMaster(sim=sim, bitwidth=32))
+
+    def test_invalid_ep_name(self):
+        sim = _make_sim()
+        direct = DirectMMIF(sim=sim, clk=_make_clk())
+        with pytest.raises(KeyError):
+            direct.bind("port_0", MMIFMaster(sim=sim, bitwidth=32))
+
+    def test_write_data_delivered(self):
+        sim, env, master, _, _, mem, write_calls, _ = self._make_direct()
+        words = np.array([10, 20, 30], dtype=np.uint32)
+
+        def proc():
+            yield env.process(master.write(words, 0))
+
+        env.process(proc())
+        env.run()
+        assert len(write_calls) == 1
+        npt.assert_array_equal(write_calls[0][0], words)
+        assert write_calls[0][1] == 0
+
+    def test_read_data_returned(self):
+        sim, env, master, _, _, mem, _, read_calls = self._make_direct()
+        mem[0] = 42
+        mem[1] = 99
+        results: list[np.ndarray] = []
+
+        def proc():
+            p = env.process(master.read(2, 0))
+            yield p
+            results.append(p.value)
+
+        env.process(proc())
+        env.run()
+        npt.assert_array_equal(results[0], [42, 99])
+
+    def test_write_latency(self):
+        sim, env, master, _, _, _, _, _ = self._make_direct(latency_write=3.0)
+        t_done: list[float] = []
+        words = np.array([1], dtype=np.uint32)
+
+        def proc():
+            yield env.process(master.write(words, 0))
+            t_done.append(env.now)
+
+        env.process(proc())
+        env.run()
+        assert t_done[0] == pytest.approx(3.0)
+
+    def test_read_latency(self):
+        sim, env, master, _, _, _, _, _ = self._make_direct(
+            latency_read=2.0, latency_read_return=1.0
+        )
+        t_done: list[float] = []
+
+        def proc():
+            p = env.process(master.read(3, 0))  # nwords=3 adds 3 to return leg
+            yield p
+            t_done.append(env.now)
+
+        env.process(proc())
+        env.run()
+        # 2 (request) + 0 (slave instant) + (1+3) (return) = 6.0
+        assert t_done[0] == pytest.approx(6.0)
+
+    def test_address_passed_directly(self):
+        """DirectMMIF passes the raw address to the slave callback."""
+        sim, env, master, _, _, _, write_calls, _ = self._make_direct()
+        words = np.array([7], dtype=np.uint32)
+
+        def proc():
+            yield env.process(master.write(words, 0x1234))
+
+        env.process(proc())
+        env.run()
+        assert write_calls[0][1] == 0x1234
+
+
+# ---------------------------------------------------------------------------
+# MMIFMaster schema helpers
+# ---------------------------------------------------------------------------
+
+class TestMMIFMasterSchemaHelpers:
+    def _make_harness(self):
+        sim = _make_sim()
+        clk = _make_clk(freq=1.0)
+        mem: dict[int, int] = {}
+
+        def rx_write(words: Words, addr: int):
+            for i, w in enumerate(words):
+                mem[addr + i] = int(w)
+            yield sim.env.timeout(0)
+
+        def rx_read(nwords: int, addr: int):
+            yield sim.env.timeout(0)
+            return np.array([mem.get(addr + i, 0) for i in range(nwords)], dtype=np.uint32)
+
+        master_ep = MMIFMaster(sim=sim, bitwidth=32)
+        slave_ep  = MMIFSlave(sim=sim, bitwidth=32, rx_write_proc=rx_write, rx_read_proc=rx_read)
+        direct    = DirectMMIF(sim=sim, clk=clk)
+        direct.bind("master", master_ep)
+        direct.bind("slave",  slave_ep)
+        return sim, sim.env, master_ep, mem
+
+    def test_write_schema_read_schema(self):
+        from pysilicon.hw.dataschema import DataList, IntField
+        U32 = IntField.specialize(bitwidth=32, signed=False)
+
+        class TwoWords(DataList):
+            elements = {"a": U32, "b": U32}
+
+        sim, env, master, mem = self._make_harness()
+        result = []
+
+        def proc():
+            obj = TwoWords(a=0xAA, b=0xBB)
+            yield from master.write_schema(obj, addr=0)
+            recovered = yield from master.read_schema(TwoWords, addr=0)
+            result.append(recovered)
+
+        env.process(proc())
+        env.run()
+        assert int(result[0].a) == 0xAA
+        assert int(result[0].b) == 0xBB
+
+    def test_write_array_read_array_float32(self):
+        from pysilicon.hw.dataschema import FloatField
+        F32 = FloatField.specialize(bitwidth=32)
+
+        sim, env, master, _ = self._make_harness()
+        values = np.array([1.0, 2.5, -3.14], dtype=np.float32)
+        result = []
+
+        def proc():
+            yield from master.write_array(values, F32, addr=0)
+            arr = yield from master.read_array(F32, count=3, addr=0)
+            result.append(arr)
+
+        env.process(proc())
+        env.run()
+        assert isinstance(result[0], np.ndarray)
+        assert result[0].dtype == np.float32
+        assert np.allclose(result[0], values, atol=1e-6)

@@ -23,9 +23,9 @@ import numpy as np
 
 from pysilicon.hw.aximm import (
     AXIMMCrossBarIF,
-    AXIMMCrossBarIFMaster,
-    AXIMMCrossBarIFSlave,
     AXIMMProtocol,
+    MMIFMaster,
+    MMIFSlave,
     assign_address_ranges,
     Words,
 )
@@ -51,9 +51,8 @@ class MemBank(SimObj):
     def __post_init__(self) -> None:
         super().__post_init__()
         self._mem: dict[int, int] = {}
-        self.slave_ep = AXIMMCrossBarIFSlave(
+        self.slave_ep = MMIFSlave(
             sim=self.sim,
-            protocol=AXIMMProtocol.FULL,
             bitwidth=32,
             rx_write_proc=self.rx_write,
             rx_read_proc=self.rx_read,
@@ -90,9 +89,8 @@ class RegFile(SimObj):
     def __post_init__(self) -> None:
         super().__post_init__()
         self._regs: dict[int, int] = {}
-        self.slave_ep = AXIMMCrossBarIFSlave(
+        self.slave_ep = MMIFSlave(
             sim=self.sim,
-            protocol=AXIMMProtocol.LITE,
             bitwidth=32,
             rx_write_proc=self.rx_write,
             rx_read_proc=self.rx_read,
@@ -124,7 +122,7 @@ class CPU(SimObj):
 
     def __post_init__(self) -> None:
         super().__post_init__()
-        self.master_ep = AXIMMCrossBarIFMaster(sim=self.sim, bitwidth=32)
+        self.master_ep = MMIFMaster(sim=self.sim, bitwidth=32)
         self.read_results: dict[str, np.ndarray] = {}
 
     def run_proc(self) -> ProcessGen[None]:
@@ -178,7 +176,7 @@ class DMA(SimObj):
 
     def __post_init__(self) -> None:
         super().__post_init__()
-        self.master_ep = AXIMMCrossBarIFMaster(sim=self.sim, bitwidth=32)
+        self.master_ep = MMIFMaster(sim=self.sim, bitwidth=32)
         self.write_done_time: float = 0.0
 
     def run_proc(self) -> ProcessGen[None]:
@@ -224,8 +222,8 @@ class AXIMMDemo:
 
         self.xbar.bind("master_0", self.cpu.master_ep)
         self.xbar.bind("master_1", self.dma.master_ep)
-        self.xbar.bind("slave_0",  self.mem.slave_ep)
-        self.xbar.bind("slave_1",  self.regs.slave_ep)
+        self.xbar.bind("slave_0",  self.mem.slave_ep)                          # FULL (default)
+        self.xbar.bind("slave_1",  self.regs.slave_ep, protocol=AXIMMProtocol.LITE)
 
         assign_address_ranges(
             [self.mem.slave_ep, self.regs.slave_ep],

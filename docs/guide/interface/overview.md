@@ -94,7 +94,8 @@ data = proc.value   # numpy array of shape (4,)
 |---|---|---|
 | `StreamIF` | `pysilicon.hw.interface` | Unidirectional data stream (AXI4-Stream or HLS stream) |
 | `CrossBarIF` | `pysilicon.hw.interface` | Port-indexed stream crossbar (n inputs × m outputs) |
-| `AXIMMCrossBarIF` | `pysilicon.hw.aximm` | AXI memory-mapped crossbar with address-based routing |
+| `AXIMMCrossBarIF` | `pysilicon.hw.aximm` | AXI memory-mapped crossbar; endpoints are `MMIFMaster` / `MMIFSlave` |
+| `DirectMMIF` | `pysilicon.hw.aximm` | Point-to-point MM link (BRAM / local scratchpad) |
 
 ## Lifecycle
 
@@ -109,4 +110,4 @@ Interfaces participate in the standard SimPy three-phase lifecycle managed by `S
 ## Next steps
 
 - [Stream Interfaces](./stream.md) — unidirectional streaming with `StreamIF` and `CrossBarIF`
-- [AXI-MM Interfaces](./aximm.md) — memory-mapped read/write with `AXIMMCrossBarIF`
+- [MM Interfaces](./aximm.md) — memory-mapped read/write with `AXIMMCrossBarIF` and `DirectMMIF`
