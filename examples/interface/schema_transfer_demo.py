@@ -28,7 +28,7 @@ Architecture:
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Callable
 
 from pysilicon.hw.clock import Clock
 from pysilicon.hw.dataschema import DataList, IntField
@@ -39,12 +39,10 @@ from pysilicon.hw.dataunion import (
     SchemaRegistry,
     register_schema,
 )
-from pysilicon.hw.interface import StreamIF, StreamIFMaster, StreamIFSlave
+from pysilicon.hw.interface import StreamIF
 from pysilicon.hw.schema_transfer_interface import (
-    SchemaTransferIF,
     SchemaTransferIFMaster,
     SchemaTransferIFSlave,
-    StreamTransport,
 )
 from pysilicon.simulation.simulation import Simulation
 from pysilicon.simulation.simobj import ProcessGen, SimObj
@@ -110,8 +108,9 @@ class Sender(SimObj):
 
     def __post_init__(self) -> None:
         super().__post_init__()
-        self.stream_ep = StreamIFMaster(sim=self.sim, bitwidth=self.bitwidth)
-        self.schema_ep: SchemaTransferIFMaster | None = None  # set during wire-up
+        self.schema_ep = SchemaTransferIFMaster(
+            name=f'{self.name}_schema', sim=self.sim, bitwidth=self.bitwidth
+        )
 
     def run_proc(self) -> ProcessGen[None]:
         for obj in self.objects:
@@ -122,7 +121,9 @@ class Sender(SimObj):
 class Receiver(SimObj):
     """Receives deserialized objects from SchemaTransferIF via rx_proc callback."""
 
+    schema_type: type | None = None
     bitwidth: int = 32
+    rx_proc: Callable[[Any], ProcessGen[None]] | None = None
 
     def __init_subclass__(cls, **kwargs):
         super().__init_subclass__(**kwargs)
@@ -130,8 +131,11 @@ class Receiver(SimObj):
     def __post_init__(self) -> None:
         super().__post_init__()
         self.received: list = []
-        self.stream_ep = StreamIFSlave(sim=self.sim, bitwidth=self.bitwidth)
-        self.schema_ep: SchemaTransferIFSlave | None = None  # set during wire-up
+        self.schema_ep = SchemaTransferIFSlave(
+            name=f'{self.name}_schema', sim=self.sim,
+            schema_type=self.schema_type, bitwidth=self.bitwidth,
+            rx_proc=self.rx_proc if self.rx_proc is not None else self.on_object,
+        )
 
     def on_object(self, obj: Any) -> ProcessGen[None]:
         """Default callback: collect every received object."""
@@ -139,34 +143,11 @@ class Receiver(SimObj):
         yield self.env.timeout(0)
 
 
-def wire_up(
-    sim: Simulation,
-    sender: Sender,
-    receiver: Receiver,
-    schema_type: type,
-    clk: Clock,
-    rx_proc=None,
-) -> None:
-    """Connect sender and receiver through a StreamIF + SchemaTransferIF."""
+def wire_up(sim: Simulation, sender: Sender, receiver: Receiver, clk: Clock) -> None:
+    """Connect sender and receiver through a StreamIF."""
     stream_if = StreamIF(sim=sim, clk=clk)
-    stream_if.bind("master", sender.stream_ep)
-    stream_if.bind("slave",  receiver.stream_ep)
-
-    transport = StreamTransport(
-        master_ep=sender.stream_ep,
-        slave_ep=receiver.stream_ep,
-    )
-
-    sender.schema_ep = SchemaTransferIFMaster(
-        sim=sim, transport=transport, bitwidth=sender.bitwidth
-    )
-    receiver.schema_ep = SchemaTransferIFSlave(
-        sim=sim,
-        transport=transport,
-        schema_type=schema_type,
-        bitwidth=receiver.bitwidth,
-        rx_proc=rx_proc if rx_proc is not None else receiver.on_object,
-    )
+    stream_if.bind("master", sender.schema_ep.stream_ep)
+    stream_if.bind("slave",  receiver.schema_ep.stream_ep)
 
 
 # ---------------------------------------------------------------------------
@@ -192,9 +173,9 @@ class SingleTypeDemo:
                 TempPacket(temp_raw=75,  sensor_id=3),
             ],
         )
-        self.logger = Receiver(sim=self.sim)
+        self.logger = Receiver(sim=self.sim, schema_type=TempPacket)
 
-        wire_up(self.sim, self.sensor, self.logger, TempPacket, clk)
+        wire_up(self.sim, self.sensor, self.logger, clk)
 
     def run_and_check(self) -> None:
         print("=" * 55)
@@ -245,7 +226,6 @@ class MultiTypeDemo:
             objects.append(du)
 
         self.hub       = Sender(sim=self.sim, objects=objects)
-        self.processor = Receiver(sim=self.sim)
         self.dispatch_log: list[tuple[type, Any]] = []
 
         self._handlers = {
@@ -254,8 +234,10 @@ class MultiTypeDemo:
             PressureMeasurement: self._on_press,
         }
 
-        wire_up(self.sim, self.hub, self.processor, SensorDU, clk,
-                rx_proc=self._dispatch)
+        self.processor = Receiver(
+            sim=self.sim, schema_type=SensorDU, rx_proc=self._dispatch
+        )
+        wire_up(self.sim, self.hub, self.processor, clk)
 
     # ----- dispatch table -----
 
@@ -313,18 +295,15 @@ def queue_receive_demo() -> None:
     env = sim.env
     clk = Clock(freq=1e9)
 
-    stream_if = StreamIF(sim=sim, clk=clk)
-    stream_master = StreamIFMaster(sim=sim, bitwidth=32)
-    stream_slave  = StreamIFSlave(sim=sim, bitwidth=32)
-    stream_if.bind("master", stream_master)
-    stream_if.bind("slave",  stream_slave)
-
-    transport = StreamTransport(master_ep=stream_master, slave_ep=stream_slave)
-    schema_master = SchemaTransferIFMaster(sim=sim, transport=transport, bitwidth=32)
+    schema_master = SchemaTransferIFMaster(sim=sim, bitwidth=32)
     schema_slave  = SchemaTransferIFSlave(
-        sim=sim, transport=transport, schema_type=TempPacket, bitwidth=32,
+        sim=sim, schema_type=TempPacket, bitwidth=32,
         # No rx_proc — consumer polls queue directly
     )
+
+    stream_if = StreamIF(sim=sim, clk=clk)
+    stream_if.bind("master", schema_master.stream_ep)
+    stream_if.bind("slave",  schema_slave.stream_ep)
 
     received: list = []
 
@@ -341,7 +320,7 @@ def queue_receive_demo() -> None:
             yield from schema_master.write(TempPacket(temp_raw=t, sensor_id=sid))
 
     schema_slave.pre_sim()
-    env.process(stream_slave.run_proc())
+    env.process(schema_slave.stream_ep.run_proc())
     c = env.process(consumer())
     env.process(producer())
     env.run(until=c)

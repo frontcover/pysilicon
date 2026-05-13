@@ -29,6 +29,20 @@ from .schema_transfer_interface import (
     SchemaTransferIFSlave,
     StreamTransport,
 )
+from .memif import (
+    AXIMMAddressRange,
+    AXIMMCrossBarIF,
+    AXIMMProtocol,
+    DirectMMIF,
+    MMIFMaster,
+    MMIFSlave,
+    assign_address_ranges,
+)
+from .memory import (
+    AddrUnit,
+    Memory,
+    MemComponent,
+)
 
 __all__ = [
     "DataSchema",
@@ -54,4 +68,14 @@ __all__ = [
     "ArrayTransferIFMaster",
     "ArrayTransferIFSlave",
     "ArrayTransferIF",
+    "AXIMMAddressRange",
+    "AXIMMCrossBarIF",
+    "AXIMMProtocol",
+    "DirectMMIF",
+    "MMIFMaster",
+    "MMIFSlave",
+    "assign_address_ranges",
+    "AddrUnit",
+    "Memory",
+    "MemComponent",
 ]

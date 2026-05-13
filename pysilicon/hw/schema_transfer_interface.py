@@ -111,47 +111,65 @@ class StreamTransport(PhysicalTransport):
 
 @dataclass
 class SchemaTransferIFMaster(InterfaceEndpoint):
-    """Master endpoint: serializes any object and forwards words to the transport."""
+    """Master endpoint: serializes any object and forwards words to the transport.
 
-    transport: PhysicalTransport | None = None
+    Creates and owns an internal ``StreamIFMaster`` (``stream_ep``).  Bind
+    ``stream_ep`` to a ``StreamIF`` to complete the physical connection.
+    """
+
     bitwidth: int = 32
+    stream_ep: StreamIFMaster = field(init=False, repr=False)
+    _transport: StreamTransport = field(init=False, repr=False)
+
+    def __post_init__(self) -> None:
+        super().__post_init__()
+        self.stream_ep = StreamIFMaster(
+            name=f'{self.name}_stream', sim=self.sim, bitwidth=self.bitwidth
+        )
+        self._transport = StreamTransport(master_ep=self.stream_ep)
 
     def write(self, obj: Any) -> ProcessGen[None]:
         """Serialize *obj* and transmit through the transport."""
-        yield from self.transport.write_words(obj.serialize(word_bw=self.bitwidth))
+        yield from self._transport.write_words(obj.serialize(word_bw=self.bitwidth))
 
 
 @dataclass
 class SchemaTransferIFSlave(InterfaceEndpoint):
     """Slave endpoint: receives word bursts and deserializes them via *schema_type*.
 
+    Creates and owns an internal ``StreamIFSlave`` (``stream_ep``).  Bind
+    ``stream_ep`` to a ``StreamIF`` to complete the physical connection.
+
     Two receive modes are supported:
 
     **Push mode** (default, ``pull_mode=False``):
-        Call ``pre_sim()`` to register a callback on the transport.  The
-        transport's ``run_proc`` loop delivers deserialized objects via
-        :attr:`rx_proc` and/or :attr:`queue`.
+        ``pre_sim()`` registers a callback on the transport.  Incoming bursts
+        are deserialized and delivered via :attr:`rx_proc` and/or :attr:`queue`.
 
     **Pull mode** (``pull_mode=True``):
-        Do not call ``pre_sim()``, or call it with ``pull_mode=True`` at
-        construction.  The owning component drives sequencing by calling
+        The owning component drives sequencing by calling
         ``yield from slave.get()`` directly.
     """
 
-    transport: PhysicalTransport | None = None
     schema_type: type | None = None
     bitwidth: int = 32
     rx_proc: Callable[[Any], ProcessGen[None]] | None = None
     pull_mode: bool = False
     queue: simpy.Store = field(init=False)
+    stream_ep: StreamIFSlave = field(init=False, repr=False)
+    _transport: StreamTransport = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
         super().__post_init__()
         self.queue = simpy.Store(self.env)
+        self.stream_ep = StreamIFSlave(
+            name=f'{self.name}_stream', sim=self.sim, bitwidth=self.bitwidth
+        )
+        self._transport = StreamTransport(slave_ep=self.stream_ep)
 
     def pre_sim(self) -> None:
         if not self.pull_mode:
-            self.transport.set_rx_callback(self._on_words_received)
+            self._transport.set_rx_callback(self._on_words_received)
 
     def _on_words_received(self, words: Words) -> ProcessGen[None]:
         obj = self.schema_type().deserialize(words, word_bw=self.bitwidth)
@@ -164,7 +182,7 @@ class SchemaTransferIFSlave(InterfaceEndpoint):
 
         Returns the deserialized schema instance.  Does not touch :attr:`queue`.
         """
-        words = yield from self.transport.get_words()
+        words = yield from self._transport.get_words()
         return self.schema_type().deserialize(words, word_bw=self.bitwidth)
 
 
@@ -209,15 +227,26 @@ class ArrayTransferIFMaster(InterfaceEndpoint):
     """Master endpoint: serializes an iterable of *element_type* instances and
     transmits them as a single word burst through the transport.
 
+    Creates and owns an internal ``StreamIFMaster`` (``stream_ep``).  Bind
+    ``stream_ep`` to a ``StreamIF`` to complete the physical connection.
+
     Each element is serialized individually; the resulting words are
     concatenated into one burst (one AXI-Stream packet, TLAST at end).
     Elements may be schema instances or raw Python values accepted by
     ``element_type(value)``.
     """
 
-    transport: PhysicalTransport | None = None
     element_type: type | None = None
     bitwidth: int = 32
+    stream_ep: StreamIFMaster = field(init=False, repr=False)
+    _transport: StreamTransport = field(init=False, repr=False)
+
+    def __post_init__(self) -> None:
+        super().__post_init__()
+        self.stream_ep = StreamIFMaster(
+            name=f'{self.name}_stream', sim=self.sim, bitwidth=self.bitwidth
+        )
+        self._transport = StreamTransport(master_ep=self.stream_ep)
 
     def write(self, elements) -> ProcessGen[None]:
         """Serialize *elements* and transmit as one burst.
@@ -233,7 +262,7 @@ class ArrayTransferIFMaster(InterfaceEndpoint):
         if fast is not None and isinstance(elements, np.ndarray):
             elem_dtype, word_dtype = fast
             all_words = _to_words(elements, elem_dtype, word_dtype)
-            yield from self.transport.write_words(all_words)
+            yield from self._transport.write_words(all_words)
             return
         nwords_per_elem = self.element_type.nwords_per_inst(self.bitwidth)
         items = list(elements)
@@ -243,13 +272,16 @@ class ArrayTransferIFMaster(InterfaceEndpoint):
             elem = raw if isinstance(raw, self.element_type) else self.element_type(raw)
             elem_words = elem.serialize(word_bw=self.bitwidth)
             all_words[i * nwords_per_elem:(i + 1) * nwords_per_elem] = elem_words
-        yield from self.transport.write_words(all_words)
+        yield from self._transport.write_words(all_words)
 
 
 @dataclass
 class ArrayTransferIFSlave(InterfaceEndpoint):
     """Slave endpoint: receives a word burst and deserializes it into a list of
     *element_type* instances.
+
+    Creates and owns an internal ``StreamIFSlave`` (``stream_ep``).  Bind
+    ``stream_ep`` to a ``StreamIF`` to complete the physical connection.
 
     Two receive modes are supported (same semantics as :class:`SchemaTransferIFSlave`):
 
@@ -262,15 +294,23 @@ class ArrayTransferIFSlave(InterfaceEndpoint):
         element count is required and TLAST position is validated.
     """
 
-    transport: PhysicalTransport | None = None
     element_type: type | None = None
     bitwidth: int = 32
     rx_proc: Callable[[list], ProcessGen[None]] | None = None
     pull_mode: bool = False
+    stream_ep: StreamIFSlave = field(init=False, repr=False)
+    _transport: StreamTransport = field(init=False, repr=False)
+
+    def __post_init__(self) -> None:
+        super().__post_init__()
+        self.stream_ep = StreamIFSlave(
+            name=f'{self.name}_stream', sim=self.sim, bitwidth=self.bitwidth
+        )
+        self._transport = StreamTransport(slave_ep=self.stream_ep)
 
     def pre_sim(self) -> None:
         if not self.pull_mode:
-            self.transport.set_rx_callback(self._on_words_received)
+            self._transport.set_rx_callback(self._on_words_received)
 
     def _deserialize(self, words: Words, count: int) -> np.ndarray | list:
         fast = _scalar_dtype_for_fast_path(self.element_type, self.bitwidth)
@@ -306,7 +346,7 @@ class ArrayTransferIFSlave(InterfaceEndpoint):
         """
         nwords_per_elem = self.element_type.nwords_per_inst(self.bitwidth)
         expected = count * nwords_per_elem
-        words = yield from self.transport.get_words()
+        words = yield from self._transport.get_words()
         actual = words.shape[0]
         if actual < expected:
             raise RuntimeError(

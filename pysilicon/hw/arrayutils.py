@@ -22,12 +22,58 @@ import os
 from pathlib import Path, PurePosixPath
 import posixpath
 import re
-from typing import Any
+from typing import Any, Generic, TypeVar
 
 import numpy as np
 
 from pysilicon.build.build import Buildable, BuildConfig, BuildResult
-from pysilicon.hw.dataschema import DataArray, DataList, DataSchema
+from pysilicon.hw.dataschema import DataArray, DataList, DataSchema, Words
+
+
+T = TypeVar('T', bound=DataSchema)
+
+
+class SchemaArray(Generic[T]):
+    """Homogeneous array of a single DataSchema element type.
+
+    Used as a type annotation at synthesis boundaries::
+
+        samp_in: SchemaArray[Float32] = yield from self.s_in.get(Float32, count=n)
+
+    And as a runtime container passed to :func:`write_array` / returned by
+    :func:`read_array`::
+
+        arr = SchemaArray(data=np.array([1.0, 2.0]), elem_type=Float32)
+
+    In Python the underlying storage is a :class:`numpy.ndarray` for scalar
+    element types or a plain :class:`list` for complex ones.  In HLS codegen
+    ``SchemaArray[T]`` maps to ``T arr[N]`` — a C array of the element's
+    ``cpp_repr()``.
+    """
+
+    def __init__(self, data: np.ndarray | list, elem_type: type[T]) -> None:
+        if not isinstance(elem_type, type) or not issubclass(elem_type, DataSchema):
+            raise TypeError("elem_type must be a DataSchema subclass.")
+        self.data: np.ndarray = np.asarray(data)
+        self.elem_type: type[T] = elem_type
+
+    def __len__(self) -> int:
+        return len(self.data)
+
+    def __getitem__(self, key):
+        return self.data[key]
+
+    def __array__(self, dtype=None) -> np.ndarray:
+        return np.asarray(self.data, dtype=dtype)
+
+    def __getattr__(self, name: str):
+        # Delegate numpy ndarray attributes (shape, dtype, flatten, …) to self.data.
+        # __getattr__ is only called when normal lookup fails, so 'data' and
+        # 'elem_type' are never forwarded here.
+        return getattr(self.data, name)
+
+    def __repr__(self) -> str:
+        return f"SchemaArray(elem_type={self.elem_type.__name__}, shape={self.data.shape})"
 
 
 def _normalize_array_shape(shape: int | tuple[int, ...] | list[int]) -> tuple[int, ...]:
@@ -42,34 +88,45 @@ def _normalize_array_shape(shape: int | tuple[int, ...] | list[int]) -> tuple[in
     return norm_shape
 
 
-def write_array(arr: Any, elem_type: type[DataSchema], word_bw: int) -> np.ndarray:
+def write_array(arr: SchemaArray[T] | Any, elem_type: type[T] | None = None, *, word_bw: int) -> Words:
     """Pack a Python array of schema elements into hardware words.
 
     Parameters
     ----------
-    arr : Any
-        Input array-like value. For scalar field element types this is typically a
-        NumPy array or Python sequence. The full input shape is used as the array
-        schema shape for serialization.
-    elem_type : type[DataSchema]
-        Element schema class describing each array entry.
+    arr : SchemaArray[T] or array-like
+        Input data.  Pass a :class:`SchemaArray` to supply ``elem_type``
+        implicitly, or pass a plain array-like together with an explicit
+        ``elem_type``.
+    elem_type : type[DataSchema] or None
+        Element schema class.  Required when *arr* is not a
+        :class:`SchemaArray`; ignored (with a consistency check) when it is.
     word_bw : int
-        Packed output word width in bits.
+        Packed output word width in bits.  Must be passed as a keyword argument.
 
     Returns
     -------
     numpy.ndarray
-        Packed hardware words as returned by ``DataSchema.serialize()``. For
-        ``word_bw <= 32`` the dtype is ``np.uint32``; for ``word_bw <= 64`` it is
-        ``np.uint64``; larger widths follow the existing chunked ``serialize``
-        behavior.
+        Packed hardware words as returned by ``DataSchema.serialize()``.
     """
-    if not isinstance(elem_type, type) or not issubclass(elem_type, DataSchema):
-        raise TypeError("elem_type must be a DataSchema subclass.")
+    if isinstance(arr, SchemaArray):
+        if elem_type is not None and elem_type is not arr.elem_type:
+            raise TypeError(
+                f"elem_type mismatch: SchemaArray carries {arr.elem_type.__name__!r} "
+                f"but elem_type={elem_type.__name__!r} was also supplied."
+            )
+        elem_type = arr.elem_type
+        np_arr = arr.data
+    else:
+        if elem_type is None:
+            raise TypeError("elem_type must be provided when arr is not a SchemaArray.")
+        if not isinstance(elem_type, type) or not issubclass(elem_type, DataSchema):
+            raise TypeError("elem_type must be a DataSchema subclass.")
+        np_arr = np.asarray(arr)
+
     if word_bw <= 0:
         raise ValueError("word_bw must be positive.")
 
-    np_arr = np.asarray(arr)
+    np_arr = np.asarray(np_arr)
     shape = tuple(int(dim) for dim in np_arr.shape)
 
     array_cls = DataArray.specialize(
@@ -139,19 +196,18 @@ def write_uint32_file(
 
 
 def read_array(
-    packed: Any,
-    elem_type: type[DataSchema],
+    packed: Words,
+    elem_type: type[T],
     word_bw: int,
     shape: int | tuple[int, ...] | list[int],
-) -> Any:
-    """Unpack hardware words into a Python array of schema elements.
+) -> SchemaArray[T]:
+    """Unpack hardware words into a :class:`SchemaArray` of schema elements.
 
     Parameters
     ----------
-    packed : Any
-        Packed hardware words. This may be any array-like object accepted by
-        ``DataSchema.deserialize()``.
-    elem_type : type[DataSchema]
+    packed : Words
+        Packed hardware words accepted by ``DataSchema.deserialize()``.
+    elem_type : type[T]
         Element schema class describing each unpacked array entry.
     word_bw : int
         Packed input word width in bits.
@@ -160,9 +216,8 @@ def read_array(
 
     Returns
     -------
-    Any
-        The unpacked Python-side array value held in the temporary ``DataArray``
-        instance after deserialization.
+    SchemaArray[T]
+        Unpacked array with ``elem_type`` encoded in the container.
     """
     if not isinstance(elem_type, type) or not issubclass(elem_type, DataSchema):
         raise TypeError("elem_type must be a DataSchema subclass.")
@@ -178,7 +233,7 @@ def read_array(
     )
     array_obj = array_cls()
     array_obj.deserialize(np.asarray(packed), word_bw=word_bw)
-    return array_obj.val
+    return SchemaArray(data=array_obj.val, elem_type=elem_type)
 
 
 def get_nwords(

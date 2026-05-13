@@ -41,16 +41,18 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Callable, Generator
+from typing import TYPE_CHECKING, Callable, Generator
 import simpy
 
 import numpy as np
 
-from pysilicon.hw.component import Component
 from pysilicon.hw.dataschema import Words
 from pysilicon.hw.named import NamedObject
 from pysilicon.hw.clock import Clock
 from pysilicon.simulation.simobj import SimObj, ProcessGen
+
+if TYPE_CHECKING:
+    from pysilicon.hw.component import Component
 
 RxProc = TypeAlias = Callable[[Words], ProcessGen[None]]
 
@@ -129,10 +131,6 @@ class Interface(SimObj):
 
         self.endpoints[ep_name] = endpoint
         endpoint.interface = self
-
-class StreamType(Enum):
-    hls = "hls"
-    axi4 = "axi4"
 
 class TransferNotifyType(Enum):
     """
@@ -231,12 +229,21 @@ class QueuedTransferIFSlave(InterfaceEndpoint):
 
             yield self.env.process(self.rx_proc(words))
 
-    def get(self) -> ProcessGen[Words]:
+    def get(self, nwords_max: int | None = None) -> ProcessGen[Words]:
         """Pull the next word burst from the buffer (pull model).
 
         The caller drives data flow by yielding from this generator rather than
         having bursts pushed via :attr:`rx_proc`.  Do not start :meth:`run_proc`
         when using this method.
+
+        Parameters
+        ----------
+        nwords_max : int | None
+            If given, the returned array is truncated to at most *nwords_max*
+            words.  Queue accounting always uses the actual burst size so that
+            capacity tracking remains correct.  A returned length shorter than
+            *nwords_max* indicates an early TLAST; a burst that was truncated
+            (original length > *nwords_max*) indicates a late/missing TLAST.
         """
         words = yield self.data_buffer.get()
         nwords = words.shape[0]
@@ -254,6 +261,8 @@ class QueuedTransferIFSlave(InterfaceEndpoint):
                 )
             yield self.nrx.get(brx)
 
+        if nwords_max is not None:
+            words = words[:nwords_max]
         return words
 
 
@@ -390,11 +399,13 @@ class StreamIF(QueuedTransferIF):
     A stream interface with 'master' (TX) and 'slave' (RX) sides.
     """
 
-    stream_type: StreamType | None = None
+    has_tlast: bool | None = None
     """
-    The type of stream protocol to use for this interface.
-    If None, the stream type will be inferred from the types of
-    endpoints that are bound to this interface.
+    Whether this stream carries a TLAST (end-of-burst) signal.
+    ``None`` means inferred from the first bound endpoint.
+    ``True`` — AXI-Stream style: the burst boundary is carried on the wire.
+    ``False`` — HLS-stream style: burst length is encoded in the protocol;
+    callers of ``get()`` must always supply ``nwords_max``.
     """
 
     notify_type: TransferNotifyType | None = None
@@ -440,12 +451,12 @@ class StreamIF(QueuedTransferIF):
             raise TypeError("slave side of StreamIF must bind to StreamIFSlave")
         if ep_name == "master" and not isinstance(endpoint, StreamIFMaster):
             raise TypeError("master side of StreamIF must bind to StreamIFMaster")
-        if self.stream_type is None:
-            self.stream_type = endpoint.stream_type
-        if endpoint.stream_type != self.stream_type:
+        if self.has_tlast is None:
+            self.has_tlast = endpoint.has_tlast
+        if endpoint.has_tlast != self.has_tlast:
             raise ValueError(
-                f"Endpoint stream type {endpoint.stream_type.value} does not match "
-                f"interface stream type {self.stream_type.value}"
+                f"Endpoint has_tlast={endpoint.has_tlast} does not match "
+                f"interface has_tlast={self.has_tlast}"
             )
         if ep_name == "slave":
             if self.notify_type is None:
@@ -467,8 +478,8 @@ class StreamIFSlave(QueuedTransferIFSlave):
     A stream slave (RX) endpoint that is realized as a function call.
     """
 
-    stream_type: StreamType = StreamType.axi4
-    """The type of stream protocol to use for this interface."""
+    has_tlast: bool = True
+    """Whether this stream carries a TLAST signal (True) or not (False)."""
 
     notify_type: TransferNotifyType = TransferNotifyType.end_only
     """The method for notifying the receiver side of transfers on this interface."""
@@ -485,6 +496,14 @@ class StreamIFSlave(QueuedTransferIFSlave):
     def __init_subclass__(cls, **kwargs):
         super().__init_subclass__(**kwargs)
 
+    def get(self, nwords_max: int | None = None) -> ProcessGen[Words]:
+        if not self.has_tlast and nwords_max is None:
+            raise ValueError(
+                f"StreamIFSlave '{self.name}' has has_tlast=False: "
+                "nwords_max must be provided to specify the transfer length"
+            )
+        return (yield from super().get(nwords_max=nwords_max))
+
 
 @dataclass
 class StreamIFMaster(QueuedTransferIFMaster):
@@ -492,8 +511,8 @@ class StreamIFMaster(QueuedTransferIFMaster):
     A stream master (TX) endpoint that provides a write function.
     """
 
-    stream_type: StreamType = StreamType.axi4
-    """The type of stream protocol to use for this interface."""
+    has_tlast: bool = True
+    """Whether this stream carries a TLAST signal (True) or not (False)."""
 
     notify_type: TransferNotifyType = TransferNotifyType.end_only
     """

@@ -1,20 +1,22 @@
+from __future__ import annotations
 
+from dataclasses import dataclass, field
+from typing import TYPE_CHECKING
 
-class Component:
+from pysilicon.simulation.simobj import SimObj
+
+if TYPE_CHECKING:
+    from pysilicon.hw.interface import InterfaceEndpoint
+
+@dataclass
+class Component(SimObj):
     """
     Base class for a software or hardware component.
-
-    Attributes:
-    -----------
-    name : str
-        The name of this component, unique within the system.
-    endpoints : dict[str, InterfaceEndpoint]
-        The mapping of endpoint names to the endpoints 
-        owned by this component.    
     """
-    def __init__(self, name: str):
-        self.name = name
-        self.endpoints: dict[str, InterfaceEndpoint] = {}
+
+    endpoints: dict[str, InterfaceEndpoint] = \
+        field(default_factory=dict)
+    """Endpoints of the component, indexed by name."""
 
     def add_endpoint(self, endpoint: InterfaceEndpoint) -> None:
         endpoint.comp = self

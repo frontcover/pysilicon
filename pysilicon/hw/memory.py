@@ -1,3 +1,8 @@
+from __future__ import annotations
+
+from dataclasses import dataclass
+from typing import Any
+
 import numpy as np
 from enum import Enum
 
@@ -286,4 +291,175 @@ class Memory(object):
             )
 
         segment[offset:offset + nwords] = data_arr
+
+
+# ---------------------------------------------------------------------------
+# _DirectBackedMMIFMaster — MMIFMaster backed directly by a Memory object
+# ---------------------------------------------------------------------------
+
+@dataclass
+class _DirectBackedMMIFMaster:
+    """
+    MMIFMaster-compatible endpoint that reads/writes a Memory directly,
+    bypassing any AXI interface.  Used internally by MemComponent.
+
+    read() and write() are generator functions that yield no SimPy events
+    (zero simulation time).  as_words(), as_array(), as_schema() provide
+    zero-copy reference access to the pre-allocated inline block.
+    """
+
+    name: str
+    sim: Any
+    bitwidth: int = 32
+
+    def __post_init__(self) -> None:
+        self._mem: Memory | None = None
+        self._base_addr: int | None = None
+
+    def _bind_memory(self, mem: Memory, base_addr: int | None) -> None:
+        self._mem = mem
+        self._base_addr = base_addr
+
+    # ------------------------------------------------------------------
+    # Raw word transfers (generator functions; zero sim time)
+    # ------------------------------------------------------------------
+
+    def write(self, words: Any, global_addr: int) -> Any:
+        assert self._mem is not None, "_DirectBackedMMIFMaster not bound to Memory"
+        self._mem.write(global_addr, words)
+        if False:
+            yield  # makes this a generator function
+
+    def read(self, nwords: int, global_addr: int) -> Any:
+        assert self._mem is not None, "_DirectBackedMMIFMaster not bound to Memory"
+        return self._mem.read(global_addr, nwords)
+        yield  # noqa: unreachable — makes this a generator function
+
+    # ------------------------------------------------------------------
+    # Schema convenience methods (delegate to Memory, zero sim time)
+    # ------------------------------------------------------------------
+
+    def write_schema(self, obj: Any, addr: int, word_bw: int = 32) -> Any:
+        yield from self.write(obj.serialize(word_bw=word_bw), addr)
+
+    def read_schema(self, schema_type: type, addr: int, word_bw: int = 32) -> Any:
+        nwords = schema_type.nwords_per_inst(word_bw)
+        words = yield from self.read(nwords, addr)
+        return schema_type().deserialize(words, word_bw=word_bw)
+
+    def write_array(self, elements: Any, element_type: type, addr: int, word_bw: int = 32) -> Any:
+        from pysilicon.hw.arrayutils import write_array, SchemaArray
+        if isinstance(elements, SchemaArray):
+            packed = write_array(elements, word_bw=word_bw)
+        else:
+            packed = write_array(elements, elem_type=element_type, word_bw=word_bw)
+        yield from self.write(packed, addr)
+
+    def read_array(self, element_type: type, count: int, addr: int, word_bw: int = 32) -> Any:
+        from pysilicon.hw.arrayutils import read_array
+        words = yield from self.read(element_type.nwords_per_inst(word_bw) * count, addr)
+        return read_array(words, element_type, word_bw, shape=count)
+
+    # ------------------------------------------------------------------
+    # Reference access (inline only — zero copy, zero sim time)
+    # ------------------------------------------------------------------
+
+    def as_words(self) -> np.ndarray:
+        """Return a direct numpy view of the pre-allocated inline block."""
+        if self._mem is None or self._base_addr is None:
+            raise RuntimeError(
+                "as_words() requires an inline MemComponent with a pre-allocated block"
+            )
+        return self._mem.segments[self._base_addr]
+
+    def as_array(self, elem_type: type) -> Any:
+        """Return a SchemaArray[elem_type] view of the inline block."""
+        from pysilicon.hw.arrayutils import read_array
+        words = self.as_words()
+        nwpe = elem_type.nwords_per_inst(self.bitwidth)
+        count = len(words) // nwpe
+        return read_array(words, elem_type, self.bitwidth, shape=count)
+
+    def as_schema(self, schema_type: type) -> Any:
+        """Return a schema instance deserialized from the inline block."""
+        nwords = schema_type.nwords_per_inst(self.bitwidth)
+        words = self.as_words()[:nwords]
+        return schema_type().deserialize(words, word_bw=self.bitwidth)
+
+
+# ---------------------------------------------------------------------------
+# MemComponent — Component wrapping a Memory with MM interface endpoints
+# ---------------------------------------------------------------------------
+
+@dataclass
+class MemComponent:
+    """
+    A Component that wraps a Memory and exposes MM interface endpoints.
+
+    ``m_mm`` is a directly-backed master (zero-latency, for the owner's use).
+    ``s_mm`` is an MMIFSlave for external AXI-MM connections.
+
+    When ``inline=True`` (default) the full ``nwords_tot`` capacity is
+    pre-allocated as one block; ``m_mm.as_words()`` / ``as_array()`` /
+    ``as_schema()`` return direct views (zero sim time, maps to a local C
+    array in HLS).
+
+    When ``inline=False`` external callers use ``alloc()`` / ``free()`` to
+    carve out regions, then access them via their own wired ``MMIFMaster``.
+    """
+
+    name: str
+    sim: Any
+    word_size: int = 32       # bits per word
+    addr_size: int = 32       # address bits
+    nwords_tot: int = 2 ** 20  # capacity in words
+    inline: bool = True        # True = local BRAM; False = external DDR
+
+    def __post_init__(self) -> None:
+        self._mem = Memory(
+            word_size=self.word_size,
+            addr_size=self.addr_size,
+            nwords_tot=self.nwords_tot,
+            addr_unit=AddrUnit.byte,
+        )
+
+        self._base_addr: int | None
+        if self.inline:
+            self._base_addr = self._mem.alloc(self.nwords_tot)
+        else:
+            self._base_addr = None
+
+        self.m_mm = _DirectBackedMMIFMaster(
+            name=f'{self.name}_m_mm',
+            sim=self.sim,
+            bitwidth=self.word_size,
+        )
+        self.m_mm.__post_init__()
+        self.m_mm._bind_memory(self._mem, self._base_addr)
+
+        from pysilicon.hw.memif import MMIFSlave
+        self.s_mm = MMIFSlave(
+            name=f'{self.name}_s_mm',
+            sim=self.sim,
+            bitwidth=self.word_size,
+            rx_write_proc=self._on_write,
+            rx_read_proc=self._on_read,
+        )
+
+    def _on_write(self, words: Any, local_addr: int) -> Any:
+        self._mem.write(local_addr, words)
+        if False:
+            yield
+
+    def _on_read(self, nwords: int, local_addr: int) -> Any:
+        return self._mem.read(local_addr, nwords)
+        yield  # noqa: unreachable — makes this a generator function
+
+    def alloc(self, nwords: int) -> int:
+        """Allocate a region in the backing Memory (system-level use)."""
+        return self._mem.alloc(nwords)
+
+    def free(self, addr: int) -> None:
+        """Free a previously allocated region."""
+        self._mem.free(addr)
     

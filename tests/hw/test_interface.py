@@ -14,7 +14,6 @@ from pysilicon.hw.interface import (
     StreamIF,
     StreamIFMaster,
     StreamIFSlave,
-    StreamType,
     TransferNotifyType,
     Words,
 )
@@ -254,11 +253,11 @@ def test_stream_bind_bitwidth_mismatch():
         iface.bind("slave", ep)
 
 
-def test_stream_bind_stream_type_mismatch():
+def test_stream_bind_has_tlast_mismatch():
     sim = Simulation()
-    iface = StreamIF(sim=sim, clk=Clock(freq=1), stream_type=StreamType.axi4)
-    ep = StreamIFSlave(sim=sim, bitwidth=32, stream_type=StreamType.hls)
-    with pytest.raises(ValueError, match="stream type"):
+    iface = StreamIF(sim=sim, clk=Clock(freq=1), has_tlast=True)
+    ep = StreamIFSlave(sim=sim, bitwidth=32, has_tlast=False)
+    with pytest.raises(ValueError, match="has_tlast"):
         iface.bind("slave", ep)
 
 

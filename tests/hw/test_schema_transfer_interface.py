@@ -77,29 +77,21 @@ class StreamScenario:
         self.env = self.sim.env
         self.clk = Clock(freq=1.0)
 
-        stream_if = StreamIF(sim=self.sim, clk=self.clk)
-        self.stream_master = StreamIFMaster(sim=self.sim, bitwidth=bitwidth)
-        self.stream_slave = StreamIFSlave(sim=self.sim, bitwidth=bitwidth)
-        stream_if.bind("master", self.stream_master)
-        stream_if.bind("slave", self.stream_slave)
-
-        transport = StreamTransport(
-            master_ep=self.stream_master,
-            slave_ep=self.stream_slave,
-        )
-
         self.received: list = []
 
         self.schema_master = SchemaTransferIFMaster(
-            sim=self.sim, transport=transport, bitwidth=bitwidth
+            sim=self.sim, bitwidth=bitwidth
         )
         self.schema_slave = SchemaTransferIFSlave(
             sim=self.sim,
-            transport=transport,
             schema_type=schema_type,
             bitwidth=bitwidth,
             rx_proc=self._on_obj,
         )
+
+        stream_if = StreamIF(sim=self.sim, clk=self.clk)
+        stream_if.bind("master", self.schema_master.stream_ep)
+        stream_if.bind("slave",  self.schema_slave.stream_ep)
 
     def _on_obj(self, obj):
         self.received.append(obj)
@@ -119,7 +111,7 @@ class StreamScenario:
             while len(self.received) < n:
                 yield env.timeout(0.1)
 
-        env.process(self.stream_slave.run_proc())
+        env.process(self.schema_slave.stream_ep.run_proc())
         tx_done = env.process(tx_proc())
         rx_done = env.process(rx_monitor())
         env.run(until=env.all_of([tx_done, rx_done]))
@@ -211,81 +203,61 @@ class TestStreamTransport:
 
 
 class TestSchemaTransferIFBind:
-    def _make_sim_and_transport(self, bitwidth=32):
-        sim = Simulation()
-        clk = Clock(freq=1.0)
-        stream_if = StreamIF(sim=sim, clk=clk)
-        master_ep = StreamIFMaster(sim=sim, bitwidth=bitwidth)
-        slave_ep = StreamIFSlave(sim=sim, bitwidth=bitwidth)
-        stream_if.bind("master", master_ep)
-        stream_if.bind("slave", slave_ep)
-        transport = StreamTransport(master_ep=master_ep, slave_ep=slave_ep)
-        return sim, transport
-
     def test_valid_bind_master_then_slave(self):
-        sim, transport = self._make_sim_and_transport()
+        sim = Simulation()
         iface = SchemaTransferIF(sim=sim)
-        m = SchemaTransferIFMaster(sim=sim, transport=transport, bitwidth=32)
-        s = SchemaTransferIFSlave(
-            sim=sim, transport=transport, schema_type=SensorPacket, bitwidth=32
-        )
+        m = SchemaTransferIFMaster(sim=sim, bitwidth=32)
+        s = SchemaTransferIFSlave(sim=sim, schema_type=SensorPacket, bitwidth=32)
         iface.bind("master", m)
         iface.bind("slave", s)
         assert iface.endpoints["master"] is m
         assert iface.endpoints["slave"] is s
 
     def test_valid_bind_slave_then_master(self):
-        sim, transport = self._make_sim_and_transport()
+        sim = Simulation()
         iface = SchemaTransferIF(sim=sim)
-        m = SchemaTransferIFMaster(sim=sim, transport=transport, bitwidth=32)
-        s = SchemaTransferIFSlave(
-            sim=sim, transport=transport, schema_type=SensorPacket, bitwidth=32
-        )
+        m = SchemaTransferIFMaster(sim=sim, bitwidth=32)
+        s = SchemaTransferIFSlave(sim=sim, schema_type=SensorPacket, bitwidth=32)
         iface.bind("slave", s)
         iface.bind("master", m)
         assert iface.endpoints["master"] is m
         assert iface.endpoints["slave"] is s
 
     def test_wrong_type_on_master_side_raises(self):
-        sim, transport = self._make_sim_and_transport()
+        sim = Simulation()
         iface = SchemaTransferIF(sim=sim)
-        s = SchemaTransferIFSlave(
-            sim=sim, transport=transport, schema_type=SensorPacket, bitwidth=32
-        )
+        s = SchemaTransferIFSlave(sim=sim, schema_type=SensorPacket, bitwidth=32)
         with pytest.raises(TypeError):
             iface.bind("master", s)
 
     def test_wrong_type_on_slave_side_raises(self):
-        sim, transport = self._make_sim_and_transport()
+        sim = Simulation()
         iface = SchemaTransferIF(sim=sim)
-        m = SchemaTransferIFMaster(sim=sim, transport=transport, bitwidth=32)
+        m = SchemaTransferIFMaster(sim=sim, bitwidth=32)
         with pytest.raises(TypeError):
             iface.bind("slave", m)
 
     def test_invalid_ep_name_raises(self):
-        sim, transport = self._make_sim_and_transport()
+        sim = Simulation()
         iface = SchemaTransferIF(sim=sim)
-        m = SchemaTransferIFMaster(sim=sim, transport=transport, bitwidth=32)
+        m = SchemaTransferIFMaster(sim=sim, bitwidth=32)
         with pytest.raises(KeyError):
             iface.bind("tx", m)
 
     def test_double_bind_raises(self):
-        sim, transport = self._make_sim_and_transport()
+        sim = Simulation()
         iface = SchemaTransferIF(sim=sim)
-        m1 = SchemaTransferIFMaster(sim=sim, transport=transport, bitwidth=32)
-        m2 = SchemaTransferIFMaster(sim=sim, transport=transport, bitwidth=32)
+        m1 = SchemaTransferIFMaster(sim=sim, bitwidth=32)
+        m2 = SchemaTransferIFMaster(sim=sim, bitwidth=32)
         iface.bind("master", m1)
         with pytest.raises(ValueError):
             iface.bind("master", m2)
 
     def test_bitwidth_mismatch_raises(self):
-        sim, transport32 = self._make_sim_and_transport(bitwidth=32)
-        _, transport64 = self._make_sim_and_transport(bitwidth=64)
+        sim = Simulation()
         iface = SchemaTransferIF(sim=sim)
-        m = SchemaTransferIFMaster(sim=sim, transport=transport32, bitwidth=32)
-        s = SchemaTransferIFSlave(
-            sim=sim, transport=transport64, schema_type=SensorPacket, bitwidth=64
-        )
+        m = SchemaTransferIFMaster(sim=sim, bitwidth=32)
+        s = SchemaTransferIFSlave(sim=sim, schema_type=SensorPacket, bitwidth=64)
         iface.bind("master", m)
         with pytest.raises(ValueError):
             iface.bind("slave", s)
@@ -336,7 +308,7 @@ class TestSingleTypeRoundTrip:
             yield event
             got.append(event.value)
 
-        env.process(scenario.stream_slave.run_proc())
+        env.process(scenario.schema_slave.stream_ep.run_proc())
         done = env.process(tx_and_read())
         env.run(until=done)
 
@@ -435,7 +407,7 @@ class TestMultiTypeRoundTrip:
         du.payload = AccelPacket(ax=1, ay=2, az=3)
 
         env = scenario.env
-        env.process(scenario.stream_slave.run_proc())
+        env.process(scenario.schema_slave.stream_ep.run_proc())
         done = env.process(
             (lambda: (yield from scenario.schema_master.write(du)))()
         )
@@ -469,7 +441,7 @@ class TestMultiTypeRoundTrip:
             yield event
             got.append(event.value)
 
-        env.process(scenario.stream_slave.run_proc())
+        env.process(scenario.schema_slave.stream_ep.run_proc())
         done = env.process(tx_and_read())
         env.run(until=done)
 
@@ -487,17 +459,13 @@ def _make_pull_scenario(schema_type, bitwidth=32):
     sim = Simulation()
     env = sim.env
     clk = Clock(freq=1.0)
-    stream_if = StreamIF(sim=sim, clk=clk)
-    stream_master = StreamIFMaster(sim=sim, bitwidth=bitwidth)
-    stream_slave = StreamIFSlave(sim=sim, bitwidth=bitwidth)
-    stream_if.bind("master", stream_master)
-    stream_if.bind("slave", stream_slave)
-    transport = StreamTransport(master_ep=stream_master, slave_ep=stream_slave)
-    schema_master = SchemaTransferIFMaster(sim=sim, transport=transport, bitwidth=bitwidth)
-    schema_slave = SchemaTransferIFSlave(
-        sim=sim, transport=transport, schema_type=schema_type,
-        bitwidth=bitwidth, pull_mode=True,
+    schema_master = SchemaTransferIFMaster(sim=sim, bitwidth=bitwidth)
+    schema_slave  = SchemaTransferIFSlave(
+        sim=sim, schema_type=schema_type, bitwidth=bitwidth, pull_mode=True,
     )
+    stream_if = StreamIF(sim=sim, clk=clk)
+    stream_if.bind("master", schema_master.stream_ep)
+    stream_if.bind("slave",  schema_slave.stream_ep)
     return sim, env, stream_if, schema_master, schema_slave
 
 
@@ -506,19 +474,13 @@ def _make_array_scenario(element_type, bitwidth=32):
     sim = Simulation()
     env = sim.env
     clk = Clock(freq=1.0)
+    arr_master = ArrayTransferIFMaster(sim=sim, element_type=element_type, bitwidth=bitwidth)
+    arr_slave  = ArrayTransferIFSlave(
+        sim=sim, element_type=element_type, bitwidth=bitwidth, pull_mode=True,
+    )
     stream_if = StreamIF(sim=sim, clk=clk)
-    stream_master = StreamIFMaster(sim=sim, bitwidth=bitwidth)
-    stream_slave = StreamIFSlave(sim=sim, bitwidth=bitwidth)
-    stream_if.bind("master", stream_master)
-    stream_if.bind("slave", stream_slave)
-    transport = StreamTransport(master_ep=stream_master, slave_ep=stream_slave)
-    arr_master = ArrayTransferIFMaster(
-        sim=sim, transport=transport, element_type=element_type, bitwidth=bitwidth
-    )
-    arr_slave = ArrayTransferIFSlave(
-        sim=sim, transport=transport, element_type=element_type,
-        bitwidth=bitwidth, pull_mode=True,
-    )
+    stream_if.bind("master", arr_master.stream_ep)
+    stream_if.bind("slave",  arr_slave.stream_ep)
     return sim, env, stream_if, arr_master, arr_slave
 
 
@@ -596,30 +558,29 @@ class TestSchemaTransferIFSlavePullGet:
         assert int(got[0].sensor_id) == 3
 
     def test_get_sequential_two_different_types(self):
-        """Component can interleave two schema slaves on the same stream in sequence."""
+        """Two separate schema channels can co-exist in the same simulation."""
         sim = Simulation()
         env = sim.env
         clk = Clock(freq=1.0)
-        stream_if = StreamIF(sim=sim, clk=clk)
-        sm = StreamIFMaster(sim=sim, bitwidth=32)
-        ss = StreamIFSlave(sim=sim, bitwidth=32)
-        stream_if.bind("master", sm)
-        stream_if.bind("slave", ss)
-        transport = StreamTransport(master_ep=sm, slave_ep=ss)
 
-        sensor_master = SchemaTransferIFMaster(sim=sim, transport=transport, bitwidth=32)
-        sensor_slave = SchemaTransferIFSlave(
-            sim=sim, transport=transport, schema_type=SensorPacket,
-            bitwidth=32, pull_mode=True,
+        sensor_master = SchemaTransferIFMaster(sim=sim, bitwidth=32)
+        sensor_slave  = SchemaTransferIFSlave(
+            sim=sim, schema_type=SensorPacket, bitwidth=32, pull_mode=True,
         )
-        accel_master = SchemaTransferIFMaster(sim=sim, transport=transport, bitwidth=32)
-        accel_slave = SchemaTransferIFSlave(
-            sim=sim, transport=transport, schema_type=AccelPacket,
-            bitwidth=32, pull_mode=True,
+        accel_master = SchemaTransferIFMaster(sim=sim, bitwidth=32)
+        accel_slave  = SchemaTransferIFSlave(
+            sim=sim, schema_type=AccelPacket, bitwidth=32, pull_mode=True,
         )
 
-        got_sensor = []
-        got_accel = []
+        sensor_if = StreamIF(sim=sim, clk=clk)
+        sensor_if.bind("master", sensor_master.stream_ep)
+        sensor_if.bind("slave",  sensor_slave.stream_ep)
+        accel_if = StreamIF(sim=sim, clk=clk)
+        accel_if.bind("master", accel_master.stream_ep)
+        accel_if.bind("slave",  accel_slave.stream_ep)
+
+        got_sensor: list = []
+        got_accel:  list = []
 
         def proc():
             pkt1 = SensorPacket(temp_raw=100, sensor_id=1)
@@ -639,8 +600,7 @@ class TestSchemaTransferIFSlavePullGet:
     def test_pull_mode_pre_sim_does_not_set_callback(self):
         sim, env, _, _, schema_slave = _make_pull_scenario(SensorPacket)
         schema_slave.pre_sim()
-        transport = schema_slave.transport
-        assert transport.slave_ep.rx_proc is None
+        assert schema_slave._transport.slave_ep.rx_proc is None
 
 
 # ---------------------------------------------------------------------------
@@ -649,62 +609,51 @@ class TestSchemaTransferIFSlavePullGet:
 
 
 class TestArrayTransferIFBind:
-    def _make_sim_and_transport(self, bitwidth=32):
-        sim = Simulation()
-        clk = Clock(freq=1.0)
-        stream_if = StreamIF(sim=sim, clk=clk)
-        me = StreamIFMaster(sim=sim, bitwidth=bitwidth)
-        se = StreamIFSlave(sim=sim, bitwidth=bitwidth)
-        stream_if.bind("master", me)
-        stream_if.bind("slave", se)
-        return sim, StreamTransport(master_ep=me, slave_ep=se)
-
     def test_valid_bind(self):
-        sim, t = self._make_sim_and_transport()
+        sim = Simulation()
         iface = ArrayTransferIF(sim=sim)
-        m = ArrayTransferIFMaster(sim=sim, transport=t, element_type=U8, bitwidth=32)
-        s = ArrayTransferIFSlave(sim=sim, transport=t, element_type=U8, bitwidth=32)
+        m = ArrayTransferIFMaster(sim=sim, element_type=U8, bitwidth=32)
+        s = ArrayTransferIFSlave(sim=sim, element_type=U8, bitwidth=32)
         iface.bind("master", m)
         iface.bind("slave", s)
         assert iface.endpoints["master"] is m
         assert iface.endpoints["slave"] is s
 
     def test_wrong_type_on_master_side_raises(self):
-        sim, t = self._make_sim_and_transport()
+        sim = Simulation()
         iface = ArrayTransferIF(sim=sim)
-        s = ArrayTransferIFSlave(sim=sim, transport=t, element_type=U8, bitwidth=32)
+        s = ArrayTransferIFSlave(sim=sim, element_type=U8, bitwidth=32)
         with pytest.raises(TypeError):
             iface.bind("master", s)
 
     def test_wrong_type_on_slave_side_raises(self):
-        sim, t = self._make_sim_and_transport()
+        sim = Simulation()
         iface = ArrayTransferIF(sim=sim)
-        m = ArrayTransferIFMaster(sim=sim, transport=t, element_type=U8, bitwidth=32)
+        m = ArrayTransferIFMaster(sim=sim, element_type=U8, bitwidth=32)
         with pytest.raises(TypeError):
             iface.bind("slave", m)
 
     def test_invalid_ep_name_raises(self):
-        sim, t = self._make_sim_and_transport()
+        sim = Simulation()
         iface = ArrayTransferIF(sim=sim)
-        m = ArrayTransferIFMaster(sim=sim, transport=t, element_type=U8, bitwidth=32)
+        m = ArrayTransferIFMaster(sim=sim, element_type=U8, bitwidth=32)
         with pytest.raises(KeyError):
             iface.bind("tx", m)
 
     def test_element_type_mismatch_raises(self):
-        sim, t = self._make_sim_and_transport()
+        sim = Simulation()
         iface = ArrayTransferIF(sim=sim)
-        m = ArrayTransferIFMaster(sim=sim, transport=t, element_type=U8, bitwidth=32)
-        s = ArrayTransferIFSlave(sim=sim, transport=t, element_type=S16, bitwidth=32)
+        m = ArrayTransferIFMaster(sim=sim, element_type=U8, bitwidth=32)
+        s = ArrayTransferIFSlave(sim=sim, element_type=S16, bitwidth=32)
         iface.bind("master", m)
         with pytest.raises(ValueError, match="element_type"):
             iface.bind("slave", s)
 
     def test_bitwidth_mismatch_raises(self):
-        sim, t32 = self._make_sim_and_transport(bitwidth=32)
-        _, t64 = self._make_sim_and_transport(bitwidth=64)
+        sim = Simulation()
         iface = ArrayTransferIF(sim=sim)
-        m = ArrayTransferIFMaster(sim=sim, transport=t32, element_type=U8, bitwidth=32)
-        s = ArrayTransferIFSlave(sim=sim, transport=t64, element_type=U8, bitwidth=64)
+        m = ArrayTransferIFMaster(sim=sim, element_type=U8, bitwidth=32)
+        s = ArrayTransferIFSlave(sim=sim, element_type=U8, bitwidth=64)
         iface.bind("master", m)
         with pytest.raises(ValueError, match="bitwidth"):
             iface.bind("slave", s)
@@ -815,8 +764,7 @@ class TestArrayTransferIFRoundTrip:
 
         def proc():
             # manually send a 2-word burst but ask get() for 4 elements
-            stream_master = arr_master.transport.master_ep
-            yield from stream_master.write(np.array([1, 2], dtype=np.uint32))
+            yield from arr_master.stream_ep.write(np.array([1, 2], dtype=np.uint32))
             try:
                 yield from arr_slave.get(count=4)
             except RuntimeError as exc:
@@ -835,8 +783,7 @@ class TestArrayTransferIFRoundTrip:
         errors = []
 
         def proc():
-            stream_master = arr_master.transport.master_ep
-            yield from stream_master.write(np.array([1, 2, 3, 4], dtype=np.uint32))
+            yield from arr_master.stream_ep.write(np.array([1, 2, 3, 4], dtype=np.uint32))
             try:
                 yield from arr_slave.get(count=2)
             except RuntimeError as exc:
@@ -853,12 +800,6 @@ class TestArrayTransferIFRoundTrip:
         sim = Simulation()
         env = sim.env
         clk = Clock(freq=1.0)
-        stream_if = StreamIF(sim=sim, clk=clk)
-        sm = StreamIFMaster(sim=sim, bitwidth=32)
-        ss = StreamIFSlave(sim=sim, bitwidth=32)
-        stream_if.bind("master", sm)
-        stream_if.bind("slave", ss)
-        transport = StreamTransport(master_ep=sm, slave_ep=ss)
 
         received = []
 
@@ -866,19 +807,19 @@ class TestArrayTransferIFRoundTrip:
             received.append(elems)
             yield env.timeout(0)
 
-        arr_master = ArrayTransferIFMaster(
-            sim=sim, transport=transport, element_type=U8, bitwidth=32
+        arr_master = ArrayTransferIFMaster(sim=sim, element_type=U8, bitwidth=32)
+        arr_slave  = ArrayTransferIFSlave(
+            sim=sim, element_type=U8, bitwidth=32, rx_proc=on_elements,
         )
-        arr_slave = ArrayTransferIFSlave(
-            sim=sim, transport=transport, element_type=U8,
-            bitwidth=32, rx_proc=on_elements,
-        )
+        stream_if = StreamIF(sim=sim, clk=clk)
+        stream_if.bind("master", arr_master.stream_ep)
+        stream_if.bind("slave",  arr_slave.stream_ep)
         arr_slave.pre_sim()
 
         def tx():
             yield from arr_master.write(np.array([5, 6, 7], dtype=np.uint8))
 
-        env.process(ss.run_proc())
+        env.process(arr_slave.stream_ep.run_proc())
         done = env.process(tx())
         env.run(until=env.timeout(10))
 
