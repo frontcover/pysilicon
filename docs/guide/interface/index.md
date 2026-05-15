@@ -12,4 +12,5 @@ PySilicon models hardware communication channels as **interfaces** — transacti
 - [Overview](./overview.md)
 - [Streaming Interfaces](./stream.md)
 - [AXI4 Memory Mapped interfaces](./aximm.md)
+- [Register Maps](./regmap.md)
 
