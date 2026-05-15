@@ -14,7 +14,6 @@ from pysilicon.hw.interface import (
     StreamIF,
     StreamIFMaster,
     StreamIFSlave,
-    TransferNotifyType,
     Words,
 )
 from pysilicon.simulation.simulation import Simulation
@@ -260,15 +259,6 @@ def test_stream_bind_has_tlast_mismatch():
     with pytest.raises(ValueError, match="has_tlast"):
         iface.bind("slave", ep)
 
-
-def test_stream_bind_notify_type_mismatch():
-    sim = Simulation()
-    iface = StreamIF(
-        sim=sim, clk=Clock(freq=1), notify_type=TransferNotifyType.end_only
-    )
-    ep = StreamIFSlave(sim=sim, bitwidth=32, notify_type=TransferNotifyType.begin_end)
-    with pytest.raises(ValueError, match="notify type"):
-        iface.bind("slave", ep)
 
 
 def test_stream_write_without_slave():

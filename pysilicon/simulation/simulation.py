@@ -47,7 +47,12 @@ class Simulation:
             if proc is not None:
                 self.env.process(proc)
 
-        self.env.run()
+        try:
+            self.env.run()
+        except Exception:
+            for obj in self._sim_objs:
+                obj.error_cleanup()
+            raise
 
         for obj in self._sim_objs:
             obj.post_sim()

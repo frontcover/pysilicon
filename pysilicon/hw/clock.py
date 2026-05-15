@@ -12,4 +12,6 @@ class Clock(NamedObject):
     freq: float = 1e9
     """ The frequency of the clock in Hz. """
 
-            
+    @property
+    def period(self) -> float:
+        return 1.0 / self.freq

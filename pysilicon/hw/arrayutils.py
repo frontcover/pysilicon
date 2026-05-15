@@ -1497,7 +1497,6 @@ class ArrayUtilsStep(Buildable):
         elem_type: type[DataSchema],
         word_bw_supported: list[int],
     ) -> None:
-        super().__init__()
         if not isinstance(elem_type, type) or not issubclass(elem_type, DataSchema):
             raise TypeError("elem_type must be a DataSchema subclass.")
         widths = sorted({int(bw) for bw in word_bw_supported})
@@ -1509,9 +1508,9 @@ class ArrayUtilsStep(Buildable):
         self._elem_type = elem_type
         self._widths = widths
         self._su_dir: Path = Path(".")
+        super().__init__()  # _elem_type is set, so _default_name() works
 
-    @property
-    def name(self) -> str:
+    def _default_name(self) -> str:
         return f"{_array_utils_stem(self._elem_type)}ArrayUtilsStep"
 
     @property
@@ -1538,7 +1537,7 @@ class ArrayUtilsStep(Buildable):
         from pysilicon.build.streamutils import StreamUtilsStep
         from pysilicon.hw.dataschema import DataSchemaStep
 
-        self._deps = []
+        self.deps = []
 
         su_steps = [s for s in other_steps if isinstance(s, StreamUtilsStep)]
         if not su_steps:
@@ -1552,7 +1551,7 @@ class ArrayUtilsStep(Buildable):
                 "Only one is supported per BuildDag."
             )
         self._su_dir = su_steps[0].output_dir
-        self._deps.append(su_steps[0])
+        self.deps.append(su_steps[0])
 
         if self._elem_type.can_gen_include:
             dep_step = next(
@@ -1563,4 +1562,4 @@ class ArrayUtilsStep(Buildable):
                 None,
             )
             if dep_step is not None:
-                self._deps.append(dep_step)
+                self.deps.append(dep_step)

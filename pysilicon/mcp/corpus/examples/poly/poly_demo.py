@@ -3,24 +3,30 @@ from __future__ import annotations
 import argparse
 import json
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from enum import IntEnum
 from pathlib import Path
 
 import numpy as np
 import numpy.typing as npt
 
-from pysilicon.build.build import BuildConfig
+from pysilicon.build.build import BuildConfig, BuildDag, BuildResult, BuildStep, FileArtifact, ObjectArtifact
 from pysilicon.build.streamutils import StreamUtilsStep
-from pysilicon.hw.arrayutils import gen_array_utils, read_uint32_file, write_uint32_file
-from pysilicon.hw.dataschema import DataArray, DataList, EnumField, FloatField, IntField
+from pysilicon.hw.arrayutils import ArrayUtilsStep, SchemaArray, read_array, read_uint32_file, write_array, write_uint32_file
+from pysilicon.hw.clock import Clock
+from pysilicon.hw.dataschema import DataArray, DataList, DataSchemaStep, EnumField, FloatField, IntField
+from pysilicon.hw.hw_component import HwComponent, HwParam
+from pysilicon.hw.interface import StreamIF, StreamIFMaster, StreamIFSlave
+from pysilicon.hw.synth import sim_only, synthesizable
+from pysilicon.simulation.logger import Logger, NullLogger
+from pysilicon.simulation.simulation import Simulation
+from pysilicon.simulation.simobj import ProcessGen, SimObj
 from pysilicon.toolchain import toolchain
 
 
 EXAMPLE_DIR = Path(__file__).resolve().parent
 INCLUDE_DIR = "include"
 WORD_BW_SUPPORTED = [32, 64]
-TRACE_LEVELS = ("none", "port", "all")
 TxIdField = IntField.specialize(bitwidth=16, signed=False)
 NsampField = IntField.specialize(bitwidth=16, signed=False)
 Float32 = FloatField.specialize(bitwidth=32, include_dir=INCLUDE_DIR)
@@ -37,7 +43,7 @@ class PolyError(IntEnum):
     TLAST_EARLY_SAMP_IN = 3  # TLAST was asserted before all input samples were received
     NO_TLAST_SAMP_IN = 4  # All input samples were received but TLAST was never asserted
     WRONG_NSAMP = 5  # The number of samples received does not match the expected number
-PolyErrorField = EnumField.specialize(enum_type=PolyError, include_dir=INCLUDE_DIR)
+PolyErrorField = EnumField.specialize(enum_type=PolyError)
 
 
 
@@ -50,7 +56,6 @@ class CoeffArray(DataArray):
     element_type = Float32
     static = True
     max_shape = (ncoeff,)
-    include_dir = INCLUDE_DIR
 
 
 class PolyCmdHdr(DataList):
@@ -72,7 +77,6 @@ class PolyCmdHdr(DataList):
             "description": "Number of samples",
         },
     }
-    include_dir = INCLUDE_DIR
 
 
 class PolyRespHdr(DataList):
@@ -87,7 +91,6 @@ class PolyRespHdr(DataList):
             "description": "Echo of the transaction ID sent in the command",
         },
     }
-    include_dir = INCLUDE_DIR
 
 
 class PolyRespFtr(DataList):
@@ -104,7 +107,6 @@ class PolyRespFtr(DataList):
             "description": "Error code indicating success or type of failure",
         },
     }
-    include_dir = INCLUDE_DIR
 
 
 SCHEMA_CLASSES = [
@@ -131,190 +133,421 @@ class PolySimResult:
         return self.resp_ftr.error == PolyError.NO_ERROR
 
 
-class PolyAccel(object):
-    """
-    Python model for the polynomial accelerator.
+# ---------------------------------------------------------------------------
+# SimPy accelerator model (synthesizable HwComponent)
+# ---------------------------------------------------------------------------
 
-    This class implements the core streaming polynomial evaluation logic.
-    In a real implementation this would be synthesized into hardware; here we
-    use NumPy to evaluate a degree-3 polynomial on a vector of input samples.
-    """
+@dataclass
+class PolyAccelComponent(HwComponent):
+    """SimPy model of the polynomial accelerator kernel."""
 
+    in_bw:        HwParam[int] = 32
+    out_bw:       HwParam[int] = 32
+    clk:          Clock = field(default_factory=lambda: Clock(freq=1e9))
+    proc_ii:      int = 1
+    proc_latency: int = 10
+
+    logger:       Logger | NullLogger = field(default_factory=NullLogger)
+    """Logger for debugging timing"""
+
+    unroll_factor: int = 1
+    """Unroll factor for the polynomial evaluation loop. Must be a positive integer that divides the number of coefficients (4 in this example)."""
+
+    def __post_init__(self) -> None:
+        super().__post_init__()
+        self.s_in  = StreamIFSlave( name=f'{self.name}_s_in',  sim=self.sim, bitwidth=self.in_bw)
+        self.m_out = StreamIFMaster(name=f'{self.name}_m_out', sim=self.sim, bitwidth=self.out_bw)
+        self.add_endpoint(self.s_in)
+        self.add_endpoint(self.m_out)
+        self._job: int = 0
+
+    @sim_only
+    def _inc_job(self) -> None:
+        self._job += 1
+
+    def run_proc(self) -> ProcessGen[None]:
+        while True:
+            self.logger.log(event='proc_begin', job=self._job)
+            cmd_hdr: PolyCmdHdr = yield from self.s_in.get(PolyCmdHdr)
+            yield from self.evaluate(cmd_hdr, self.s_in, self.m_out)
+            self._inc_job()
+
+    @synthesizable
     def evaluate(
         self,
         cmd_hdr: PolyCmdHdr,
-        samp_in: npt.NDArray[np.float32],
-    ) -> tuple[PolyRespHdr, npt.NDArray[np.float32], PolyRespFtr]:
-        """
-        Evaluate the polynomial described by *cmd_hdr* on every element of *samp_in*.
+        s_in: StreamIFSlave,
+        m_out: StreamIFMaster,
+    ) -> ProcessGen[None]:
 
-        Parameters
-        ----------
-        cmd_hdr : PolyCmdHdr
-            Command header containing the transaction ID, polynomial coefficients
-            (constant term first), and expected number of samples.
-        samp_in : npt.NDArray[np.float32]
-            Input samples to evaluate.
-
-        Returns
-        -------
-        tuple[PolyRespHdr, npt.NDArray[np.float32], PolyRespFtr]
-            Response header, output samples, and response footer.
-        """
+        # Write the response header with the echo of the transaction ID
         resp_hdr = PolyRespHdr()
         resp_hdr.tx_id = cmd_hdr.tx_id
+        self.logger.log(event='resp_hdr_write_begin', job=self._job)
+        yield from m_out.write(resp_hdr)
 
-        coeffs = np.asarray(cmd_hdr.coeffs, dtype=np.float32)
-        x = np.asarray(samp_in, dtype=np.float32)
-        y = np.zeros_like(x)
-        power = np.ones_like(x)
-        for coeff in coeffs:
+
+        # Start the sample reading.  Since the processing is pipelined,
+        # we can log the start of the sample read
+        self.logger.log(event='samp_read_begin', job=self._job)
+        samp_in, tstart = yield from s_in.get_pipelined(
+            Float32, count=cmd_hdr.nsamp)
+
+        # Perform the polynomial evaluation.
+        y = np.zeros_like(samp_in, dtype=np.float32)
+        power = np.ones_like(samp_in, dtype=np.float32)
+        for coeff in cmd_hdr.coeffs:
             y += coeff * power
-            power *= x
+            power *= samp_in
+
+        t_out_start = tstart + self.proc_latency * self.clk.period
+
+        # Per unit processing time
+        proc_time = cmd_hdr.nsamp / self.unroll_factor * self.proc_ii * self.clk.period
+        proc_time = max(0.0, proc_time + (t_out_start - self.env.now))
+        yield self.timeout(proc_time)
+
+        yield from m_out.write_pipelined(
+            SchemaArray(data=y, elem_type=Float32), t_out_start
+        )
+        self.logger.log(event='samp_out_write_end', job=self._job)
 
         resp_ftr = PolyRespFtr()
-        resp_ftr.nsamp_read = len(x)
-        resp_ftr.error = PolyError.NO_ERROR if len(x) == int(cmd_hdr.nsamp) else PolyError.WRONG_NSAMP
+        resp_ftr.nsamp_read = len(samp_in)
+        resp_ftr.error = (PolyError.NO_ERROR if len(samp_in) == cmd_hdr.nsamp
+                          else PolyError.WRONG_NSAMP)
+        yield from m_out.write(resp_ftr)
+        self.logger.log(event='proc_end', job=self._job)
 
-        return resp_hdr, y, resp_ftr
 
+# ---------------------------------------------------------------------------
+# SimPy testbench
+# ---------------------------------------------------------------------------
 
-class PolyTest(object):
-    """Stateful test/demo harness for the polynomial accelerator flow."""
+@dataclass(kw_only=True)
+class PolyTB(SimObj):
+    """Drives one polynomial transaction and captures the response."""
 
-    def __init__(
-        self,
-        nsamp: int = 100,
-        example_dir: Path = EXAMPLE_DIR,
-        include_dir: str = INCLUDE_DIR,
-    ):
-        self.nsamp = max(1, int(nsamp))
-        self.example_dir = Path(example_dir)
-        self.include_dir = include_dir
+    cmd_hdr: PolyCmdHdr
+    samp_in: npt.NDArray[np.float32]
+    word_bw: int = 32
 
-        self.poly_accel: PolyAccel | None = None
-        self.cmd_hdr: PolyCmdHdr | None = None
-        self.samp_in: npt.NDArray[np.float32] | None = None
+    def __post_init__(self) -> None:
+        super().__post_init__()
+        self.m_in  = StreamIFMaster(name=f'{self.name}_m_in',  sim=self.sim, bitwidth=self.word_bw)
+        self.s_out = StreamIFSlave( name=f'{self.name}_s_out', sim=self.sim, bitwidth=self.word_bw)
         self.resp_hdr: PolyRespHdr | None = None
         self.samp_out: npt.NDArray[np.float32] | None = None
         self.resp_ftr: PolyRespFtr | None = None
 
-    def _build_inputs(self) -> None:
-        """Construct the command header and input sample vector."""
+    def run_proc(self) -> ProcessGen[None]:
+        bw = self.word_bw
+        yield from self.m_in.write(self.cmd_hdr.serialize(word_bw=bw))
+        yield from self.m_in.write(write_array(self.samp_in, elem_type=Float32, word_bw=bw))
+
+        resp_words = yield from self.s_out.get()
+        samp_words = yield from self.s_out.get()
+        ftr_words  = yield from self.s_out.get()
+
+        self.resp_hdr = PolyRespHdr().deserialize(resp_words, word_bw=bw)
+        self.samp_out = read_array(samp_words, elem_type=Float32, word_bw=bw, shape=int(self.cmd_hdr.nsamp))
+        self.resp_ftr = PolyRespFtr().deserialize(ftr_words, word_bw=bw)
+
+
+# ---------------------------------------------------------------------------
+# Stream wiring
+# ---------------------------------------------------------------------------
+
+def connect(sim: Simulation, tb: PolyTB, accel: PolyAccelComponent, clk: Clock) -> None:
+    """Wire in_stream and out_stream between the testbench and the accelerator."""
+    in_stream  = StreamIF(sim=sim, clk=clk)
+    out_stream = StreamIF(sim=sim, clk=clk)
+
+    in_stream.bind( "master", tb.m_in)
+    in_stream.bind( "slave",  accel.s_in)
+    out_stream.bind("master", accel.m_out)
+    out_stream.bind("slave",  tb.s_out)
+
+
+# ---------------------------------------------------------------------------
+# BuildDag steps for the poly simulation pipeline
+# ---------------------------------------------------------------------------
+
+class BuildInputsStep(BuildStep):
+    """Create the command header and input sample vector."""
+
+    def __init__(self, nsamp: int = 100) -> None:
+        super().__init__()
+        self._nsamp = nsamp
+
+    def run(self, config: BuildConfig, results: dict = {}) -> BuildResult:
         coeffs = CoeffArray()
         coeffs.val = np.array([1.0, -2.0, -3.0, 4.0], dtype=np.float32)
 
-        self.cmd_hdr = PolyCmdHdr()
-        self.cmd_hdr.tx_id = 42
-        self.cmd_hdr.coeffs = coeffs.val
-        self.cmd_hdr.nsamp = self.nsamp
+        cmd_hdr = PolyCmdHdr()
+        cmd_hdr.tx_id = 42
+        cmd_hdr.coeffs = coeffs.val
+        cmd_hdr.nsamp = self._nsamp
 
-        self.samp_in = np.linspace(0.0, 1.0, self.nsamp, dtype=np.float32)
+        samp_in = np.linspace(0.0, 1.0, self._nsamp, dtype=np.float32)
 
-    def simulate(self) -> PolySimResult:
-        """
-        Run the Python model and store both inputs and outputs.
-
-        Returns
-        -------
-        PolySimResult
-            Result bundle with the command header, input samples, response
-            header, output samples, and response footer.
-        """
-        self._build_inputs()
-
-        self.poly_accel = PolyAccel()
-        self.resp_hdr, self.samp_out, self.resp_ftr = self.poly_accel.evaluate(
-            self.cmd_hdr, self.samp_in
+        return BuildResult(
+            success=True,
+            artifacts={
+                "cmd_hdr": ObjectArtifact(value=cmd_hdr),
+                "samp_in": ObjectArtifact(value=samp_in),
+            },
         )
 
-        return PolySimResult(
-            cmd_hdr=self.cmd_hdr,
-            samp_in=self.samp_in,
-            resp_hdr=self.resp_hdr,
-            samp_out=self.samp_out,
-            resp_ftr=self.resp_ftr,
+
+class GenCppStep(BuildStep):
+    """Generate schema and utility headers needed for the Vitis flow."""
+
+    def __init__(self, example_dir: Path, include_dir: str = "include") -> None:
+        super().__init__()
+        self._example_dir = Path(example_dir)
+        self._include_dir = include_dir
+
+    def run(self, config: BuildConfig, results: dict = {}) -> BuildResult:
+        cfg = BuildConfig(root_dir=self._example_dir)
+        dag = BuildDag()
+        dag.add(StreamUtilsStep(output_dir=self._include_dir))
+        for cls in SCHEMA_CLASSES:
+            dag.add(DataSchemaStep(cls, word_bw_supported=WORD_BW_SUPPORTED, include_dir=self._include_dir))
+        dag.add(ArrayUtilsStep(Float32, WORD_BW_SUPPORTED))
+        inner_results = dag.run(cfg)
+
+        failed = [name for name, r in inner_results.items() if not r.success]
+        if failed:
+            return BuildResult(success=False, message=f"Code generation failed: {failed}")
+
+        include_path = self._example_dir / self._include_dir
+        return BuildResult(
+            success=True,
+            artifacts={"include_dir": FileArtifact(path=include_path)},
         )
 
-    def gen_vitis_code(self) -> list[Path]:
-        """Generate schema and utility headers needed for the Vitis flow."""
-        cfg = BuildConfig(root_dir=self.example_dir)
-        generated_paths: list[Path] = []
-        for schema_class in SCHEMA_CLASSES:
-            result = schema_class.as_buildable(word_bw_supported=WORD_BW_SUPPORTED).run(cfg)
-            generated_paths.append(result.artifacts["include"])
-        generated_paths.append(gen_array_utils(Float32, WORD_BW_SUPPORTED, cfg=cfg, streamutils_dir=self.include_dir))
-        StreamUtilsStep(output_dir=self.include_dir).run(cfg)
-        return generated_paths
 
-    def write_input_files(self, data_dir: Path | None = None) -> Path:
-        """Write binary test-vector files for the Vitis testbench.
+class PySimStep(BuildStep):
+    """Run the Python SimPy simulation and capture the result."""
 
-        The Python model (``simulate()``) must have been run first.
+    def __init__(
+        self,
+        log_file: Path | str | None = None,
+        in_bw: int = 32,
+        out_bw: int = 32,
+        unroll_factor: int = 1,
+    ) -> None:
+        super().__init__()
+        self._log_file = log_file
+        self._in_bw = in_bw
+        self._out_bw = out_bw
+        self._unroll_factor = unroll_factor
 
-        Parameters
-        ----------
-        data_dir : Path | None
-            Directory in which to write the files.  Defaults to
-            ``<example_dir>/data``.
+    def resolve_deps(self, other_steps: list) -> None:
+        self._deps = [s for s in other_steps if isinstance(s, BuildInputsStep)]
 
-        Returns
-        -------
-        Path
-            The directory containing the written files.
-        """
-        if self.cmd_hdr is None or self.samp_in is None or self.resp_hdr is None:
-            self.simulate()
+    def run(self, config: BuildConfig, results: dict = {}) -> BuildResult:
+        inputs_result = results.get("BuildInputsStep")
+        if inputs_result is None:
+            return BuildResult(success=False, message="BuildInputsStep result not found")
 
-        if data_dir is None:
-            data_dir = self.example_dir / "data"
+        cmd_hdr = inputs_result.object("cmd_hdr")
+        samp_in = inputs_result.object("samp_in")
+
+        sim = Simulation()
+        clk = Clock(freq=1e9)
+        log_file = self._log_file
+        logger_kwargs: dict = {}
+        if log_file is not None:
+            Path(log_file).parent.mkdir(parents=True, exist_ok=True)
+            logger_kwargs["logger"] = Logger(
+                name="poly_log", sim=sim,
+                file_path=log_file, fields=["event", "job"],
+            )
+        accel = PolyAccelComponent(
+            name="poly_accel", sim=sim,
+            in_bw=self._in_bw, out_bw=self._out_bw,
+            unroll_factor=self._unroll_factor,
+            **logger_kwargs,
+        )
+        tb = PolyTB(
+            name="poly_tb", sim=sim,
+            cmd_hdr=cmd_hdr, samp_in=samp_in,
+            word_bw=self._in_bw,
+        )
+        connect(sim, tb, accel, clk)
+        sim.run_sim()
+
+        sim_result = PolySimResult(
+            cmd_hdr=cmd_hdr,
+            samp_in=samp_in,
+            resp_hdr=tb.resp_hdr,
+            samp_out=tb.samp_out,
+            resp_ftr=tb.resp_ftr,
+        )
+        artifacts: dict = {"sim_result": ObjectArtifact(value=sim_result)}
+        if log_file is not None:
+            artifacts["log"] = FileArtifact(path=Path(log_file))
+        return BuildResult(success=True, artifacts=artifacts)
+
+
+class ValidateTimingStep(BuildStep):
+    """Read the simulation log and verify timing expectations."""
+
+    def __init__(self, proc_latency: int = 10, period: float = 1e-9) -> None:
+        super().__init__()
+        self._proc_latency = proc_latency
+        self._period = period
+
+    def resolve_deps(self, other_steps: list) -> None:
+        self._deps = [s for s in other_steps if isinstance(s, PySimStep)]
+
+    def run(self, config: BuildConfig, results: dict = {}) -> BuildResult:
+        import csv
+
+        py_sim_result = results.get("PySimStep")
+        if py_sim_result is None:
+            return BuildResult(success=False, message="PySimStep result not found")
+        log_artifact = py_sim_result.artifacts.get("log")
+        if log_artifact is None:
+            return BuildResult(success=False, message="No log artifact from PySimStep")
+
+        events: dict[str, float] = {}
+        with open(log_artifact.path, newline="") as f:
+            for row in csv.DictReader(f):
+                ev = row["event"]
+                if ev not in events:
+                    events[ev] = float(row["time"])
+
+        t_start = events.get("samp_read_begin")
+        t_end = events.get("samp_out_write_end")
+        if t_start is None or t_end is None:
+            return BuildResult(
+                success=False,
+                message=f"Missing timing events in log: {list(events)}",
+            )
+
+        durations = {"samp_read_to_write_end": t_end - t_start}
+        return BuildResult(
+            success=True,
+            artifacts={"durations": ObjectArtifact(value=durations)},
+        )
+
+
+class WriteInputsStep(BuildStep):
+    """Write binary test-vector files for the Vitis testbench."""
+
+    def __init__(self, example_dir: Path, data_dir: Path | None = None) -> None:
+        super().__init__()
+        self._example_dir = Path(example_dir)
+        self._data_dir = data_dir
+
+    def resolve_deps(self, other_steps: list) -> None:
+        self._deps = [s for s in other_steps if isinstance(s, (BuildInputsStep, PySimStep))]
+
+    def run(self, config: BuildConfig, results: dict = {}) -> BuildResult:
+        inputs_result = results.get("BuildInputsStep")
+        if inputs_result is None:
+            return BuildResult(success=False, message="BuildInputsStep result not found")
+
+        cmd_hdr = inputs_result.object("cmd_hdr")
+        samp_in = inputs_result.object("samp_in")
+
+        data_dir = Path(self._data_dir) if self._data_dir else self._example_dir / "data"
         data_dir.mkdir(parents=True, exist_ok=True)
 
-        self.cmd_hdr.write_uint32_file(data_dir / "cmd_hdr_data.bin")
+        cmd_hdr.write_uint32_file(data_dir / "cmd_hdr_data.bin")
         write_uint32_file(
-            self.samp_in,
+            samp_in,
             elem_type=Float32,
             file_path=data_dir / "samp_in_data.bin",
-            nwrite=self.cmd_hdr.nsamp,
+            nwrite=cmd_hdr.nsamp,
         )
 
-        return data_dir
-
-    def read_vitis_outputs(self, data_dir: Path) -> PolySimResult:
-        """Read Vitis testbench output files and compare against the Python model.
-
-        Parameters
-        ----------
-        data_dir : Path
-            Directory containing the output files written by the Vitis testbench.
-
-        Returns
-        -------
-        PolySimResult
-            Result bundle populated from the Vitis output files.
-
-        Raises
-        ------
-        RuntimeError
-            If any output does not match the Python golden model.
-        """
-        got_resp_hdr = PolyRespHdr().read_uint32_file(data_dir / "resp_hdr_data.bin")
-        got_resp_ftr = PolyRespFtr().read_uint32_file(data_dir / "resp_ftr_data.bin")
-        got_samp_out = np.asarray(
-            read_uint32_file(
-                data_dir / "samp_out_data.bin",
-                elem_type=Float32,
-                shape=int(self.resp_ftr.nsamp_read),
-            ),
-            dtype=np.float32,
+        return BuildResult(
+            success=True,
+            artifacts={"data_dir": FileArtifact(path=data_dir)},
         )
 
-        if not got_resp_hdr.is_close(self.resp_hdr):
-            raise RuntimeError("Response header mismatch after Vitis C-simulation.")
-        if not got_resp_ftr.is_close(self.resp_ftr):
-            raise RuntimeError("Response footer mismatch after Vitis C-simulation.")
-        if not np.allclose(got_samp_out, self.samp_out[: got_samp_out.size], rtol=1e-6, atol=1e-6):
-            raise RuntimeError("Sample output mismatch after Vitis C-simulation.")
+
+class CSimStep(BuildStep):
+    """Invoke Vitis HLS C-simulation."""
+
+    def __init__(self, example_dir: Path, live_output: bool = False) -> None:
+        super().__init__()
+        self._example_dir = Path(example_dir)
+        self._live_output = live_output
+
+    def resolve_deps(self, other_steps: list) -> None:
+        self._deps = [s for s in other_steps if isinstance(s, (GenCppStep, WriteInputsStep))]
+
+    def run(self, config: BuildConfig, results: dict = {}) -> BuildResult:
+        write_result = results.get("WriteInputsStep")
+        if write_result is None:
+            return BuildResult(success=False, message="WriteInputsStep result not found")
+        data_dir = write_result.path("data_dir")
+
+        vitis_env = {
+            "PYSILICON_POLY_COSIM": "0",
+            "PYSILICON_POLY_TRACE_LEVEL": "none",
+        }
+
+        try:
+            result = toolchain.run_vitis_hls(
+                self._example_dir / "run.tcl",
+                work_dir=self._example_dir,
+                capture_output=not self._live_output,
+                env=vitis_env,
+            )
+            if result.stdout:
+                print(result.stdout)
+            if result.stderr:
+                print(result.stderr)
+        except Exception as exc:
+            return BuildResult(success=False, message=str(exc))
+
+        return BuildResult(
+            success=True,
+            artifacts={"data_dir": FileArtifact(path=data_dir)},
+        )
+
+
+class ValidateCSimStep(BuildStep):
+    """Read Vitis testbench output files and compare against the Python model."""
+
+    def resolve_deps(self, other_steps: list) -> None:
+        self._deps = [s for s in other_steps if isinstance(s, (CSimStep, PySimStep))]
+
+    def run(self, config: BuildConfig, results: dict = {}) -> BuildResult:
+        py_sim_result = results.get("PySimStep")
+        csim_result = results.get("CSimStep")
+        if py_sim_result is None or csim_result is None:
+            return BuildResult(success=False, message="Missing dependency results")
+
+        sim_result: PolySimResult = py_sim_result.object("sim_result")
+        data_dir = csim_result.path("data_dir")
+
+        try:
+            got_resp_hdr = PolyRespHdr().read_uint32_file(data_dir / "resp_hdr_data.bin")
+            got_resp_ftr = PolyRespFtr().read_uint32_file(data_dir / "resp_ftr_data.bin")
+            got_samp_out = np.asarray(
+                read_uint32_file(
+                    data_dir / "samp_out_data.bin",
+                    elem_type=Float32,
+                    shape=int(sim_result.resp_ftr.nsamp_read),
+                ),
+                dtype=np.float32,
+            )
+        except Exception as exc:
+            return BuildResult(success=False, message=f"Failed to read Vitis outputs: {exc}")
+
+        if not got_resp_hdr.is_close(sim_result.resp_hdr):
+            return BuildResult(success=False, message="Response header mismatch after Vitis C-simulation.")
+        if not got_resp_ftr.is_close(sim_result.resp_ftr):
+            return BuildResult(success=False, message="Response footer mismatch after Vitis C-simulation.")
+        if not np.allclose(got_samp_out, sim_result.samp_out[:got_samp_out.size], rtol=1e-6, atol=1e-6):
+            return BuildResult(success=False, message="Sample output mismatch after Vitis C-simulation.")
 
         sync_status_path = data_dir / "sync_status.json"
         if sync_status_path.exists():
@@ -325,46 +558,91 @@ class PolyTest(object):
                 "resp_ftr_tlast": "tlast_at_end",
             }
             if sync_status != expected_sync:
-                raise RuntimeError(
-                    "Output-stream TLAST synchronization mismatch after Vitis C-simulation. "
-                    f"Expected {expected_sync}, got {sync_status}."
+                return BuildResult(
+                    success=False,
+                    message=f"TLAST sync mismatch. Expected {expected_sync}, got {sync_status}.",
                 )
 
-        return PolySimResult(
-            cmd_hdr=self.cmd_hdr,
-            samp_in=self.samp_in,
+        vitis_result = PolySimResult(
+            cmd_hdr=sim_result.cmd_hdr,
+            samp_in=sim_result.samp_in,
             resp_hdr=got_resp_hdr,
             samp_out=got_samp_out,
             resp_ftr=got_resp_ftr,
         )
+        return BuildResult(
+            success=True,
+            artifacts={"vitis_result": ObjectArtifact(value=vitis_result)},
+        )
 
-    def report_synthesis(self) -> None:
-        """Parse and print the Vitis HLS C-synthesis report.
 
-        Raises
-        ------
-        RuntimeError
-            If any synthesized loop has a pipeline initiation interval greater
-            than 1.
-        """
+class CSynthStep(BuildStep):
+    """Run Vitis HLS C-synthesis (and optionally RTL co-simulation)."""
+
+    def __init__(self, example_dir: Path, live_output: bool = False) -> None:
+        super().__init__()
+        self._example_dir = Path(example_dir)
+        self._live_output = live_output
+
+    def resolve_deps(self, other_steps: list) -> None:
+        # Depend on CSimStep (in addition to GenCppStep) so that synthesis always
+        # runs after C-simulation.  Both steps call `open_project -reset` in
+        # run.tcl, so they must be serialised; the one that runs last wins.
+        self._deps = [s for s in other_steps if isinstance(s, (GenCppStep, CSimStep))]
+
+    def run(self, config: BuildConfig, results: dict = {}) -> BuildResult:
+        vitis_env = {
+            "PYSILICON_POLY_COSIM": "1",
+            "PYSILICON_POLY_TRACE_LEVEL": "none",
+        }
+
+        try:
+            result = toolchain.run_vitis_hls(
+                self._example_dir / "run.tcl",
+                work_dir=self._example_dir,
+                capture_output=not self._live_output,
+                env=vitis_env,
+            )
+            if result.stdout:
+                print(result.stdout)
+            if result.stderr:
+                print(result.stderr)
+        except Exception as exc:
+            return BuildResult(success=False, message=str(exc))
+
+        report_dir = self._example_dir / "pysilicon_poly_proj" / "solution1"
+        return BuildResult(
+            success=True,
+            artifacts={"report_dir": FileArtifact(path=report_dir)},
+        )
+
+
+class InspectSynthStep(BuildStep):
+    """Parse the Vitis HLS C-synthesis report and print resource/timing tables."""
+
+    def resolve_deps(self, other_steps: list) -> None:
+        self._deps = [s for s in other_steps if isinstance(s, CSynthStep)]
+
+    def run(self, config: BuildConfig, results: dict = {}) -> BuildResult:
         try:
             from pysilicon.utils.csynthparse import CsynthParser
         except ModuleNotFoundError as exc:
-            print(f"Skipping csynth report parsing: {exc}")
-            return
+            return BuildResult(success=False, message=f"csynthparse not available: {exc}")
 
-        sol_path = self.example_dir / "pysilicon_poly_proj" / "solution1"
+        csyn_result = results.get("CSynthStep")
+        if csyn_result is None:
+            return BuildResult(success=False, message="CSynthStep result not found")
+
+        sol_path = csyn_result.path("report_dir")
         if not sol_path.exists():
-            print(f"Skipping csynth report parsing: solution directory not found at {sol_path}")
-            return
+            return BuildResult(success=False, message=f"Solution directory not found: {sol_path}")
 
         try:
             parser = CsynthParser(sol_path=str(sol_path))
             parser.get_loop_pipeline_info()
             parser.get_resources()
         except (FileNotFoundError, ValueError) as exc:
-            print(f"Skipping csynth report parsing: {exc}")
-            return
+            return BuildResult(success=False, message=f"Synthesis report parsing failed: {exc}")
 
         print("\nLatency and Initiation Interval:")
         if parser.loop_df.empty:
@@ -373,18 +651,18 @@ class PolyTest(object):
             print(parser.loop_df.to_string())
             non_unit_ii = parser.loop_df[
                 parser.loop_df["PipelineII"].apply(
-                    lambda value: isinstance(value, (int, np.integer)) and value > 1
+                    lambda v: isinstance(v, (int, np.integer)) and v > 1
                 )
             ]
-            if non_unit_ii.empty:
-                print("All reported loops have PipelineII <= 1.")
-            else:
+            if not non_unit_ii.empty:
                 print("Loops with PipelineII > 1:")
                 print(non_unit_ii.to_string())
-                raise RuntimeError(
-                    "Vitis synthesis produced loops with PipelineII > 1. "
-                    "See the loop pipeline report above."
+                return BuildResult(
+                    success=False,
+                    message="Vitis synthesis produced loops with PipelineII > 1.",
+                    artifacts={"loop_df": ObjectArtifact(value=parser.loop_df)},
                 )
+            print("All reported loops have PipelineII <= 1.")
 
         print("\nResource Usage:")
         if parser.res_df.empty:
@@ -392,219 +670,83 @@ class PolyTest(object):
         else:
             print(parser.res_df.to_string())
 
-    def test_vitis(
-        self,
-        cosim: bool = False,
-        trace_level: str = "none",
-        live_output: bool = False,
-    ) -> PolySimResult:
-        """Run the Vitis kernel and testbench, then compare against the Python model.
-
-        This method orchestrates the full file-based Vitis simulation workflow:
-
-        1. Run the Python model (``simulate()``) if not already done.
-        2. Generate Vitis HLS headers via ``gen_vitis_code()``.
-        3. Write binary input files for the C++ testbench via ``write_input_files()``.
-        4. Invoke Vitis HLS C-simulation (and, optionally, RTL co-simulation).
-        5. Read the testbench output files and compare against the Python reference.
-        6. Parse and print the C-synthesis report via ``report_synthesis()``.
-
-        Parameters
-        ----------
-        cosim : bool
-            If ``True``, also run C-synthesis and RTL co-simulation after the
-            C-simulation step.  Default is ``False``.
-        trace_level : str
-            RTL co-simulation trace level passed through to ``cosim_design``.
-            Supported values are ``none``, ``port``, and ``all``. Ignored when
-            ``cosim`` is ``False``.
-        live_output : bool
-            If ``True``, stream Vitis stdout/stderr directly to the terminal
-            while the subprocess runs instead of buffering it for later.
-
-        Returns
-        -------
-        PolySimResult
-            Result bundle with outputs read from the Vitis testbench.
-
-        Raises
-        ------
-        RuntimeError
-            If the Vitis simulation outputs do not match the Python model.
-        """
-        if self.cmd_hdr is None or self.resp_hdr is None:
-            self.simulate()
-
-        if trace_level not in TRACE_LEVELS:
-            raise ValueError(
-                f"Unsupported trace level '{trace_level}'. Expected one of {TRACE_LEVELS}."
-            )
-
-        self.gen_vitis_code()
-        data_dir = self.write_input_files()
-
-        vitis_env = {
-            "PYSILICON_POLY_COSIM": "1" if cosim else "0",
-            "PYSILICON_POLY_TRACE_LEVEL": trace_level,
-        }
-
-        result = toolchain.run_vitis_hls(
-            self.example_dir / "run.tcl",
-            work_dir=self.example_dir,
-            capture_output=not live_output,
-            env=vitis_env,
+        return BuildResult(
+            success=True,
+            artifacts={"loop_df": ObjectArtifact(value=parser.loop_df)},
         )
 
-        vitis_result = self.read_vitis_outputs(data_dir)
-        self.report_synthesis()
 
-        if result.stdout:
-            print(result.stdout)
-        if result.stderr:
-            print(result.stderr)
+# ---------------------------------------------------------------------------
+# Canonical DAG builder
+# ---------------------------------------------------------------------------
 
-        return vitis_result
+def build_poly_dag(
+    nsamp: int = 100,
+    in_bw: int = 32,
+    out_bw: int = 32,
+    unroll_factor: int = 1,
+    log_file: Path | str | None = None,
+    example_dir: Path = EXAMPLE_DIR,
+    live_output: bool = False,
+) -> BuildDag:
+    dag = BuildDag()
+    dag.add(BuildInputsStep(nsamp=nsamp))
+    dag.add(GenCppStep(example_dir=example_dir))
+    dag.add(PySimStep(log_file=log_file, in_bw=in_bw, out_bw=out_bw, unroll_factor=unroll_factor))
+    dag.add(ValidateTimingStep())
+    dag.add(WriteInputsStep(example_dir=example_dir))
+    dag.add(CSimStep(example_dir=example_dir, live_output=live_output))
+    dag.add(ValidateCSimStep())
+    dag.add(CSynthStep(example_dir=example_dir, live_output=live_output))
+    dag.add(InspectSynthStep())
+    return dag
 
-    def maybe_plot(self) -> None:
-        """Plot the polynomial input/output using matplotlib, if available."""
-        try:
-            import matplotlib.pyplot as plt
-        except ImportError:
-            print("matplotlib is not installed; skipping plot")
-            return
 
-        plt.plot(self.samp_in, self.samp_out, label=f"tx_id={self.cmd_hdr.tx_id}")
-        plt.xlabel("Input sample")
-        plt.ylabel("Polynomial output")
-        plt.title("Polynomial evaluation")
-        plt.grid(True)
-        plt.legend()
-        plt.show()
-
-    def analyze_timing(self, vcd_path: str | Path) -> "PolyTimingResult":
-        """
-        Analyze timing from an existing VCD file captured from the poly kernel.
-
-        Delegates to :func:`timing_analysis.analyze_poly_vcd`.  The VCD can
-        be generated by :meth:`generate_vcd` or by running ``xsim_vcd``
-        separately; it does **not** require rerunning RTL co-simulation.
-
-        Parameters
-        ----------
-        vcd_path : str | Path
-            Path to the VCD file to analyze.
-
-        Returns
-        -------
-        PolyTimingResult
-            Structured result with decoded headers, samples, and timing info.
-        """
-        from timing_analysis import analyze_poly_vcd
-        return analyze_poly_vcd(vcd_path)
-
-    def generate_vcd(
-        self,
-        output_vcd: str = "dump.vcd",
-        soln: str | None = "solution1",
-        trace_level: str = "*",
-    ) -> Path:
-        """
-        Generate a VCD file by re-running the Vivado RTL simulation.
-
-        Delegates to :func:`pysilicon.scripts.xsim_vcd.run_xsim_vcd`.
-        Requires Vivado/xsim installed on Windows.
-
-        Parameters
-        ----------
-        output_vcd : str
-            Output VCD filename written inside a ``vcd/`` subdirectory.
-        soln : str | None
-            Solution name inside the component directory.
-        trace_level : str
-            VCD trace level (``'*'`` for all signals, ``'port'`` for ports only).
-
-        Returns
-        -------
-        Path
-            Absolute path to the written VCD file.
-        """
-        from pysilicon.scripts.xsim_vcd import run_xsim_vcd
-        return run_xsim_vcd(
-            top="poly",
-            comp="pysilicon_poly_proj",
-            out=output_vcd,
-            soln=soln,
-            trace_level=trace_level,
-            workdir=self.example_dir,
-        )
-
+# ---------------------------------------------------------------------------
+# CLI entry point
+# ---------------------------------------------------------------------------
 
 def main() -> None:
-    """Command-line entry point for the polynomial accelerator example.
-
-    Usage examples::
-
-        # Python simulation only
-        python poly_demo.py --skip-vitis
-
-        # Python + Vitis C-simulation
-        python poly_demo.py
-
-        # Python + Vitis C-simulation + RTL co-simulation
-        python poly_demo.py --cosim
-
-        # Python + Vitis RTL co-simulation with full waveform tracing
-        python poly_demo.py --cosim --trace-level all
-
-        # Python + Vitis C-simulation with live Vitis output in the terminal
-        python poly_demo.py --live-output
-    """
     parser = argparse.ArgumentParser(description="Run the polynomial accelerator example.")
-    parser.add_argument("--nsamp", type=int, default=100, help="Number of input samples to generate.")
-    parser.add_argument("--skip-vitis", action="store_true", help="Only run the Python side of the example.")
-    parser.add_argument("--cosim", action="store_true", help="Also run RTL co-simulation after C-synthesis.")
     parser.add_argument(
-        "--trace-level",
-        choices=TRACE_LEVELS,
-        default="none",
-        help="RTL co-simulation trace level passed to Vitis. Only used with --cosim.",
+        "--through", metavar="STEP", default="ValidateTimingStep",
+        help="Run the DAG up to and including this step. Use --list-steps to see options.",
     )
     parser.add_argument(
-        "--live-output",
-        action="store_true",
-        help="Stream Vitis stdout/stderr directly to the terminal while it runs.",
+        "--list-steps", action="store_true",
+        help="Print all available step names in execution order and exit.",
     )
-    parser.add_argument("--plot", action="store_true", help="Plot the Python golden-model output.")
+    parser.add_argument("--nsamp", type=int, default=100)
+    parser.add_argument("--in-bw", type=int, default=32, choices=[32, 64])
+    parser.add_argument("--out-bw", type=int, default=32, choices=[32, 64])
+    parser.add_argument("--unroll-factor", type=int, default=1)
+    parser.add_argument("--log", metavar="FILE", default="logs/poly_log.csv")
+    parser.add_argument("--live-output", action="store_true")
     args = parser.parse_args()
 
-    test = PolyTest(nsamp=args.nsamp)
-    test.gen_vitis_code()
+    log_file = Path(args.log)
+    log_file.parent.mkdir(parents=True, exist_ok=True)
 
-    result = test.simulate()
-    print(
-        f"Python simulation: tx_id={result.resp_hdr.tx_id}, "
-        f"nsamp={result.resp_ftr.nsamp_read}, "
-        f"error={result.resp_ftr.error.name}, "
-        f"passed={result.passed}"
+    dag = build_poly_dag(
+        nsamp=args.nsamp,
+        in_bw=args.in_bw,
+        out_bw=args.out_bw,
+        unroll_factor=args.unroll_factor,
+        log_file=log_file,
+        live_output=args.live_output,
     )
 
-    if args.plot:
-        test.maybe_plot()
-
-    if args.skip_vitis:
+    if args.list_steps:
+        for name in dag.step_names():
+            print(name)
         return
 
-    try:
-        vitis_result = test.test_vitis(
-            cosim=args.cosim,
-            trace_level=args.trace_level,
-            live_output=args.live_output,
-        )
-    except RuntimeError as exc:
-        print(f"Vitis run failed: {exc}")
-        return
+    config = BuildConfig(root_dir=EXAMPLE_DIR)
+    results = dag.run(config, through=args.through)
 
-    print(f"Vitis simulation matched Python model. nsamp={vitis_result.resp_ftr.nsamp_read}")
+    for name, result in results.items():
+        status = "OK" if result.success else f"FAILED: {result.message}"
+        print(f"  {name}: {status}")
 
 
 if __name__ == "__main__":

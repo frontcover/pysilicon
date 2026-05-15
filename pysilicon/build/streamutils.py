@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from pysilicon.build.build import Buildable, BuildConfig, BuildResult
+from pysilicon.build.build import Buildable, BuildConfig, BuildResult, FileArtifact
 
 
 _SRC_DIR = Path(__file__).resolve().parent
@@ -54,8 +54,8 @@ class StreamUtilsStep(Buildable):
             raise FileNotFoundError(f"StreamUtils source file not found: {src_path}")
         return src_path.read_text(encoding="utf-8")
 
-    def run(self, config: BuildConfig) -> BuildResult:
-        artifacts: dict[str, Path] = {}
+    def run(self, config: BuildConfig, results: dict = {}) -> BuildResult:
+        artifacts: dict = {}
         try:
             out_dir = config.root_dir / self._output_dir
             out_dir.mkdir(parents=True, exist_ok=True)
@@ -64,13 +64,13 @@ class StreamUtilsStep(Buildable):
                 content = self.generate(key, config)
                 out_path = config.root_dir / self.build_outputs[key]
                 out_path.write_text(content, encoding="utf-8")
-                artifacts[key] = out_path
+                artifacts[key] = FileArtifact(path=out_path)
 
             cpp_path = out_dir / "streamutils.cpp"
             if config.needs_legacy_streamutils_cpp():
                 content = self.generate("cpp", config)
                 cpp_path.write_text(content, encoding="utf-8")
-                artifacts["cpp"] = cpp_path
+                artifacts["cpp"] = FileArtifact(path=cpp_path)
             else:
                 if cpp_path.exists():
                     cpp_path.unlink()

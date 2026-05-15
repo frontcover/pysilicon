@@ -3845,7 +3845,6 @@ class DataSchemaStep(Buildable):
         include_dir: str | None = None,
         include_filename: str | None = None,
     ) -> None:
-        super().__init__()
         if not schema_cls.can_gen_include:
             raise ValueError(
                 f"{schema_cls.__name__} does not support standalone include generation."
@@ -3858,9 +3857,9 @@ class DataSchemaStep(Buildable):
         self._include_dir: str = include_dir if include_dir is not None else schema_cls.include_dir
         self._include_filename: str | None = include_filename
         self._streamutils_output_dir: Path = Path(".")
+        super().__init__()  # _schema is set, so _default_name() works
 
-    @property
-    def name(self) -> str:
+    def _default_name(self) -> str:
         return f"{self._schema.__name__}Step"
 
     # ------------------------------------------------------------------
@@ -3914,7 +3913,7 @@ class DataSchemaStep(Buildable):
 
     def _dep_include_lines(self) -> list[str]:
         """Return ``#include`` lines for schema dependencies."""
-        dep_step_map = {d._schema: d for d in self._deps if isinstance(d, DataSchemaStep)}
+        dep_step_map = {d._schema: d for d in self.deps if isinstance(d, DataSchemaStep)}
         lines = []
         for dep_schema in self._schema.get_dependencies():
             if dep_schema in dep_step_map:
@@ -3926,7 +3925,7 @@ class DataSchemaStep(Buildable):
 
     def _dep_tb_include_lines(self) -> list[str]:
         """Return TB ``#include`` lines for schema dependencies."""
-        dep_step_map = {d._schema: d for d in self._deps if isinstance(d, DataSchemaStep)}
+        dep_step_map = {d._schema: d for d in self.deps if isinstance(d, DataSchemaStep)}
         lines = []
         for dep_schema in self._schema.get_dependencies():
             if dep_schema in dep_step_map:
@@ -4039,7 +4038,7 @@ class DataSchemaStep(Buildable):
         """
         from pysilicon.build.streamutils import StreamUtilsStep
 
-        self._deps = []
+        self.deps = []
 
         su_steps = [s for s in other_steps if isinstance(s, StreamUtilsStep)]
         if not su_steps:
@@ -4054,7 +4053,7 @@ class DataSchemaStep(Buildable):
             )
         su_step = su_steps[0]
         self._streamutils_output_dir = su_step.output_dir
-        self._deps.append(su_step)
+        self.deps.append(su_step)
 
         for dep_schema in self._schema.get_dependencies():
             dep_step = next(
@@ -4065,7 +4064,7 @@ class DataSchemaStep(Buildable):
                 None,
             )
             if dep_step is not None:
-                self._deps.append(dep_step)
+                self.deps.append(dep_step)
 
 
 __all__ = [

@@ -17,9 +17,9 @@ Stream interfaces model **unidirectional data bursts** from one component to ano
 
 | Class | Role | Key parameters |
 |---|---|---|
-| `StreamIF` | Interface | `clk`, `bitwidth`, `latency_init`, `stream_type`, `notify_type` |
-| `StreamIFMaster` | Master endpoint | `bitwidth`, `stream_type`, `notify_type` |
-| `StreamIFSlave` | Slave endpoint | `bitwidth`, `stream_type`, `notify_type`, `rx_proc`, `queue_size` |
+| `StreamIF` | Interface | `clk`, `bitwidth`, `latency_init` |
+| `StreamIFMaster` | Master endpoint | `bitwidth` |
+| `StreamIFSlave` | Slave endpoint | `bitwidth`, `rx_proc`, `queue_size` |
 
 ### Latency model
 
@@ -30,26 +30,54 @@ transfer_time = (latency_init + nwords) / clk.freq   [seconds]
 - `latency_init` — fixed cycles for wire delay, arbitration, etc.
 - `nwords` — one additional cycle per word in the burst (one beat per clock)
 
-### Stream type
+### Pipelined processing
 
-`StreamType` selects the bus protocol variant:
+Use `get_pipelined` / `write_pipelined` when the component processes data as it streams through (rather than buffering the full burst first). These methods carry pipeline timing explicitly so the simulation reflects the latency and throughput of synthesized hardware.
 
-| Value | Meaning |
-|---|---|
-| `StreamType.axi4` | AXI4-Stream (default) |
-| `StreamType.hls` | Vitis HLS stream |
+**`StreamIFSlave.get_pipelined(schema_type, count=N)`** returns `(data, tstart)`:
 
-The stream type must match between master and slave. The interface infers it from the first bound endpoint if not set explicitly.
+- `data` — deserialized burst, identical to `get(schema_type, count=N)`
+- `tstart` — SimPy time when the **first** word of the burst arrived
 
-### Notify type
+`tstart` is back-calculated from the completion time of the burst:
 
-`TransferNotifyType` controls when the slave's `rx_proc` is invoked:
+```
+tstart = env.now - (nwords_transferred - 1) * clk.period
+```
 
-| Value | Behaviour |
-|---|---|
-| `TransferNotifyType.end_only` | `rx_proc(words)` called once, after the full burst arrives (default) |
-| `TransferNotifyType.begin_end` | `rx_proc(words)` called at burst start; `notify_end_proc()` called at burst end |
-| `TransferNotifyType.per_word` | Not yet supported |
+This is exact for a back-pressure-free, II=1 input stream.
+
+**`StreamIFMaster.write_pipelined(data, t_out_start, ii=1)`** waits until `t_out_start` before beginning the write:
+
+```
+t_out_start = tstart + proc_latency * clk.period
+```
+
+`ii` documents the output initiation interval (informational; reserved for future per-word output pacing).
+
+**Skeleton for a pipelined `evaluate`:**
+
+```python
+@synthesizable
+def evaluate(self, cmd_hdr, s_in, m_out):
+    resp_hdr = PolyRespHdr()
+    resp_hdr.tx_id = cmd_hdr.tx_id
+
+    samp_in, tstart = yield from s_in.get_pipelined(Float32, count=cmd_hdr.nsamp)
+
+    # ... compute output y from samp_in ...
+
+    t_out_start = tstart + self.proc_latency * self.clk.period
+    yield from m_out.write_pipelined(
+        SchemaArray(data=y, elem_type=Float32), t_out_start, ii=self.proc_ii
+    )
+
+    resp_ftr = PolyRespFtr()
+    resp_ftr.nsamp_read = len(samp_in)
+    return resp_hdr, resp_ftr
+```
+
+Set `proc_ii` and `proc_latency` on the component to match values reported by HLS synthesis for the `evaluate` loop.
 
 ### Example: point-to-point stream
 
@@ -207,8 +235,8 @@ def rx_proc(self, words: Words) -> ProcessGen:
 ```python
 from pysilicon.hw.interface import (
     StreamIF, StreamIFMaster, StreamIFSlave,
+    StreamGetPipelinedStmt, StreamWritePipelinedStmt,
     CrossBarIF, CrossBarIFInput, CrossBarIFOutput,
-    StreamType, TransferNotifyType,
     Words,
 )
 from pysilicon.hw.clock import Clock

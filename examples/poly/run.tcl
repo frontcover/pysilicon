@@ -14,7 +14,11 @@ if {[file exists $streamutils_cpp]} {
 
 open_solution -reset "solution1"
 set_part {xc7z020clg484-1}
-create_clock -period 10
+set clk_period_ns 10
+if {[info exists ::env(PYSILICON_POLY_CLK_PERIOD_NS)]} {
+    set clk_period_ns $::env(PYSILICON_POLY_CLK_PERIOD_NS)
+}
+create_clock -period $clk_period_ns
 set data_dir [file join $script_dir "data"]
 
 set do_cosim 0

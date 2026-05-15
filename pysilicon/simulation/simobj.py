@@ -100,6 +100,15 @@ class SimObj(NamedObject):
         The default implementation is a no-op.
         """
 
+    def error_cleanup(self) -> None:
+        """Called when the simulation terminates with an error.
+
+        Override to release resources (close files, etc.) that must be
+        cleaned up regardless of whether ``run_proc`` completed.  Must be
+        safe to call at any point, even if ``run_proc`` never started.
+        The default implementation is a no-op.
+        """
+
     # ------------------------------------------------------------------
     # Environment helpers
     # ------------------------------------------------------------------

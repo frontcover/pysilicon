@@ -1,0 +1,231 @@
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from enum import IntEnum
+from pathlib import Path
+
+import numpy as np
+import numpy.typing as npt
+
+from pysilicon.hw.arrayutils import SchemaArray, read_array, read_uint32_file, write_array
+from pysilicon.hw.clock import Clock
+from pysilicon.hw.dataschema import DataArray, DataList, EnumField, FloatField, IntField
+from pysilicon.hw.hw_component import HwComponent, HwParam
+from pysilicon.hw.interface import StreamIF, StreamIFMaster, StreamIFSlave
+from pysilicon.hw.synth import sim_only, synthesizable
+from pysilicon.simulation.logger import Logger, NullLogger
+from pysilicon.simulation.simobj import ProcessGen, SimObj
+from pysilicon.simulation.simulation import Simulation
+
+
+INCLUDE_DIR = "include"
+WORD_BW_SUPPORTED = [32, 64]
+TxIdField = IntField.specialize(bitwidth=16, signed=False)
+NsampField = IntField.specialize(bitwidth=16, signed=False)
+Float32 = FloatField.specialize(bitwidth=32, include_dir=INCLUDE_DIR)
+
+
+class PolyError(IntEnum):
+    NO_ERROR = 0
+    TLAST_EARLY_CMD_HDR = 1
+    NO_TLAST_CMD_HDR = 2
+    TLAST_EARLY_SAMP_IN = 3
+    NO_TLAST_SAMP_IN = 4
+    WRONG_NSAMP = 5
+
+PolyErrorField = EnumField.specialize(enum_type=PolyError)
+
+
+class CoeffArray(DataArray):
+    """Array of polynomial coefficients in ascending order (constant term first)."""
+    ncoeff: int = 4
+    element_type = Float32
+    static = True
+    max_shape = (ncoeff,)
+
+
+class PolyCmdHdr(DataList):
+    """Command header: transaction ID, coefficients, and sample count."""
+    elements = {
+        "tx_id": {"schema": TxIdField, "description": "Transaction ID"},
+        "coeffs": {"schema": CoeffArray, "description": "Polynomial coefficients"},
+        "nsamp": {"schema": NsampField, "description": "Number of samples"},
+    }
+
+
+class PolyRespHdr(DataList):
+    """Response header: echo of the transaction ID."""
+    elements = {
+        "tx_id": {"schema": TxIdField, "description": "Echo of the transaction ID"},
+    }
+
+
+class PolyRespFtr(DataList):
+    """Response footer: sample count and error code."""
+    elements = {
+        "nsamp_read": {"schema": NsampField, "description": "Number of samples returned"},
+        "error": {"schema": PolyErrorField, "description": "Error code"},
+    }
+
+
+SCHEMA_CLASSES = [
+    PolyErrorField,
+    CoeffArray,
+    PolyCmdHdr,
+    PolyRespHdr,
+    PolyRespFtr,
+]
+
+
+@dataclass(slots=True)
+class PolySimResult:
+    """Result bundle from a polynomial accelerator simulation run."""
+
+    cmd_hdr: PolyCmdHdr
+    samp_in: npt.NDArray[np.float32]
+    resp_hdr: PolyRespHdr
+    samp_out: npt.NDArray[np.float32]
+    resp_ftr: PolyRespFtr
+
+    @property
+    def passed(self) -> bool:
+        return self.resp_ftr.error == PolyError.NO_ERROR
+
+    @classmethod
+    def from_paths(
+        cls,
+        cmd_hdr_path: Path,
+        samp_in_path: Path,
+        resp_dir: Path,
+    ) -> PolySimResult:
+        """Reconstruct a PolySimResult by reading its component files from disk.
+
+        ``cmd_hdr_path`` / ``samp_in_path`` point at the input test vectors
+        (written by BuildInputsStep); ``resp_dir`` is the directory holding
+        ``resp_hdr.bin``, ``samp_out.bin`` and ``resp_ftr.bin`` (written by
+        PySimStep or ValidateCSimStep).
+        """
+        cmd_hdr = PolyCmdHdr().read_uint32_file(cmd_hdr_path)
+        samp_in = np.array(
+            read_uint32_file(samp_in_path, elem_type=Float32, shape=int(cmd_hdr.nsamp)),
+            dtype=np.float32,
+        )
+        resp_hdr = PolyRespHdr().read_uint32_file(resp_dir / "resp_hdr.bin")
+        resp_ftr = PolyRespFtr().read_uint32_file(resp_dir / "resp_ftr.bin")
+        samp_out = np.array(
+            read_uint32_file(resp_dir / "samp_out.bin", elem_type=Float32,
+                             shape=int(resp_ftr.nsamp_read)),
+            dtype=np.float32,
+        )
+        return cls(
+            cmd_hdr=cmd_hdr, samp_in=samp_in,
+            resp_hdr=resp_hdr, samp_out=samp_out, resp_ftr=resp_ftr,
+        )
+
+
+@dataclass
+class PolyAccelComponent(HwComponent):
+    """SimPy model of the polynomial accelerator kernel."""
+
+    in_bw:        HwParam[int] = 32
+    out_bw:       HwParam[int] = 32
+    clk:          Clock = field(default_factory=lambda: Clock(freq=1e9))
+    proc_ii:      int = 1
+    proc_latency: int = 10
+    logger:       Logger | NullLogger = field(default_factory=NullLogger)
+    unroll_factor: int = 1
+
+    def __post_init__(self) -> None:
+        super().__post_init__()
+        self.s_in  = StreamIFSlave( name=f'{self.name}_s_in',  sim=self.sim, bitwidth=self.in_bw)
+        self.m_out = StreamIFMaster(name=f'{self.name}_m_out', sim=self.sim, bitwidth=self.out_bw)
+        self.add_endpoint(self.s_in)
+        self.add_endpoint(self.m_out)
+        self._job: int = 0
+
+    @sim_only
+    def _inc_job(self) -> None:
+        self._job += 1
+
+    def run_proc(self) -> ProcessGen[None]:
+        while True:
+            self.logger.log(event='proc_begin', job=self._job)
+            cmd_hdr: PolyCmdHdr = yield from self.s_in.get(PolyCmdHdr)
+            yield from self.evaluate(cmd_hdr, self.s_in, self.m_out)
+            self._inc_job()
+
+    @synthesizable
+    def evaluate(
+        self,
+        cmd_hdr: PolyCmdHdr,
+        s_in: StreamIFSlave,
+        m_out: StreamIFMaster,
+    ) -> ProcessGen[None]:
+        resp_hdr = PolyRespHdr()
+        resp_hdr.tx_id = cmd_hdr.tx_id
+        self.logger.log(event='resp_hdr_write_begin', job=self._job)
+        yield from m_out.write(resp_hdr)
+
+        self.logger.log(event='samp_read_begin', job=self._job)
+        samp_in, tstart = yield from s_in.get_pipelined(Float32, count=cmd_hdr.nsamp)
+
+        y = np.zeros_like(samp_in, dtype=np.float32)
+        power = np.ones_like(samp_in, dtype=np.float32)
+        for coeff in cmd_hdr.coeffs:
+            y += coeff * power
+            power *= samp_in
+
+        t_out_start = tstart + self.proc_latency * self.clk.period
+        proc_time = cmd_hdr.nsamp / self.unroll_factor * self.proc_ii * self.clk.period
+        proc_time = max(0.0, proc_time + (t_out_start - self.env.now))
+        yield self.timeout(proc_time)
+
+        yield from m_out.write_pipelined(SchemaArray(data=y, elem_type=Float32), t_out_start)
+        self.logger.log(event='samp_out_write_end', job=self._job)
+
+        resp_ftr = PolyRespFtr()
+        resp_ftr.nsamp_read = len(samp_in)
+        resp_ftr.error = (PolyError.NO_ERROR if len(samp_in) == cmd_hdr.nsamp
+                          else PolyError.WRONG_NSAMP)
+        yield from m_out.write(resp_ftr)
+        self.logger.log(event='proc_end', job=self._job)
+
+
+@dataclass(kw_only=True)
+class PolyTB(SimObj):
+    """Drives one polynomial transaction and captures the response."""
+
+    cmd_hdr: PolyCmdHdr
+    samp_in: npt.NDArray[np.float32]
+    word_bw: int = 32
+
+    def __post_init__(self) -> None:
+        super().__post_init__()
+        self.m_in  = StreamIFMaster(name=f'{self.name}_m_in',  sim=self.sim, bitwidth=self.word_bw)
+        self.s_out = StreamIFSlave( name=f'{self.name}_s_out', sim=self.sim, bitwidth=self.word_bw)
+        self.resp_hdr: PolyRespHdr | None = None
+        self.samp_out: npt.NDArray[np.float32] | None = None
+        self.resp_ftr: PolyRespFtr | None = None
+
+    def run_proc(self) -> ProcessGen[None]:
+        bw = self.word_bw
+        yield from self.m_in.write(self.cmd_hdr.serialize(word_bw=bw))
+        yield from self.m_in.write(write_array(self.samp_in, elem_type=Float32, word_bw=bw))
+
+        resp_words = yield from self.s_out.get()
+        samp_words = yield from self.s_out.get()
+        ftr_words  = yield from self.s_out.get()
+
+        self.resp_hdr = PolyRespHdr().deserialize(resp_words, word_bw=bw)
+        self.samp_out = read_array(samp_words, elem_type=Float32, word_bw=bw, shape=int(self.cmd_hdr.nsamp))
+        self.resp_ftr = PolyRespFtr().deserialize(ftr_words, word_bw=bw)
+
+
+def connect(sim: Simulation, tb: PolyTB, accel: PolyAccelComponent, clk: Clock) -> None:
+    """Wire a testbench's master/slave ports to the accelerator via two StreamIFs."""
+    in_stream  = StreamIF(sim=sim, clk=clk)
+    out_stream = StreamIF(sim=sim, clk=clk)
+    in_stream.bind( "master", tb.m_in)
+    in_stream.bind( "slave",  accel.s_in)
+    out_stream.bind("master", accel.m_out)
+    out_stream.bind("slave",  tb.s_out)

@@ -1,7 +1,7 @@
 ---
 title: Build System
 parent: Guide
-nav_order: 5
+nav_order: 7
 has_children: true
 ---
 

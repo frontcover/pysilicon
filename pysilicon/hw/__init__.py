@@ -43,6 +43,10 @@ from .memory import (
     Memory,
     MemComponent,
 )
+from .interface import (
+    StreamGetPipelinedStmt,
+    StreamWritePipelinedStmt,
+)
 
 __all__ = [
     "DataSchema",
@@ -78,4 +82,6 @@ __all__ = [
     "AddrUnit",
     "Memory",
     "MemComponent",
+    "StreamGetPipelinedStmt",
+    "StreamWritePipelinedStmt",
 ]

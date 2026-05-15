@@ -4,6 +4,51 @@ _Status: draft — delete when feature ships_
 
 ---
 
+## 0. Module layout
+
+### New files
+
+| File | Contents | Layer |
+|---|---|---|
+| `pysilicon/hw/synth.py` | `@synthesizable` decorator (`synth_fn` optional; omitting defaults to stub) | `hw` — no build deps |
+| `pysilicon/hw/hw_component.py` | `HwComponent`, `HwParam[T]`, `SynthContext`, `ControlMode` | `hw` |
+| `pysilicon/hw/hwstmt.py` | `HwStmt` base hierarchy, `HwVar`, `HwExpr` (`Ref`, `FieldRef`), `SynthCallStmt` | `hw` — IR types only, no codegen |
+| `pysilicon/build/hwcodegen.py` | `HwStmtExtractor`, `HlsKernelStep`, `HlsImplStep` | `build` |
+
+### Where endpoint `HwStmt` subclasses live
+
+Endpoint-owned statement classes stay alongside their endpoint:
+
+| Statement class | Lives in |
+|---|---|
+| `StreamGetStmt`, `StreamWriteStmt`, `StreamDrainStmt` | `pysilicon/hw/interface.py` |
+| `MMArrayReadStmt`, `MMArrayWriteStmt`, `MMSchemaReadStmt`, `MMSchemaWriteStmt` | `pysilicon/hw/memif.py` |
+
+All import `SynthCallStmt` from `pysilicon/hw/hwstmt.py`.
+
+### Dependency graph (no cycles)
+
+```
+dataschema.py ──────────────────────────────────────────────┐
+arrayutils.py ──────────────────────────────────────────────┤
+synth.py      (no hw deps)                                  │
+                                                            ▼
+interface.py  → dataschema.py, synth.py                    hwstmt.py → dataschema.py, arrayutils.py
+memif.py      → interface.py                                           (interface.py, hw_component.py
+component.py  → (interface.py TYPE_CHECKING only)                       under TYPE_CHECKING)
+                                                            │
+hw_component.py → component.py, synth.py                   │
+                  (hwstmt.py TYPE_CHECKING only)            │
+                                                            │
+build/hwcodegen.py → hw/hw_component.py, hw/hwstmt.py, build/build.py
+```
+
+`synth.py` has no imports from other `hw/` files — only `typing` — so both `interface.py` and `hw_component.py` can safely import `@synthesizable` from it without creating cycles.
+
+`hwstmt.py` references `InterfaceEndpoint` and `HwComponent` only under `TYPE_CHECKING` (for `HwVar.producer` and `SynthCallStmt` input types), avoiding a cycle with `interface.py`.
+
+---
+
 ## 1. What exists today
 
 ### Core simulation infrastructure
@@ -80,7 +125,7 @@ A synthesizable component is a `Component` that additionally carries:
 | Addition | What it is | Status |
 |---|---|---|
 | `HwParam[T]` field annotations | compile-time template parameters | **Gap** |
-| `@compute_hook` methods | Python reference impl + C++ stub target | **Gap** |
+| `@synthesizable` methods (no `synth_fn`) | Python reference impl + C++ stub target | **Gap** |
 | Control mode declaration | `free_running` vs `per_invocation` | **Gap** |
 | Typed endpoints | already in `Component.endpoints` via `DataSchema` | Exists |
 | `run_proc` returning `HwStmt` tree | dual-use orchestration spec | Exists (needs `HwStmt` classes) |
@@ -125,6 +170,38 @@ void poly_accel(
 )
 ```
 
+#### `HwParam[T]` implementation
+
+`HwParam` is a plain `Generic[T]` class. This makes `HwParam[int]` a standard `typing._GenericAlias` detectable via `typing.get_origin` and `typing.get_args`:
+
+```python
+from typing import Generic, TypeVar
+T = TypeVar('T')
+
+class HwParam(Generic[T]):
+    """Marks a dataclass field as a C++ template parameter.
+    
+    In simulation the field behaves as a normal Python attribute (dataclass
+    does not enforce types). At build time the extractor collects all
+    HwParam fields from get_type_hints() and maps them to C++ template names.
+    """
+```
+
+Detection at build time:
+```python
+import typing
+hints = typing.get_type_hints(type(component))
+hw_params = {
+    name: name.upper()          # in_bw → IN_BW, nwords_max → NWORDS_MAX
+    for name, hint in hints.items()
+    if typing.get_origin(hint) is HwParam
+}
+```
+
+C++ name convention: `field_name.upper()` — snake_case becomes UPPER_SNAKE_CASE. `in_bw → IN_BW`, `nwords_max → NWORDS_MAX`.
+
+`HwParam` lives in `hw_component.py` (not `synth.py`) since it is only relevant to `HwComponent` field annotations.
+
 #### `SynthContext` carries the parameter mapping
 
 `SynthContext` is passed to every `synth_fn`. It exposes `HwParam` fields both as values (for simulation-side checks) and as C++ name strings (for code emission):
@@ -144,13 +221,13 @@ class SynthContext:
 
 A `synth_fn` for `StreamIFSlave.get` uses `ctx.cpp_param('in_bw')` to emit `hls::stream<ap_uint<IN_BW>>` rather than the hard-coded literal `32`. The same `synth_fn` works for any bitwidth configuration without modification.
 
-### 3.3 `@compute_hook`
+### 3.3 Synthesizable compute methods
 
-Sugar for `@synthesizable(synth_fn=_stub_call_synth)` (see §4.5). The Python body is the simulation golden reference; the `synth_fn` emits a C++ stub call into `_impl.cpp` rather than generating the full implementation.
+User-implemented algorithmic leaves are decorated with `@synthesizable` (no `synth_fn`). When `synth_fn` is omitted, the decorator defaults to stub behavior: at build time it emits a call to a user-written function in `_impl.cpp` rather than generating the full implementation. The Python body is the simulation golden reference and also drives HLS C-sim.
 
 ```python
 class PolyAccelComponent(HwComponent):
-    @compute_hook
+    @synthesizable
     def evaluate(self,
                  cmd_hdr: PolyCmdHdr,
                  samp_in: SchemaArray[Float32],
@@ -160,6 +237,7 @@ class PolyAccelComponent(HwComponent):
 ```
 
 All arguments and return values must be `DataSchema` instances or `SchemaArray[T]` — the two synthesizable data types (§4.0). `MMIFMaster` endpoints for sub-component memory are passed as additional arguments before the data args.
+
 
 ### 3.4 Synthesis hints — deferred
 
@@ -202,7 +280,7 @@ The allowed patterns in `run_proc` are deliberately narrow:
 | `while True:` | `WhileStmt` | only `while True` — no condition expression |
 | `var: T = yield from self.ep.method(...)` | `SynthCallStmt` + `HwVar` binding | `ep` method must have `@synthesizable`; `T` is `DataSchema` or `SchemaArray[T]` |
 | `yield from self.ep.method(var)` | `SynthCallStmt` (no binding) | write / drain — no output variable |
-| `a, b = self.hook(var1, var2)` | `SynthCallStmt` + multiple `HwVar` bindings | hook must have `@synthesizable` (i.e. `@compute_hook`); types from return annotation |
+| `a, b = self.hook(var1, var2)` | `SynthCallStmt` + multiple `HwVar` bindings | hook must have `@synthesizable`; types from return annotation |
 | `if var.field == EnumValue:` | `CaseStmt` | restricted form only; body may contain `continue` |
 | `continue` | `ContinueStmt` | only inside `while True` |
 
@@ -284,7 +362,7 @@ HwStmt (base)
 ├── SeqStmt            — sequential list of child HwStmts
 ├── CaseStmt           — enum match (→ switch/if-else in C++)
 ├── ForStmt            — constant-trip-count loop
-├── HookStmt           — @compute_hook call → C++ stub in _impl.cpp
+├── HookStmt           — @synthesizable (no synth_fn) call → C++ stub in _impl.cpp
 └── ContinueStmt       — continue in while body
 ```
 
@@ -301,39 +379,56 @@ Each endpoint `HwStmt` subclass lives alongside its endpoint class. Codegen call
 
 ### 4.5 `@synthesizable` — the unified decorator
 
-Every call that appears in a synthesizable `run_proc` must be on a method decorated with `@synthesizable`. This applies equally to **interface endpoint methods** and **compute hooks** — there is no separate concept.
+#### Implementation (`pysilicon/hw/synth.py`)
+
+`@synthesizable` must work both with and without parentheses. The standard Python pattern:
 
 ```python
-# Module-level synth function — no forward-reference problem
+def synthesizable(fn=None, *, synth_fn=None):
+    def decorator(f):
+        f._is_synthesizable = True
+        f._synth_fn = synth_fn   # None → stub behavior at codegen time
+        return f
+    if fn is not None:
+        return decorator(fn)   # used as @synthesizable (no parens)
+    return decorator           # used as @synthesizable(...) with args
+```
+
+The extractor detects synthesizable methods via `getattr(method, '_is_synthesizable', False)`. The `_synth_fn` attribute is `None` for user compute methods (stub) or a callable for endpoint methods (full codegen).
+
+`synth.py` imports only from `typing` — no other `pysilicon` modules.
+
+Every call that appears in a synthesizable `run_proc` must be on a method decorated with `@synthesizable`. This applies equally to **interface endpoint methods** and **user compute methods** — there is no separate concept, no `@compute_hook`.
+
+`synth_fn` is optional:
+
+| Usage | Meaning |
+|---|---|
+| `@synthesizable(synth_fn=_gen_fn)` | custom codegen — used on interface endpoint methods |
+| `@synthesizable` (no `synth_fn`) | stub codegen — emits a call to user-written C++ in `_impl.cpp` |
+
+```python
+# Interface endpoint — explicit synth_fn generates full inline HLS code
 def _gen_stream_get(ctx: SynthContext,
-                    inputs: list[HwVar],
-                    outputs: list[HwVar]) -> str:
-    # emits: schema_type var; read_schema(stream, var); ...
-    ...
+                    inputs: list[HwVar | InterfaceEndpoint],
+                    outputs: list[HwVar]) -> str: ...
 
 class StreamIFSlave(InterfaceEndpoint):
     @synthesizable(synth_fn=_gen_stream_get)
     def get(self, schema_type, count=None):
-        ...  # SimPy body unchanged — runs in simulation as-is
-```
+        ...  # SimPy body unchanged
 
-`@compute_hook` is sugar for `@synthesizable(synth_fn=_stub_call_synth)`, where `_stub_call_synth` is a shared helper that emits a call to a user-written function in `_impl.cpp`:
-
-```python
-def _stub_call_synth(ctx, inputs, outputs) -> str:
-    # emits: evaluate(cmd_hdr, samp_in, &resp_hdr, &samp_out, &resp_ftr);
-    ...
-
+# User compute method — no synth_fn; stub emits a call to _impl.cpp
 class PolyAccelComponent(HwComponent):
-    @synthesizable(synth_fn=_stub_call_synth)   # i.e. @compute_hook
+    @synthesizable
     def evaluate(self, cmd_hdr, samp_in): ...
 ```
 
-The `synth_fn` signature is always `(ctx: SynthContext, inputs: list[HwVar | InterfaceEndpoint], outputs: list[HwVar]) -> str`. Inputs may be typed values (`HwVar`) or interface endpoints (`InterfaceEndpoint` subclasses such as `MMIFMaster`) passed directly from `self`. Outputs are always `HwVar` — they are bound to Python variable names by the extractor. The extractor calls `synth_fn` when walking the `HwStmt` tree during `to_cpp()`.
+The `synth_fn` signature is always `(ctx: SynthContext, inputs: list[HwVar | InterfaceEndpoint], outputs: list[HwVar]) -> str`. Inputs may be typed values (`HwVar`) or interface endpoints (`InterfaceEndpoint` subclasses such as `MMIFMaster`) passed directly from `self`. Outputs are always `HwVar` — bound to Python variable names by the extractor. The extractor calls `synth_fn` when walking the `HwStmt` tree during `to_cpp()`.
 
-**Why module-level functions instead of class methods?** At class definition time `self` and `cls` are not yet available, so `method=self.get_synth` cannot work. A module-level function (or a `@staticmethod` on a separate codegen class) avoids the forward-reference problem entirely.
+**Why module-level functions instead of class methods?** At class definition time `self` and `cls` are not yet available, so `synth_fn=self.get_synth` cannot work. A module-level function avoids the forward-reference problem entirely.
 
-The `HwStmt` subclasses for I/O operations (`StreamGetStmt`, `MMArrayReadStmt`, etc.) remain as typed wrappers — they hold the `synth_fn` reference, the input/output `HwVar`s, and produce helpful error messages. But they are created by the extractor, not by the user.
+The `HwStmt` subclasses for I/O operations (`StreamGetStmt`, `MMArrayReadStmt`, etc.) remain as typed wrappers — they hold the `synth_fn` reference, the input/output `HwVar`s, and produce helpful error messages. They are created by the extractor, not by the user.
 
 ### 4.6 Error handling in `run_proc`
 
@@ -368,7 +463,7 @@ Validation performed:
 - Every statement is in the allowed set (error otherwise)
 - Every variable used is bound by an earlier statement in the same scope
 - Every `FieldRef` matches a real field on its schema type
-- Every `@compute_hook` call matches the declared signature
+- Every `@synthesizable` method call matches the declared signature
 
 | | AST visitor | `HwStmt` |
 |---|---|---|
@@ -464,10 +559,11 @@ Codegen plugs into the existing `BuildDag` as new `Buildable` steps:
 
 ```
 DataSchemaStep      (exists)  →  <component>.h (type declarations)
-HlsKernelStep       (new)     →  <component>.cpp
+HlsKernelStep       (new)     →  <component>.cpp + int main() for TB components
 HlsImplStep         (new)     →  <component>_impl.cpp (preserve user edits)
-HlsCsimTbStep       (new)     →  testbench loading .npy goldens
 ```
+
+There is no separate `HlsCsimTbStep`. A testbench is just another `HwComponent` synthesized by `HlsKernelStep`. The only TB-specific difference is that interface pragmas are suppressed (no `#pragma HLS INTERFACE` directives) and `HlsKernelStep` emits a short `int main()` wrapper when `is_testbench=True` is set on the component. The transformation from `run_proc` → C++ is identical for both DUT and TB.
 
 Backend-specific steps extend `BuildStep` and consume the outputs above:
 
@@ -483,7 +579,7 @@ A `Backend` ABC with `VitisBackend` and `VivadoBackend` implementations.
 ## 8. Verification ladder
 
 1. **pysilicon native** — `run_proc` golden vectors at every component boundary (`.npy` files)
-2. **HLS C-sim** — `HlsCsimTbStep` loads `.npy` goldens, drives the generated kernel
+2. **HLS C-sim** — TB `HwComponent` synthesized by `HlsKernelStep` loads `.npy` goldens, drives the DUT kernel
 3. **SW-emu** — `v++ -t sw_emu` (Vitis) or VFS (Versal) for multi-component integration
 4. **HW-emu / XSIM** — cycle-level checks, post-route timing
 
@@ -493,21 +589,21 @@ Same golden vectors at every level. No hand-written testbench.
 
 ## 9. Identified gaps (not yet in repo)
 
-| Gap | Needed for |
-|---|---|
-| `HwComponent` class | synthesizable component marker |
-| `@compute_hook` decorator | user/AI algorithmic leaves |
-| `HwParam[T]` generic annotation + `SynthContext` class | compile-time template parameters; `synth_fn` uses `ctx.cpp_param()` to emit template names vs. literals |
-| `SchemaArray[T]` generic class in `pysilicon/hw/dataschema.py` (or `hwstmt.py`) | type annotation for homogeneous transfer buffers at synthesis boundaries |
-| `@synthesizable(synth_fn=...)` decorator + `SynthContext` class | unified marker for all synthesizable calls (endpoints and hooks) |
-| `@compute_hook` as sugar for `@synthesizable(synth_fn=_stub_call_synth)` | marks user-implemented algorithmic leaves |
-| `HwStmt` base + `SynthCallStmt` + control flow subclasses (`WhileStmt`, `SeqStmt`, `CaseStmt`, `ContinueStmt`) in `pysilicon/hw/hwstmt.py` | internal IR for codegen |
-| Typed `SynthCallStmt` subclasses (`StreamGetStmt`, `StreamWriteStmt`, `StreamDrainStmt`; future `MMArrayReadStmt`, etc.) — live alongside their endpoint class | better error messages and introspection |
-| `HwVar` + `HwExpr` (`Ref`, `FieldRef`) in `pysilicon/hw/hwstmt.py` | internal symbolic values used by extractor and codegen |
-| `HwStmtExtractor` (`ast.NodeVisitor`) in `pysilicon/hw/hwstmt.py` | parses `run_proc` AST → `HwStmt` tree at build time |
-| `HlsKernelStep`, `HlsImplStep`, `HlsCsimTbStep` | module codegen |
-| `Backend` ABC + `VitisBackend`, `VivadoBackend` | system integration |
-| AXI-Lite CSR endpoint for `HwComponent` (`AxiLiteIFSlave`?) | synthesizable error/control model |
+| Gap | File | Needed for |
+|---|---|---|
+| `@synthesizable(synth_fn=...)` decorator (optional `synth_fn`; omitting it defaults to stub behavior) | `pysilicon/hw/synth.py` (NEW) | unified marker for all synthesizable calls |
+| `HwComponent(Component)`, `ControlMode` | `pysilicon/hw/hw_component.py` (NEW) | synthesizable component base |
+| `HwParam[T]` generic annotation | `pysilicon/hw/hw_component.py` (NEW) | compile-time template parameters |
+| `SynthContext` dataclass with `cpp_param()` | `pysilicon/hw/hw_component.py` (NEW) | parameter mapping passed to every `synth_fn` |
+| `HwStmt` base + control flow subclasses (`WhileStmt`, `SeqStmt`, `CaseStmt`, `ContinueStmt`, `HookStmt`) | `pysilicon/hw/hwstmt.py` (NEW) | internal IR for codegen |
+| `SynthCallStmt` base | `pysilicon/hw/hwstmt.py` (NEW) | base for all endpoint I/O statements |
+| `HwVar` + `HwExpr` (`Ref`, `FieldRef`) | `pysilicon/hw/hwstmt.py` (NEW) | symbolic values used by extractor and codegen |
+| `StreamGetStmt`, `StreamWriteStmt`, `StreamDrainStmt` | `pysilicon/hw/interface.py` (extend) | stream I/O IR nodes (endpoint-owned) |
+| `MMArrayReadStmt`, `MMArrayWriteStmt`, `MMSchemaReadStmt`, `MMSchemaWriteStmt` | `pysilicon/hw/memif.py` (extend) | MM I/O IR nodes (endpoint-owned) |
+| `HwStmtExtractor` (`ast.NodeVisitor`) | `pysilicon/build/hwcodegen.py` (NEW) | parses `run_proc` AST → `HwStmt` tree at build time |
+| `HlsKernelStep` (`is_testbench` flag suppresses pragmas + emits `int main()`), `HlsImplStep` | `pysilicon/build/hwcodegen.py` (NEW) | HLS module codegen |
+| `Backend` ABC + `VitisBackend`, `VivadoBackend` | `pysilicon/build/hwcodegen.py` or separate (NEW) | system integration |
+| AXI-Lite CSR endpoint for `HwComponent` | TBD | synthesizable error/control model |
 
 ---
 
@@ -529,15 +625,90 @@ Same golden vectors at every level. No hand-written testbench.
 
 ## 11. Phased plan
 
-| Phase | Deliverable | Dependency |
-|---|---|---|
-| 1 | `HwComponent`, `HwParam[T]`, `@compute_hook` — no codegen | nothing |
-| 2 | `HwStmt` IR classes + `HwVar`/`HwExpr` + `HwStmtExtractor` (AST → IR); `@synthesizable` decorator | Phase 1 |
-| 3 | `StreamGetStmt`, `StreamWriteStmt`, `StreamDrainStmt` on `StreamIF*`; rewrite `PolyAccelComponent.run_proc` to synthesizable subset; fix error model (no `simpy.Event`) | Phase 2 |
-| 4 | `HlsKernelStep`, `HlsImplStep` (codegen via `HwStmt.to_cpp()`) | Phase 3 + existing `gen_write`/`gen_read` |
-| 5 | `HlsCsimTbStep` + C-sim round-trip on `PolyAccelComponent` | Phase 4 |
-| 6 | `VitisBackend` (connectivity.cfg, .xo/.xclbin, PyXRT host) | Phase 5 |
-| 7 | `VivadoBackend` (IPI Tcl, IP packaging, PYNQ driver) | Phase 5 |
-| 8 | Cross-backend regression: same scenario through both backends vs pysilicon golden | Phases 6 + 7 |
+| Phase | Deliverable | Files touched | Dependency |
+|---|---|---|---|
+| 1 | `@synthesizable` (with optional `synth_fn`); `HwComponent`, `HwParam[T]`, `SynthContext` — no codegen | `hw/synth.py` (NEW), `hw/hw_component.py` (NEW) | nothing |
+| 2 | `HwStmt` IR + `HwVar`/`HwExpr`; `HwStmtExtractor` (AST → IR) | `hw/hwstmt.py` (NEW), `build/hwcodegen.py` (NEW) | Phase 1 |
+| 3 | `StreamGetStmt`, `StreamWriteStmt`, `StreamDrainStmt`; rewrite `PolyAccelComponent.run_proc` to synthesizable subset; fix error model | `hw/interface.py` (extend) | Phase 2 |
+| 4 | `HlsKernelStep`, `HlsImplStep` (codegen via `HwStmt.to_cpp()`); TB component uses `is_testbench=True` flag | `build/hwcodegen.py` (extend) | Phase 3 + existing `gen_write`/`gen_read` |
+| 5 | C-sim round-trip on `PolyAccelComponent` + TB component | — | Phase 4 |
+| 6 | `VitisBackend` (connectivity.cfg, .xo/.xclbin, PyXRT host) | `build/hwcodegen.py` or `build/vitis.py` (NEW) | Phase 5 |
+| 7 | `VivadoBackend` (IPI Tcl, IP packaging, PYNQ driver) | `build/vivado.py` (NEW) | Phase 5 |
+| 8 | Cross-backend regression: same scenario through both backends vs pysilicon golden | — | Phases 6 + 7 |
 
 **First codegen target**: `PolyAccelComponent`. Two stream endpoints, a factored compute method, `DataSchema`-typed I/O — structurally ready. Blocked only on Phases 2–3.
+
+---
+
+## 12. Phase 1 implementation spec
+
+**Scope**: `pysilicon/hw/synth.py` and `pysilicon/hw/hw_component.py`. No `HwStmt`, no `HwStmtExtractor`, no `HwComponent.build()` — those are Phase 2.
+
+### `pysilicon/hw/synth.py`
+
+```python
+def synthesizable(fn=None, *, synth_fn=None):
+    def decorator(f):
+        f._is_synthesizable = True
+        f._synth_fn = synth_fn
+        return f
+    if fn is not None:
+        return decorator(fn)
+    return decorator
+```
+
+No other contents. No imports from `pysilicon`.
+
+### `pysilicon/hw/hw_component.py`
+
+```python
+from __future__ import annotations
+from dataclasses import dataclass
+from enum import Enum, auto
+from typing import ClassVar, Generic, TypeVar, TYPE_CHECKING
+import typing
+
+from pysilicon.hw.component import Component
+
+T = TypeVar('T')
+
+class HwParam(Generic[T]):
+    """Marks a dataclass field as a C++ template parameter."""
+
+class ControlMode(Enum):
+    AUTO = auto()          # inferred from HwStmt root at build time
+    FREE_RUNNING = auto()  # ap_ctrl_none
+    PER_INVOCATION = auto() # ap_ctrl_chain
+
+@dataclass
+class SynthContext:
+    component: HwComponent
+    params: dict[str, str]   # Python name → C++ template param name
+
+    def cpp_param(self, py_name: str) -> str:
+        if py_name in self.params:
+            return self.params[py_name]
+        return repr(getattr(self.component, py_name))
+
+    @classmethod
+    def from_component(cls, comp: HwComponent) -> SynthContext:
+        hints = typing.get_type_hints(type(comp))
+        params = {
+            name: name.upper()
+            for name, hint in hints.items()
+            if typing.get_origin(hint) is HwParam
+        }
+        return cls(component=comp, params=params)
+
+class HwComponent(Component):
+    control_mode: ClassVar[ControlMode] = ControlMode.AUTO
+```
+
+### Tests (`tests/hw/test_hw_component.py`)
+
+- `@synthesizable` with no args sets `_is_synthesizable=True`, `_synth_fn=None`
+- `@synthesizable(synth_fn=fn)` sets `_is_synthesizable=True`, `_synth_fn=fn`
+- `HwParam[int]` annotation is detectable via `typing.get_origin(hint) is HwParam`
+- `SynthContext.from_component` correctly extracts `HwParam` fields and builds `params` dict
+- `SynthContext.cpp_param` returns `'IN_BW'` for a `HwParam` field and `repr(value)` for a `ClassVar`
+- `HwComponent` can be instantiated with a `Simulation` (same as `Component`)

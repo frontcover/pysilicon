@@ -40,7 +40,6 @@ env.process(adder_proc(words))
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from enum import Enum
 from typing import TYPE_CHECKING, Callable, Generator
 import simpy
 
@@ -50,9 +49,17 @@ from pysilicon.hw.dataschema import Words
 from pysilicon.hw.named import NamedObject
 from pysilicon.hw.clock import Clock
 from pysilicon.simulation.simobj import SimObj, ProcessGen
+from pysilicon.hw.synth import synthesizable
+from pysilicon.hw.hwstmt import SynthCallStmt
 
 if TYPE_CHECKING:
     from pysilicon.hw.component import Component
+
+
+def _not_implemented_synth(ctx, inputs, outputs):
+    raise NotImplementedError(
+        "HLS codegen for this stream method is not yet implemented (Phase 4)"
+    )
 
 RxProc = TypeAlias = Callable[[Words], ProcessGen[None]]
 
@@ -131,28 +138,6 @@ class Interface(SimObj):
 
         self.endpoints[ep_name] = endpoint
         endpoint.interface = self
-
-class TransferNotifyType(Enum):
-    """
-    Methods for notifying the receiver side of interface during
-    a transfer.
-
-    - end_only:  Only notify at the end of a transfer.
-    This mode is ideal when the RX sides only begins processing after the
-    full data burst is received.
-
-    - begin_end: Notify at both the beginning and end of a transfer.
-    This mode is ideal when the RX side can begin processing as
-    soon as the RX starts.
-
-    - per_word: Notify for every beat/word transferred. This mode is
-    the most cycle accurate but also the most expensive to simulate.
-    The mode will not be initially supported.
-    """
-    end_only = "end_only"
-    begin_end = "begin_end"
-    per_word = "per_word"
-
 
 # ---------------------------------------------------------------------------
 # Shared base classes
@@ -357,20 +342,27 @@ class QueuedTransferIF(Interface):
             )
 
     def _push_to_endpoint(
-        self, ep: QueuedTransferIFSlave, words: Words
+        self, ep: QueuedTransferIFSlave, words: Words, tstart: float | None = None
     ) -> ProcessGen[None]:
         """
         Model transfer latency then push *words* into *ep*'s buffer.
 
         This is the shared write path used by all ``QueuedTransferIF`` subclasses.
+
+        If *tstart* is given, the delay is reduced to account for time already
+        elapsed since the transfer logically started (pipeline overlap).  The
+        transfer completes at ``tstart + cycles * clk.period``, clamped so that
+        the remaining delay is never negative.
         """
         cycles = self.latency_init + words.shape[0]
-        dly = cycles / self.clk.freq
-        if dly > 0:
-            yield self.timeout(dly)
 
         with ep.bus.request() as req:
             yield req
+            dly = cycles / self.clk.freq
+            if tstart is not None:
+                dly = max(0.0, dly + (tstart - self.env.now))
+            if dly > 0:
+                yield self.timeout(dly)
 
             nwords_rem = words.shape[0]
 
@@ -387,6 +379,45 @@ class QueuedTransferIF(Interface):
                 yield ep.ntx.put(nwords_rem)
 
             yield ep.data_buffer.put(words)
+
+
+# ---------------------------------------------------------------------------
+# Stream HwStmt subclasses (endpoint-owned; live alongside the endpoint)
+# ---------------------------------------------------------------------------
+
+class StreamGetStmt(SynthCallStmt):
+    """IR node produced by ``StreamIFSlave.get(...)`` calls."""
+
+    def __repr__(self) -> str:
+        outs = ', '.join(v.name for v in self.outputs)
+        return f"StreamGetStmt(outputs=[{outs}])"
+
+
+class StreamWriteStmt(SynthCallStmt):
+    """IR node produced by ``StreamIFMaster.write(...)`` calls."""
+
+    def __repr__(self) -> str:
+        ins = ', '.join(
+            getattr(v, 'name', repr(v)) for v in self.inputs
+        )
+        return f"StreamWriteStmt(inputs=[{ins}])"
+
+
+class StreamDrainStmt(SynthCallStmt):
+    """IR node produced by ``StreamIFSlave.drain()`` calls."""
+
+    def __repr__(self) -> str:
+        return "StreamDrainStmt()"
+
+
+@dataclass
+class StreamGetPipelinedStmt(SynthCallStmt):
+    """IR node for StreamIFSlave.get_pipelined() — returns (data, tstart)."""
+
+
+@dataclass
+class StreamWritePipelinedStmt(SynthCallStmt):
+    """IR node for StreamIFMaster.write_pipelined(data, t_out_start, ii)."""
 
 
 # ---------------------------------------------------------------------------
@@ -408,13 +439,6 @@ class StreamIF(QueuedTransferIF):
     callers of ``get()`` must always supply ``nwords_max``.
     """
 
-    notify_type: TransferNotifyType | None = None
-    """
-    The method for notifying the receiver side of transfers on
-    this interface. If None, the notify type will be inferred
-    from the slave endpoint.
-    """
-
     type_name = 'stream_if'
 
     def __init_subclass__(cls, **kwargs):
@@ -424,7 +448,7 @@ class StreamIF(QueuedTransferIF):
         self.endpoint_names = ('master', 'slave')
         super().__post_init__()
 
-    def write(self, words: Words) -> ProcessGen[None]:
+    def write(self, words: Words, tstart: float | None = None) -> ProcessGen[None]:
         """
         Write a burst of words to the master (TX) side of this interface.
         This will trigger the RX process on the slave side to process the
@@ -434,13 +458,16 @@ class StreamIF(QueuedTransferIF):
         ----------
         words : Words
             The block of words to write.
+        tstart : float | None
+            If provided, model the transfer as having started at *tstart*
+            (pipeline overlap).  See :meth:`_push_to_endpoint`.
         """
         if self.endpoints['slave'] is None:
             raise RuntimeError(
                 f"Cannot write to StreamIF '{self.name}' because the slave side is not bound"
             )
         slave = self.endpoints['slave']
-        yield from self._push_to_endpoint(slave, words)
+        yield from self._push_to_endpoint(slave, words, tstart=tstart)
 
     def bind(self, ep_name: str, endpoint: InterfaceEndpoint) -> None:
         if ep_name not in ('master', 'slave'):
@@ -458,16 +485,6 @@ class StreamIF(QueuedTransferIF):
                 f"Endpoint has_tlast={endpoint.has_tlast} does not match "
                 f"interface has_tlast={self.has_tlast}"
             )
-        if ep_name == "slave":
-            if self.notify_type is None:
-                self.notify_type = endpoint.notify_type
-            if self.notify_type != endpoint.notify_type:
-                raise ValueError(
-                    f"Endpoint notify type {endpoint.notify_type.value} does not match "
-                    f"interface notify type {self.notify_type.value}"
-                )
-            if self.notify_type == TransferNotifyType.per_word:
-                raise NotImplementedError("per_word notify type is not yet supported")
         self._validate_and_set_bitwidth(endpoint)
         super().bind(ep_name, endpoint)
 
@@ -481,28 +498,84 @@ class StreamIFSlave(QueuedTransferIFSlave):
     has_tlast: bool = True
     """Whether this stream carries a TLAST signal (True) or not (False)."""
 
-    notify_type: TransferNotifyType = TransferNotifyType.end_only
-    """The method for notifying the receiver side of transfers on this interface."""
-
-    notify_end_proc: Callable[[], ProcessGen[None]] | None = None
-    """
-    An optional process to call at the end of a transfer when
-    `notify_type == begin_end`. This allows the slave to be notified of
-    both the beginning and end of a transfer.
-    """
-
     type_name = 'stream_if_slave'
 
     def __init_subclass__(cls, **kwargs):
         super().__init_subclass__(**kwargs)
 
-    def get(self, nwords_max: int | None = None) -> ProcessGen[Words]:
-        if not self.has_tlast and nwords_max is None:
-            raise ValueError(
-                f"StreamIFSlave '{self.name}' has has_tlast=False: "
-                "nwords_max must be provided to specify the transfer length"
+    @synthesizable(synth_fn=_not_implemented_synth, stmt_class=StreamGetStmt)
+    def get(self, schema_type=None, count=None, *, nwords_max=None):
+        """Pull the next burst from the buffer, optionally deserializing it.
+
+        Old (raw-word) calling convention — unchanged, used by non-HwComponent
+        callers such as PolyTB::
+
+            words = yield from self.s_in.get()
+            words = yield from self.s_in.get(nwords_max=N)
+
+        New synthesizable calling convention::
+
+            cmd_hdr: PolyCmdHdr           = yield from self.s_in.get(PolyCmdHdr)
+            samp_in: SchemaArray[Float32] = yield from self.s_in.get(Float32, count=N)
+
+        When *schema_type* is ``None`` the raw ``Words`` array is returned
+        (backward-compatible path).  When *schema_type* is provided, the word
+        count is derived from ``schema_type.nwords_per_inst(bitwidth)`` and the
+        result is deserialized before returning.  Supplying *count* returns a
+        :class:`~pysilicon.hw.arrayutils.SchemaArray` wrapping a NumPy array of
+        *count* elements.
+        """
+        if schema_type is None:
+            # Raw-word backward-compatible path.
+            if not self.has_tlast and nwords_max is None:
+                raise ValueError(
+                    f"StreamIFSlave '{self.name}' has has_tlast=False: "
+                    "nwords_max must be provided to specify the transfer length"
+                )
+            return (yield from super().get(nwords_max=nwords_max))
+
+        # Typed path — compute nwords from the schema.
+        nwords = schema_type.nwords_per_inst(self.bitwidth)
+        if count is not None:
+            nwords = nwords * int(count)
+        raw_words = yield from super().get(nwords_max=nwords)
+
+        if count is not None:
+            from pysilicon.hw.arrayutils import SchemaArray, read_array
+            data = read_array(
+                raw_words, elem_type=schema_type,
+                word_bw=self.bitwidth, shape=int(count),
             )
-        return (yield from super().get(nwords_max=nwords_max))
+            return SchemaArray(data=data, elem_type=schema_type)
+
+        return schema_type().deserialize(raw_words, word_bw=self.bitwidth)
+
+    @synthesizable(synth_fn=_not_implemented_synth, stmt_class=StreamGetPipelinedStmt)
+    def get_pipelined(self, schema_type=None, count=None):
+        """Pull the next burst and return ``(data, tstart)`` where ``tstart``
+        is the SimPy time when the first word of the burst arrived.
+
+        ``tstart`` is back-calculated from the completion time, assuming a
+        back-pressure-free II=1 input stream::
+
+            tstart = env.now - (nwords_transferred - 1) * clk.period
+        """
+        nwords = schema_type.nwords_per_inst(self.bitwidth)
+        if count is not None:
+            nwords *= int(count)
+        raw_words = yield from super().get(nwords_max=nwords)
+        tstart = self.env.now - (raw_words.shape[0] - 1) * self.interface.clk.period
+        if count is not None:
+            from pysilicon.hw.arrayutils import SchemaArray, read_array
+            data = read_array(raw_words, elem_type=schema_type,
+                              word_bw=self.bitwidth, shape=int(count))
+            return SchemaArray(data=data, elem_type=schema_type), tstart
+        return schema_type().deserialize(raw_words, word_bw=self.bitwidth), tstart
+
+    @synthesizable(synth_fn=_not_implemented_synth, stmt_class=StreamDrainStmt)
+    def drain(self):
+        """Consume and discard the current word burst from the buffer."""
+        yield from super().get()
 
 
 @dataclass
@@ -514,16 +587,72 @@ class StreamIFMaster(QueuedTransferIFMaster):
     has_tlast: bool = True
     """Whether this stream carries a TLAST signal (True) or not (False)."""
 
-    notify_type: TransferNotifyType = TransferNotifyType.end_only
-    """
-    The method for notifying the receiver side of transfers on
-    this interface.
-    """
-
     type_name = 'stream_if_master'
 
     def __init_subclass__(cls, **kwargs):
         super().__init_subclass__(**kwargs)
+
+    @synthesizable(synth_fn=_not_implemented_synth, stmt_class=StreamWriteStmt)
+    def write(self, data) -> ProcessGen[None]:
+        """Write a burst to the bound interface, serializing typed data.
+
+        Accepts three forms:
+
+        * **Raw words** (``numpy.ndarray`` of uint32/uint64) — unchanged
+          behaviour, forwarded directly to the interface.  Used by non-
+          HwComponent callers such as PolyTB.
+        * **DataSchema instance** — serialized via
+          ``instance.serialize(word_bw=self.bitwidth)`` before writing.
+        * **SchemaArray instance** — serialized via
+          :func:`~pysilicon.hw.arrayutils.write_array` before writing.
+        """
+        from pysilicon.hw.dataschema import DataSchema
+        from pysilicon.hw.arrayutils import SchemaArray, write_array
+
+        if isinstance(data, DataSchema):
+            raw_words = data.serialize(word_bw=self.bitwidth)
+        elif isinstance(data, SchemaArray):
+            raw_words = write_array(data, word_bw=self.bitwidth)
+        else:
+            raw_words = data  # already raw Words
+
+        if self.interface is None:
+            raise RuntimeError(
+                f"Cannot write: {type(self).__name__} '{self.name}' "
+                "is not bound to an interface"
+            )
+        yield self.process(self._make_write_call(raw_words))
+
+    @synthesizable(synth_fn=_not_implemented_synth, stmt_class=StreamWritePipelinedStmt)
+    def write_pipelined(self, data, t_out_start: float):
+        """Write a burst modelling pipeline overlap via ``t_out_start``.
+
+        The transfer is treated as having started at ``t_out_start``.  If
+        ``t_out_start`` is in the past (because the read phase already consumed
+        that time), the remaining delay is shortened so the transfer still
+        completes at ``t_out_start + nwords * clk.period``.
+
+        Output pacing (e.g. multiple words per cycle for an unrolled loop)
+        should be computed by the caller as ``cycles_per_word`` and folded into
+        ``t_out_start`` or a future ``cycles_per_word`` parameter — it is
+        architecturally distinct from the compute ``proc_ii``.
+        """
+        from pysilicon.hw.dataschema import DataSchema
+        from pysilicon.hw.arrayutils import SchemaArray, write_array
+
+        if isinstance(data, DataSchema):
+            raw_words = data.serialize(word_bw=self.bitwidth)
+        elif isinstance(data, SchemaArray):
+            raw_words = write_array(data, word_bw=self.bitwidth)
+        else:
+            raw_words = data
+
+        if self.interface is None:
+            raise RuntimeError(
+                f"Cannot write: {type(self).__name__} '{self.name}' "
+                "is not bound to an interface"
+            )
+        yield self.process(self.interface.write(raw_words, tstart=t_out_start))
 
 
 # ---------------------------------------------------------------------------
