@@ -40,30 +40,50 @@ _SOURCE_DIR = Path(__file__).resolve().parent
 
 @dataclass(kw_only=True)
 class BuildInputsStep(BuildStep):
-    description = "Create and write the command header and input sample vector."
+    description = "Write coefficients, DATA cmd_hdr, samples, and END cmd_hdr."
     consumes    = ["poly_source"]
     produces    = {
-        "cmd_hdr": Path("data/cmd_hdr_data.bin"),
-        "samp_in": Path("data/samp_in_data.bin"),
-        "data_dir": Path("data"),
+        "coeffs":       Path("data/coeffs.bin"),
+        "data_cmd_hdr": Path("data/data_cmd_hdr.bin"),
+        "samp_in":      Path("data/samp_in_data.bin"),
+        "end_cmd_hdr":  Path("data/end_cmd_hdr.bin"),
+        "data_dir":     Path("data"),
     }
     params      = {"nsamp": 100}
 
     def run(self, config: BuildConfig, nsamp, **_) -> dict:
-        coeffs = CoeffArray()
-        coeffs.val = np.array([1.0, -2.0, -3.0, 4.0], dtype=np.float32)
-        cmd_hdr = PolyCmdHdr()
-        cmd_hdr.tx_id = 42
-        cmd_hdr.coeffs = coeffs.val
-        cmd_hdr.nsamp = nsamp
-        samp_in = np.linspace(0.0, 1.0, nsamp, dtype=np.float32)
         out_dir = config.root_dir / "data"
         out_dir.mkdir(parents=True, exist_ok=True)
-        cmd_hdr_path = out_dir / "cmd_hdr_data.bin"
+
+        coeffs = CoeffArray(np.array([1.0, -2.0, -3.0, 4.0], dtype=np.float32))
+        coeffs_path = out_dir / "coeffs.bin"
+        coeffs.write_uint32_file(coeffs_path)
+
+        data_hdr = PolyCmdHdr()
+        data_hdr.cmd_type = PolyCmdType.DATA
+        data_hdr.tx_id    = 42
+        data_hdr.nsamp    = nsamp
+        data_hdr_path = out_dir / "data_cmd_hdr.bin"
+        data_hdr.write_uint32_file(data_hdr_path)
+
+        samp_in = np.linspace(0.0, 1.0, nsamp, dtype=np.float32)
         samp_in_path = out_dir / "samp_in_data.bin"
-        cmd_hdr.write_uint32_file(cmd_hdr_path)
         write_uint32_file(samp_in, elem_type=Float32, file_path=samp_in_path, nwrite=nsamp)
-        return {"cmd_hdr": cmd_hdr_path, "samp_in": samp_in_path, "data_dir": out_dir}
+
+        end_hdr = PolyCmdHdr()
+        end_hdr.cmd_type = PolyCmdType.END
+        end_hdr.tx_id    = 0
+        end_hdr.nsamp    = 0
+        end_hdr_path = out_dir / "end_cmd_hdr.bin"
+        end_hdr.write_uint32_file(end_hdr_path)
+
+        return {
+            "coeffs":       coeffs_path,
+            "data_cmd_hdr": data_hdr_path,
+            "samp_in":      samp_in_path,
+            "end_cmd_hdr":  end_hdr_path,
+            "data_dir":     out_dir,
+        }
 
 
 @dataclass(kw_only=True)
@@ -200,51 +220,59 @@ class CSimStep(BuildStep):
 @dataclass(kw_only=True)
 class ValidateCSimStep(BuildStep):
     description = "Compare Vitis C-sim outputs against the Python model and write results/vitis/."
-    consumes    = ["sim_dir", "csim_data_dir"]
+    consumes    = ["sim_dir", "csim_data_dir", "data_cmd_hdr"]
     produces    = {"vitis_dir": Path("results/vitis")}
     params      = {}
 
-    def run(self, config: BuildConfig, sim_dir, csim_data_dir) -> dict:
+    def run(self, config: BuildConfig, sim_dir, csim_data_dir, data_cmd_hdr) -> dict:
         data_dir = csim_data_dir
         try:
+            data_hdr = PolyCmdHdr().read_uint32_file(data_cmd_hdr)
+            nsamp = int(data_hdr.nsamp)
             sim_resp_hdr = PolyRespHdr().read_uint32_file(sim_dir / "resp_hdr.bin")
-            sim_resp_ftr = PolyRespFtr().read_uint32_file(sim_dir / "resp_ftr.bin")
+            sim_status = json.loads(
+                (sim_dir / "regmap_status.json").read_text(encoding="utf-8")
+            )
             sim_samp_out = np.array(
                 read_uint32_file(sim_dir / "samp_out.bin", elem_type=Float32,
-                                 shape=int(sim_resp_ftr.nsamp_read)),
+                                 shape=nsamp),
                 dtype=np.float32,
             )
             got_resp_hdr = PolyRespHdr().read_uint32_file(data_dir / "resp_hdr_data.bin")
-            got_resp_ftr = PolyRespFtr().read_uint32_file(data_dir / "resp_ftr_data.bin")
+            got_status = json.loads(
+                (data_dir / "regmap_status.json").read_text(encoding="utf-8")
+            )
             got_samp_out = np.array(
                 read_uint32_file(data_dir / "samp_out_data.bin", elem_type=Float32,
-                                 shape=int(got_resp_ftr.nsamp_read)),
+                                 shape=nsamp),
                 dtype=np.float32,
             )
         except Exception as exc:
             raise RuntimeError(f"Failed to read sim or Vitis outputs: {exc}")
         if not got_resp_hdr.is_close(sim_resp_hdr):
             raise RuntimeError("Response header mismatch after Vitis C-simulation.")
-        if not got_resp_ftr.is_close(sim_resp_ftr):
-            raise RuntimeError("Response footer mismatch after Vitis C-simulation.")
+        for label, status in (("python", sim_status), ("vitis", got_status)):
+            if int(status.get("halted", 0)) != 0:
+                raise RuntimeError(
+                    f"{label} regmap_status reports halted=1 (error={status.get('error')}, "
+                    f"tx_id={status.get('tx_id')})."
+                )
+            if int(status.get("error", 0)) != int(PolyError.NO_ERROR):
+                raise RuntimeError(
+                    f"{label} regmap_status reports error={status.get('error')} "
+                    f"(expected NO_ERROR=0)."
+                )
         if not np.allclose(got_samp_out, sim_samp_out[:got_samp_out.size],
                            rtol=1e-6, atol=1e-6):
             raise RuntimeError("Sample output mismatch after Vitis C-simulation.")
-        sync_status_path = data_dir / "sync_status.json"
-        if sync_status_path.exists():
-            sync_status = json.loads(sync_status_path.read_text(encoding="utf-8"))
-            expected_sync = {"resp_hdr_tlast": "tlast_at_end",
-                             "samp_out_tlast": "tlast_at_end",
-                             "resp_ftr_tlast": "tlast_at_end"}
-            if sync_status != expected_sync:
-                raise RuntimeError(
-                    f"TLAST sync mismatch. Expected {expected_sync}, got {sync_status}.")
         vitis_dir = config.root_dir / "results" / "vitis"
         vitis_dir.mkdir(parents=True, exist_ok=True)
         got_resp_hdr.write_uint32_file(vitis_dir / "resp_hdr.bin")
         write_uint32_file(got_samp_out, elem_type=Float32,
                           file_path=vitis_dir / "samp_out.bin", nwrite=len(got_samp_out))
-        got_resp_ftr.write_uint32_file(vitis_dir / "resp_ftr.bin")
+        (vitis_dir / "regmap_status.json").write_text(
+            json.dumps(got_status, indent=2), encoding="utf-8"
+        )
         return {"vitis_dir": vitis_dir}
 
 
