@@ -36,6 +36,13 @@ class PolyError(IntEnum):
 PolyErrorField = EnumField.specialize(enum_type=PolyError)
 
 
+class PolyCmdType(IntEnum):
+    DATA = 0
+    END = 1
+
+PolyCmdTypeField = EnumField.specialize(enum_type=PolyCmdType)
+
+
 class CoeffArray(DataArray):
     """Array of polynomial coefficients in ascending order (constant term first)."""
     ncoeff: int = 4
@@ -45,11 +52,16 @@ class CoeffArray(DataArray):
 
 
 class PolyCmdHdr(DataList):
-    """Command header: transaction ID, coefficients, and sample count."""
+    """Command header: type, transaction ID, and sample count.
+
+    Coefficients are configured separately via the AXI-Lite register map.
+    The END variant carries cmd_type=END and nsamp=0; it signals the kernel
+    to break the persistent processing loop and return cleanly.
+    """
     elements = {
-        "tx_id": {"schema": TxIdField, "description": "Transaction ID"},
-        "coeffs": {"schema": CoeffArray, "description": "Polynomial coefficients"},
-        "nsamp": {"schema": NsampField, "description": "Number of samples"},
+        "cmd_type": {"schema": PolyCmdTypeField, "description": "DATA or END"},
+        "tx_id":    {"schema": TxIdField,        "description": "Transaction ID"},
+        "nsamp":    {"schema": NsampField,       "description": "Sample count (0 for END)"},
     }
 
 
@@ -60,20 +72,12 @@ class PolyRespHdr(DataList):
     }
 
 
-class PolyRespFtr(DataList):
-    """Response footer: sample count and error code."""
-    elements = {
-        "nsamp_read": {"schema": NsampField, "description": "Number of samples returned"},
-        "error": {"schema": PolyErrorField, "description": "Error code"},
-    }
-
-
 SCHEMA_CLASSES = [
     PolyErrorField,
+    PolyCmdTypeField,
     CoeffArray,
     PolyCmdHdr,
     PolyRespHdr,
-    PolyRespFtr,
 ]
 
 
