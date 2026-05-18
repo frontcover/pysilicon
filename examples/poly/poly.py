@@ -159,6 +159,7 @@ class PolyAccelComponent(HwComponent):
 
     in_bw:        HwParam[int] = 32
     out_bw:       HwParam[int] = 32
+    aximm_bw:     HwParam[int] = 32
     clk:          Clock = field(default_factory=lambda: Clock(freq=1e9))
     proc_ii:      int = 1
     proc_latency: int = 10
@@ -174,9 +175,9 @@ class PolyAccelComponent(HwComponent):
             "error":  RegField(PolyErrorField, RegAccess.R,  description="Last error code"),
             "tx_id":  RegField(TxIdField,      RegAccess.R,  description="TX id of halted txn"),
             "coeffs": RegField(CoeffArray,     RegAccess.RW, description="Polynomial coefficients"),
-        })
+        }, bitwidth=self.aximm_bw)
         self.s_lite = VitisRegMapMMIFSlave(
-            name=f'{self.name}_s_lite', sim=self.sim, bitwidth=32,
+            name=f'{self.name}_s_lite', sim=self.sim, bitwidth=self.aximm_bw,
             regmap=self.regmap, on_start=self.on_start,
         )
         for ep in (self.s_in, self.m_out, self.s_lite):
