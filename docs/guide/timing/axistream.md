@@ -92,13 +92,15 @@ for i, burst in enumerate(bursts_out):
 
 In the polynomial example, the burst in the simulattion are:
 
-| Burst       | Stream | Contents |
-|-------------|--------|----------|
-| `bursts_in[0]`  | input  | `PolyCmdHdr` — tx_id, coefficients, nsamp |
+| Burst           | Stream | Contents |
+|-----------------|--------|----------|
+| `bursts_in[0]`  | input  | `PolyCmdHdr` (DATA) — cmd_type, tx_id, nsamp |
 | `bursts_in[1]`  | input  | `nsamp` input samples (float32) |
+| `bursts_in[2]`  | input  | `PolyCmdHdr` (END) — terminates the kernel loop |
 | `bursts_out[0]` | output | `PolyRespHdr` — tx_id echo |
 | `bursts_out[1]` | output | `nsamp` output samples (float32) |
-| `bursts_out[2]` | output | `PolyRespFtr` — nsamp_read, error code |
+
+Coefficients no longer appear on the stream — they are configured via the AXI-Lite register map before launch. Halt status (`halted` / `error` / `tx_id`) is read from the regmap after the kernel returns, not from a streamed footer.
 
 We can deserialize each burst to the corresponding PySilicon DataSchma:
 
@@ -109,10 +111,10 @@ nwords = PolyCmdHdr.nwords_per_inst(word_bw=word_bw)
 
 words = bursts_in[0]['data']
 cmd_hdr.deserialize(word_bw=word_bw, packed=words)
-print("PolyCmdHdr values:")
+print("PolyCmdHdr (DATA) values:")
 for k, v in cmd_hdr.val.items():
     print(f"    {k}: {v}")
-    
+
 print("\nInput sample data values, x")
 nsamp = cmd_hdr.val['nsamp']
 x = read_array(packed=bursts_in[1]['data'], word_bw=word_bw, elem_type=Float32, shape=(nsamp,))
@@ -128,21 +130,14 @@ for k, v in resp_hdr.val.items():
 print("\nOutput sample data values, y")
 y = read_array(packed=bursts_out[1]['data'], word_bw=word_bw, elem_type=Float32, shape=(nsamp,))
 print(y)
-
-resp_ftr = PolyRespFtr()
-words = bursts_out[2]['data']
-resp_ftr.deserialize(word_bw=word_bw, packed=words)
-print("\nPolyRespFtr values:")
-for k, v in resp_ftr.val.items():
-    print(f"    {k}: {v}")
 ```
 
 This will return
 
 ```python
-PolyCmdHdr values:
+PolyCmdHdr (DATA) values:
+    cmd_type: 0
     tx_id: 42
-    coeffs: [ 1. -2. -3.  4.]
     nsamp: 100
 
 Input sample data values, x
@@ -167,7 +162,7 @@ Input sample data values, x
 PolyRespHdr values:
     tx_id: 42
 
-Output sample data values, y
+Output sample data values, y (truncated)
 [ 1.          0.979496    0.9584046   0.9367504   0.9145583   0.8918529
   0.868659    0.8450014   0.8209047   0.7963937   0.7714931   0.74622774
   0.7206222   0.6947013   0.6684898   0.64201236  0.61529386  0.5883589
@@ -185,9 +180,5 @@ Output sample data values, y
  -0.41336226 -0.39698696 -0.3791213  -0.3597406  -0.33882022 -0.31633544
  -0.29226148 -0.26657355 -0.23924696 -0.21025681 -0.17957866 -0.14718747
  -0.11305892 -0.07716799 -0.03948998  0.        ]
-
-PolyRespFtr values:
-    nsamp_read: 100
-    error: 0
 ```
 

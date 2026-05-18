@@ -28,7 +28,7 @@ from pysilicon.utils.vcd import VcdParser
 from pysilicon.utils.timing import TimingDiagram
 
 # Import poly schemas (sibling module)
-from poly_demo import PolyCmdHdr, PolyRespHdr, PolyRespFtr, Float32
+from poly import Float32, PolyCmdHdr, PolyRespHdr
 
 _WORD_BW = 32
 _TOP_NAME = "AESL_inst_poly"
@@ -53,15 +53,13 @@ class PolyTimingResult:
     bursts_out : list[dict]
         Raw burst dictionaries extracted from the output stream.
     cmd_hdr : PolyCmdHdr
-        Decoded command header (tx_id, coeffs, nsamp).
+        Decoded DATA command header (cmd_type, tx_id, nsamp).
     x : numpy.ndarray
         Input sample array decoded from the input data burst.
     resp_hdr : PolyRespHdr
         Decoded response header (tx_id echo).
     y : numpy.ndarray
         Output sample array decoded from the output data burst.
-    resp_ftr : PolyRespFtr
-        Decoded response footer (nsamp_read, error).
     vp : VcdParser
         The underlying VCD parser instance (for advanced use).
     """
@@ -77,7 +75,6 @@ class PolyTimingResult:
         self.x: np.ndarray | None = None
         self.resp_hdr: PolyRespHdr | None = None
         self.y: np.ndarray | None = None
-        self.resp_ftr: PolyRespFtr | None = None
         self.vp: VcdParser | None = None
 
 
@@ -86,9 +83,10 @@ def analyze_poly_vcd(vcd_path: str | Path) -> PolyTimingResult:
     Analyze a VCD file captured from the poly Vitis HLS kernel.
 
     Loads the VCD, extracts the AXI4-Stream input and output signals,
-    extracts bursts, decodes the command header, input samples, response
-    header, output samples, and response footer, and returns all results
-    in a :class:`PolyTimingResult`.
+    extracts bursts, decodes the DATA command header, input samples,
+    response header, and output samples, and returns all results in a
+    :class:`PolyTimingResult`. Halt status now lives in the AXI-Lite
+    register map and is not visible on the stream.
 
     Parameters
     ----------
@@ -148,14 +146,14 @@ def analyze_poly_vcd(vcd_path: str | Path) -> PolyTimingResult:
 
     if len(result.bursts_in) < 2:
         raise ValueError(
-            f"Expected at least 2 input bursts (cmd_hdr + data), got {len(result.bursts_in)}"
+            f"Expected at least 2 input bursts (DATA cmd_hdr + samples), got {len(result.bursts_in)}"
         )
-    if len(result.bursts_out) < 3:
+    if len(result.bursts_out) < 2:
         raise ValueError(
-            f"Expected at least 3 output bursts (resp_hdr + data + resp_ftr), got {len(result.bursts_out)}"
+            f"Expected at least 2 output bursts (resp_hdr + samples), got {len(result.bursts_out)}"
         )
 
-    # Decode command header from burst 0
+    # Decode DATA command header from burst 0
     result.cmd_hdr = PolyCmdHdr()
     result.cmd_hdr.deserialize(word_bw=_WORD_BW, packed=result.bursts_in[0]["data"])
 
@@ -179,10 +177,6 @@ def analyze_poly_vcd(vcd_path: str | Path) -> PolyTimingResult:
         elem_type=Float32,
         shape=(nsamp,),
     )
-
-    # Decode response footer from output burst 2
-    result.resp_ftr = PolyRespFtr()
-    result.resp_ftr.deserialize(word_bw=_WORD_BW, packed=result.bursts_out[2]["data"])
 
     return result
 
@@ -234,19 +228,18 @@ def plot_poly_timing(
 
     hdr_color = "orange"
     data_color = "green"
-    footer_color = "blue"
     cp = result.clk_period
 
     _color_burst("in_stream_TDATA", result.bursts_in[0], hdr_color, cp)
     _color_burst("in_stream_TDATA", result.bursts_in[1], data_color, cp)
+    if len(result.bursts_in) >= 3:
+        _color_burst("in_stream_TDATA", result.bursts_in[2], hdr_color, cp)
     _color_burst("out_stream_TDATA", result.bursts_out[0], hdr_color, cp)
     _color_burst("out_stream_TDATA", result.bursts_out[1], data_color, cp)
-    _color_burst("out_stream_TDATA", result.bursts_out[2], footer_color, cp)
 
     legend_elements = [
         Patch(facecolor="orange", edgecolor="black", alpha=0.3, label="header"),
         Patch(facecolor="green", edgecolor="black", alpha=0.3, label="data"),
-        Patch(facecolor="blue", edgecolor="black", alpha=0.3, label="footer"),
     ]
     ax.legend(
         handles=legend_elements,

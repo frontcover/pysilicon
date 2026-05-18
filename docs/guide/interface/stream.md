@@ -62,6 +62,7 @@ t_out_start = tstart + proc_latency * clk.period
 def evaluate(self, cmd_hdr, s_in, m_out):
     resp_hdr = PolyRespHdr()
     resp_hdr.tx_id = cmd_hdr.tx_id
+    yield from m_out.write(resp_hdr)
 
     samp_in, tstart = yield from s_in.get_pipelined(Float32, count=cmd_hdr.nsamp)
 
@@ -71,10 +72,9 @@ def evaluate(self, cmd_hdr, s_in, m_out):
     yield from m_out.write_pipelined(
         SchemaArray(data=y, elem_type=Float32), t_out_start, ii=self.proc_ii
     )
-
-    resp_ftr = PolyRespFtr()
-    resp_ftr.nsamp_read = len(samp_in)
-    return resp_hdr, resp_ftr
+    if len(samp_in) != cmd_hdr.nsamp:
+        return PolyError.WRONG_NSAMP
+    return PolyError.NO_ERROR
 ```
 
 Set `proc_ii` and `proc_latency` on the component to match values reported by HLS synthesis for the `evaluate` loop.

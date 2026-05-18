@@ -47,11 +47,12 @@ This example demonstrates only part of the intended PySilicon workflow. Future v
 
 This example implements a polynomial accelerator with the following protocol:
 
-- The client sends a `PolyCmdHeader` containing polynomial coefficients and execution metadata
-- The client then streams `SampleDataIn` input values (`x`)
-- The accelerator may return `PolyRespHeader` early, before all inputs are consumed, so the host can correlate timing and transaction state
-- The accelerator streams `SampleDataOut` result values (`y`) as they become available
-- The transaction ends with `PolyRespFooter`, which contains final counters and error status
+- The host writes polynomial coefficients to the accelerator's AXI-Lite register map (a `VitisRegMap`), then writes `ap_start` to launch the kernel
+- The host sends a `PolyCmdHdr` (`cmd_type = DATA`) containing the transaction ID and sample count over the input AXI-Stream
+- The host then streams `nsamp` input values (`x`)
+- The accelerator returns a `PolyRespHdr` echoing the transaction ID, then streams `nsamp` result values (`y`)
+- When the host has no more work, it sends a `PolyCmdHdr` with `cmd_type = END` to break the kernel's persistent loop cleanly
+- On error the kernel halts: it sets `halted = 1`, `error = <code>`, `tx_id = <offending txn>` in the regmap and returns. The host re-launches the kernel via platform reset, then writes `ap_start` again
 ## Files used in the example
 
 - [examples/poly/poly_demo.py](https://github.com/sdrangan/pysilicon/blob/main/examples/poly/poly_demo.py) drives the Python flow.

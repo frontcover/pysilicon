@@ -71,32 +71,38 @@ Things to notice:
 @dataclass(kw_only=True)
 class ValidateCSimStep(BuildStep):
     description = "Compare Vitis C-sim outputs against the Python model."
-    consumes    = ["sim_dir", "csim_data_dir"]
+    consumes    = ["sim_dir", "csim_data_dir", "data_cmd_hdr"]
     produces    = {"vitis_dir": Path("results/vitis")}
     params      = {}
 
-    def run(self, config: BuildConfig, sim_dir, csim_data_dir) -> dict:
+    def run(self, config: BuildConfig, sim_dir, csim_data_dir, data_cmd_hdr) -> dict:
         try:
+            data_hdr = PolyCmdHdr().read_uint32_file(data_cmd_hdr)
+            nsamp = int(data_hdr.nsamp)
             sim_resp_hdr = PolyRespHdr().read_uint32_file(sim_dir / "resp_hdr.bin")
-            sim_resp_ftr = PolyRespFtr().read_uint32_file(sim_dir / "resp_ftr.bin")
+            sim_status = json.loads(
+                (sim_dir / "regmap_status.json").read_text(encoding="utf-8"))
             sim_samp_out = np.array(
-                read_uint32_file(sim_dir / "samp_out.bin", elem_type=Float32,
-                                 shape=int(sim_resp_ftr.nsamp_read)),
+                read_uint32_file(sim_dir / "samp_out.bin", elem_type=Float32, shape=nsamp),
                 dtype=np.float32,
             )
             got_resp_hdr = PolyRespHdr().read_uint32_file(csim_data_dir / "resp_hdr_data.bin")
-            got_resp_ftr = PolyRespFtr().read_uint32_file(csim_data_dir / "resp_ftr_data.bin")
+            got_status = json.loads(
+                (csim_data_dir / "regmap_status.json").read_text(encoding="utf-8"))
             got_samp_out = np.array(
                 read_uint32_file(csim_data_dir / "samp_out_data.bin", elem_type=Float32,
-                                 shape=int(got_resp_ftr.nsamp_read)),
+                                 shape=nsamp),
                 dtype=np.float32,
             )
         except Exception as exc:
             raise RuntimeError(f"Failed to read sim or Vitis outputs: {exc}")
         if not got_resp_hdr.is_close(sim_resp_hdr):
             raise RuntimeError("Response header mismatch after Vitis C-simulation.")
-        if not got_resp_ftr.is_close(sim_resp_ftr):
-            raise RuntimeError("Response footer mismatch after Vitis C-simulation.")
+        for label, status in (("python", sim_status), ("vitis", got_status)):
+            if int(status["halted"]) != 0 or int(status["error"]) != int(PolyError.NO_ERROR):
+                raise RuntimeError(
+                    f"{label} regmap reports halted={status['halted']}, "
+                    f"error={status['error']}, tx_id={status['tx_id']}.")
         if not np.allclose(got_samp_out, sim_samp_out[:got_samp_out.size],
                            rtol=1e-6, atol=1e-6):
             raise RuntimeError("Sample output mismatch after Vitis C-simulation.")
@@ -105,11 +111,12 @@ class ValidateCSimStep(BuildStep):
         got_resp_hdr.write_uint32_file(vitis_dir / "resp_hdr.bin")
         write_uint32_file(got_samp_out, elem_type=Float32,
                           file_path=vitis_dir / "samp_out.bin", nwrite=len(got_samp_out))
-        got_resp_ftr.write_uint32_file(vitis_dir / "resp_ftr.bin")
+        (vitis_dir / "regmap_status.json").write_text(
+            json.dumps(got_status, indent=2), encoding="utf-8")
         return {"vitis_dir": vitis_dir}
 ```
 
-This step is **deeply example-specific** — it knows about `PolyRespHdr`, `PolyRespFtr`, file naming conventions, and tolerance thresholds. There is no generic version here. Per-design template:
+This step is **deeply example-specific** — it knows about `PolyRespHdr`, the `regmap_status.json` schema, file naming conventions, and tolerance thresholds. There is no generic version here. Per-design template:
 
 - Consume the Python sim output directory and the Vitis output directory.
 - Read each schema instance / array from both.

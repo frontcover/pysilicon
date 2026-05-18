@@ -107,7 +107,6 @@ dag.add(DataSchemaStep(CoeffArray,     word_bw_supported=[32, 64], include_dir="
 # Containers next:
 dag.add(DataSchemaStep(PolyCmdHdr,  word_bw_supported=[32, 64], include_dir="include"))
 dag.add(DataSchemaStep(PolyRespHdr, word_bw_supported=[32, 64], include_dir="include"))
-dag.add(DataSchemaStep(PolyRespFtr, word_bw_supported=[32, 64], include_dir="include"))
 ```
 
 If a `SCHEMA_CLASSES` list is already ordered correctly (leaf types first), the list-comprehension form is concise:
@@ -194,7 +193,7 @@ def gen_vitis_code(example_dir, include_dir="include"):
 
     schema_steps = [
         dag.add(DataSchemaStep(cls, word_bw_supported=[32, 64], include_dir=include_dir))
-        for cls in [PolyErrorField, CoeffArray, PolyCmdHdr, PolyRespHdr, PolyRespFtr]
+        for cls in [PolyErrorField, CoeffArray, PolyCmdHdr, PolyRespHdr]
     ]
 
     dag.add(ArrayUtilsStep(Float32, [32, 64]))

@@ -28,7 +28,7 @@ The poly version handles inputs as files (so the same data feeds both Python sim
 @dataclass(kw_only=True)
 class PySimStep(BuildStep):
     description = "Run the Python SimPy simulation and write results to results/sim/."
-    consumes    = ["poly_source", "cmd_hdr", "samp_in"]
+    consumes    = ["poly_source", "coeffs", "data_cmd_hdr", "samp_in"]
     produces    = {"sim_dir": Path("results/sim"),
                    "log":     Path("results/sim_log.csv")}
     params      = {"clk_freq": 100e6, "in_bw": 32, "out_bw": 32,
@@ -39,14 +39,15 @@ class PySimStep(BuildStep):
         return {"log": config.root_dir / log_file}
 
     def run(self, config: BuildConfig,
-            cmd_hdr, samp_in,
+            coeffs, data_cmd_hdr, samp_in,
             clk_freq, in_bw, out_bw, unroll_factor, log_file,
             **_) -> dict:
-        cmd_hdr_obj = PolyCmdHdr().read_uint32_file(cmd_hdr)
+        cmd_hdr_obj = PolyCmdHdr().read_uint32_file(data_cmd_hdr)
         samp_in_arr = np.array(
             read_uint32_file(samp_in, elem_type=Float32, shape=int(cmd_hdr_obj.nsamp)),
             dtype=np.float32,
         )
+        coeffs_obj = CoeffArray().read_uint32_file(coeffs)
         sim = Simulation()
         clk = Clock(freq=clk_freq)
         log_path = config.root_dir / log_file
@@ -59,7 +60,9 @@ class PySimStep(BuildStep):
             clk=clk, logger=logger,
         )
         tb = PolyTB(name="poly_tb", sim=sim,
-                    cmd_hdr=cmd_hdr_obj, samp_in=samp_in_arr, word_bw=in_bw)
+                    cmd_hdr=cmd_hdr_obj, samp_in=samp_in_arr,
+                    coeffs=np.asarray(coeffs_obj.val, dtype=np.float32),
+                    word_bw=in_bw)
         connect(sim, tb, accel, clk)
         sim.run_sim()
 
@@ -68,7 +71,11 @@ class PySimStep(BuildStep):
         tb.resp_hdr.write_uint32_file(sim_dir / "resp_hdr.bin")
         write_uint32_file(tb.samp_out, elem_type=Float32,
                           file_path=sim_dir / "samp_out.bin", nwrite=len(tb.samp_out))
-        tb.resp_ftr.write_uint32_file(sim_dir / "resp_ftr.bin")
+        (sim_dir / "regmap_status.json").write_text(
+            json.dumps({"halted": int(tb.halted), "error": int(tb.error),
+                        "tx_id": int(tb.tx_id_status)}, indent=2),
+            encoding="utf-8",
+        )
         return {"sim_dir": sim_dir, "log": log_path}
 ```
 
@@ -79,7 +86,7 @@ class PySimStep(BuildStep):
 ### `consumes` lists three artifacts
 
 - `poly_source` is a `SourceStep` artifact pointing at `poly.py` itself. It's not used inside `run()` — the import happens at module load. But declaring it as a consumed artifact means **touching `poly.py` invalidates the simulation results**, which is what you want: the mtime of the source file gates the freshness of every downstream simulation output.
-- `cmd_hdr` and `samp_in` are the binary input files produced by `BuildInputsStep`. They arrive as `Path` objects.
+- `coeffs`, `data_cmd_hdr`, and `samp_in` are the binary input files produced by `BuildInputsStep`. They arrive as `Path` objects.
 
 ### `produces` mixes a directory and a file
 
@@ -122,7 +129,8 @@ class PySimStep(BuildStep):
         # ... run sim ...
         result = PySimResult(resp_hdr=tb.resp_hdr,
                              samp_out=tb.samp_out,
-                             resp_ftr=tb.resp_ftr)
+                             halted=tb.halted, error=tb.error,
+                             tx_id=tb.tx_id_status)
         return {"sim_result": result, "log": log_path}
 
 

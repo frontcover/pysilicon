@@ -36,16 +36,12 @@ class Conv2DTimingResult:
         Raw burst dictionaries extracted from the input stream.
     bursts_out : list[dict]
         Raw burst dictionaries extracted from the output stream.
-    cmd_hdr : PolyCmdHdr
-        Decoded command header (tx_id, coeffs, nsamp).
-    x : numpy.ndarray
-        Input sample array decoded from the input data burst.
-    resp_hdr : PolyRespHdr
-        Decoded response header (tx_id echo).
-    y : numpy.ndarray
-        Output sample array decoded from the output data burst.
-    resp_ftr : PolyRespFtr
-        Decoded response footer (nsamp_read, error).
+    cmd : Conv2DCmd
+        Decoded command record.
+    resp : Conv2DResp
+        Decoded response record.
+    dbg : list[Conv2DDebug]
+        Decoded debug events.
     vp : VcdParser
         The underlying VCD parser instance (for advanced use).
     """

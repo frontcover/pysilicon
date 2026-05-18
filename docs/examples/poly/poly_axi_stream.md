@@ -19,17 +19,16 @@ PySilicon's [AXI4-stream VCD analysis tools](../../guide/timing/axistream.md).
 
 ## Overview
 
-The `poly` kernel communicates over two AXI4-Stream interfaces:
+The `poly` kernel communicates over two AXI4-Stream interfaces plus an AXI-Lite control/status block. The VCD timing analysis covers only the streams; the AXI-Lite register map is observed end-of-simulation via `regmap_status.json`.
 
-- **Input stream**: command header followed by input sample data
-- **Output stream**: response header, output sample data, and response footer
+- **Input stream**: a DATA command header followed by input sample data, then an END command header that terminates the kernel
+- **Output stream**: per-DATA-transaction response header followed by output sample data
 
 The timing analysis API:
 1. loads a VCD file
 2. discovers the clock and AXI4-Stream signals
 3. extracts individual bursts from each stream
-4. decodes the bursts into `PolyCmdHdr`, `PolyRespHdr`, `PolyRespFtr`, and
-   NumPy sample arrays
+4. decodes the bursts into `PolyCmdHdr`, `PolyRespHdr`, and NumPy sample arrays
 5. returns everything in a `PolyTimingResult` instance
 
 ## The `PolyTimingResult` class
@@ -42,11 +41,10 @@ class PolyTimingResult:
     out_signals: dict    # AXI4-Stream signal names for the output stream
     bursts_in: list      # raw burst dicts from the input stream
     bursts_out: list     # raw burst dicts from the output stream
-    cmd_hdr: PolyCmdHdr  # decoded command header
+    cmd_hdr: PolyCmdHdr  # decoded DATA command header
     x: np.ndarray        # input sample array
     resp_hdr: PolyRespHdr  # decoded response header
     y: np.ndarray          # output sample array
-    resp_ftr: PolyRespFtr  # decoded response footer
 ```
 
 Each `burst` dict has keys `data`, `beat_type`, `start_idx`, and `tstart`.
@@ -61,17 +59,13 @@ from timing_analysis import analyze_poly_vcd
 result = analyze_poly_vcd("vcd/dump.vcd")
 
 # Decoded command header
-print(f"tx_id  = {result.cmd_hdr.val['tx_id']}")
-print(f"nsamp  = {result.cmd_hdr.val['nsamp']}")
-print(f"coeffs = {result.cmd_hdr.val['coeffs']}")
+print(f"cmd_type = {result.cmd_hdr.val['cmd_type']}")
+print(f"tx_id    = {result.cmd_hdr.val['tx_id']}")
+print(f"nsamp    = {result.cmd_hdr.val['nsamp']}")
 
 # Input / output sample arrays
 print(f"x = {result.x}")
 print(f"y = {result.y}")
-
-# Response footer
-print(f"nsamp_read = {result.resp_ftr.val['nsamp_read']}")
-print(f"error      = {result.resp_ftr.val['error']}")
 
 # Timing information
 print(f"clk_period = {result.clk_period} ns")
@@ -82,27 +76,27 @@ print(f"Output bursts: {len(result.bursts_out)}")
 Expected output for a standard run with `nsamp=100`:
 
 ```
-tx_id  = 42
-nsamp  = 100
-coeffs = [ 1. -2. -3.  4.]
+cmd_type = 0
+tx_id    = 42
+nsamp    = 100
 x = [0.  0.010101 0.020202 ... 1.]
 y = [ 1.  0.9697... ... 0.]
-nsamp_read = 100
-error      = 0
 clk_period = 10.0 ns
-Input bursts:  2
-Output bursts: 3
+Input bursts:  3
+Output bursts: 2
 ```
 
 ## Burst structure
 
-| Burst       | Stream | Contents |
-|-------------|--------|----------|
-| `bursts_in[0]`  | input  | `PolyCmdHdr` — tx_id, coefficients, nsamp |
+| Burst           | Stream | Contents |
+|-----------------|--------|----------|
+| `bursts_in[0]`  | input  | `PolyCmdHdr` (DATA) — cmd_type, tx_id, nsamp |
 | `bursts_in[1]`  | input  | `nsamp` input samples (float32) |
+| `bursts_in[2]`  | input  | `PolyCmdHdr` (END) — terminates the kernel loop |
 | `bursts_out[0]` | output | `PolyRespHdr` — tx_id echo |
 | `bursts_out[1]` | output | `nsamp` output samples (float32) |
-| `bursts_out[2]` | output | `PolyRespFtr` — nsamp_read, error code |
+
+Coefficients no longer appear on the stream — they are configured via the AXI-Lite register map before launch. Halt status (`halted` / `error` / `tx_id`) is read from the regmap after the kernel returns, not from a streamed footer.
 
 ## Plotting the timing diagram
 
@@ -120,9 +114,8 @@ ax = plot_poly_timing(result, show=True)
 
 The plot colors:
 
-- 🟠 **Orange** — header bursts (cmd_hdr, resp_hdr)
+- 🟠 **Orange** — header bursts (DATA cmd_hdr, END cmd_hdr, resp_hdr)
 - 🟢 **Green** — data bursts (input samples, output samples)
-- 🔵 **Blue** — footer burst (resp_ftr)
 
 To zoom into a specific time range, pass `trange=(t_start_ns, t_end_ns)`:
 

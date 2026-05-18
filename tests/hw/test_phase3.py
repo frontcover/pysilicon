@@ -1,7 +1,9 @@
 """Phase 3 integration tests.
 
-- HwStmtExtractor on PolyAccelComponent.run_proc produces the expected IR tree.
-- End-to-end poly simulation still produces correct results.
+- HwParam detection on PolyAccelComponent.
+- End-to-end poly simulation still produces correct results post-VitisRegMap
+  migration (kernel runs from ``on_start`` rather than ``run_proc``; halt
+  status now lives in the regmap rather than a streamed response footer).
 """
 from __future__ import annotations
 
@@ -16,67 +18,14 @@ POLY_DIR = Path(__file__).resolve().parents[2] / "examples" / "poly"
 if str(POLY_DIR) not in sys.path:
     sys.path.insert(0, str(POLY_DIR))
 
-from poly import CoeffArray, Float32, PolyAccelComponent, PolyCmdHdr, PolyTB, connect
+from poly import (
+    Float32, PolyAccelComponent, PolyCmdHdr, PolyCmdType, PolyError, PolyTB, connect,
+)
 
-from pysilicon.build.hwcodegen import HwStmtExtractor, SynthesisError
 from pysilicon.hw.clock import Clock
 from pysilicon.hw.hw_component import HwComponent, HwParam, SynthContext
-from pysilicon.hw.hwstmt import HookStmt, SeqStmt, WhileStmt
-from pysilicon.hw.interface import (
-    StreamDrainStmt,
-    StreamGetStmt,
-)
+from pysilicon.hw.interface import StreamDrainStmt
 from pysilicon.simulation.simulation import Simulation
-
-
-# ---------------------------------------------------------------------------
-# Fixtures
-# ---------------------------------------------------------------------------
-
-def _make_accel() -> PolyAccelComponent:
-    sim = Simulation()
-    return PolyAccelComponent(name='test_accel', sim=sim)
-
-
-# ---------------------------------------------------------------------------
-# HwStmtExtractor on PolyAccelComponent.run_proc
-# ---------------------------------------------------------------------------
-
-def test_extractor_root_is_while():
-    comp = _make_accel()
-    tree = HwStmtExtractor(comp).extract()
-    assert isinstance(tree, WhileStmt)
-
-
-def test_extractor_body_has_two_stmts():
-    comp = _make_accel()
-    tree = HwStmtExtractor(comp).extract()
-    assert isinstance(tree.body, SeqStmt)
-    assert len(tree.body.stmts) == 2
-
-
-def test_extractor_first_stmt_is_stream_get():
-    comp = _make_accel()
-    stmts = HwStmtExtractor(comp).extract().body.stmts
-    assert isinstance(stmts[0], StreamGetStmt)
-
-
-def test_extractor_second_stmt_is_hook():
-    comp = _make_accel()
-    stmts = HwStmtExtractor(comp).extract().body.stmts
-    assert isinstance(stmts[1], HookStmt)
-
-
-def test_extractor_get_output_name():
-    comp = _make_accel()
-    stmts = HwStmtExtractor(comp).extract().body.stmts
-    assert stmts[0].outputs[0].name == 'cmd_hdr'
-
-
-def test_extractor_hook_has_no_outputs():
-    comp = _make_accel()
-    stmts = HwStmtExtractor(comp).extract().body.stmts
-    assert stmts[1].outputs == []
 
 
 # ---------------------------------------------------------------------------
@@ -98,12 +47,11 @@ def test_poly_accel_hwparam_fields():
 # ---------------------------------------------------------------------------
 
 def _run_sim(nsamp: int = 100):
-    coeffs = CoeffArray()
-    coeffs.val = np.array([1.0, -2.0, -3.0, 4.0], dtype=np.float32)
+    coeffs = np.array([1.0, -2.0, -3.0, 4.0], dtype=np.float32)
 
     cmd_hdr = PolyCmdHdr()
+    cmd_hdr.cmd_type = PolyCmdType.DATA
     cmd_hdr.tx_id = 42
-    cmd_hdr.coeffs = coeffs.val
     cmd_hdr.nsamp = nsamp
 
     samp_in = np.linspace(0.0, 1.0, nsamp, dtype=np.float32)
@@ -112,54 +60,57 @@ def _run_sim(nsamp: int = 100):
     clk = Clock(freq=1e9)
 
     accel = PolyAccelComponent(name='poly_accel', sim=sim)
-    tb    = PolyTB(name='poly_tb', sim=sim, cmd_hdr=cmd_hdr, samp_in=samp_in)
+    tb    = PolyTB(name='poly_tb', sim=sim,
+                   cmd_hdr=cmd_hdr, samp_in=samp_in, coeffs=coeffs)
 
     connect(sim, tb, accel, clk)
     sim.run_sim()
-    return tb, cmd_hdr, samp_in, sim
+    return tb, cmd_hdr, samp_in, coeffs, sim
 
 
 def test_sim_tx_id_echoed():
-    tb, _, _, _ = _run_sim()
+    tb, _, _, _, _ = _run_sim()
     assert int(tb.resp_hdr.tx_id) == 42
 
 
-def test_sim_nsamp_read_correct():
-    tb, _, _, _ = _run_sim(nsamp=50)
-    assert int(tb.resp_ftr.nsamp_read) == 50
+def test_sim_samp_out_len_matches_nsamp():
+    tb, _, _, _, _ = _run_sim(nsamp=50)
+    assert tb.samp_out.size == 50
 
 
 def test_sim_no_error():
-    tb, _, _, _ = _run_sim()
-    assert tb.resp_ftr.error.name == 'NO_ERROR'
+    tb, _, _, _, _ = _run_sim()
+    assert tb.halted == 0
+    assert tb.error is PolyError.NO_ERROR
 
 
-def _poly_reference(cmd_hdr, samp_in: np.ndarray) -> np.ndarray:
+def _poly_reference(coeffs: np.ndarray, samp_in: np.ndarray) -> np.ndarray:
     y = np.zeros_like(samp_in)
     power = np.ones_like(samp_in)
-    for c in cmd_hdr.coeffs:
+    for c in coeffs:
         y += c * power
         power *= samp_in
     return y
 
 
 def test_sim_output_matches_reference():
-    tb, cmd_hdr, samp_in, _ = _run_sim(nsamp=100)
-    expected_samp = _poly_reference(cmd_hdr, samp_in)
+    tb, _, samp_in, coeffs, _ = _run_sim(nsamp=100)
+    expected_samp = _poly_reference(coeffs, samp_in)
     npt.assert_allclose(np.asarray(tb.samp_out, dtype=np.float32), expected_samp, rtol=1e-5)
 
 
 def test_sim_different_nsamp():
-    tb, cmd_hdr, samp_in, _ = _run_sim(nsamp=256)
-    assert int(tb.resp_ftr.nsamp_read) == 256
-    assert tb.resp_ftr.error.name == 'NO_ERROR'
-    expected_samp = _poly_reference(cmd_hdr, samp_in)
+    tb, _, samp_in, coeffs, _ = _run_sim(nsamp=256)
+    assert tb.samp_out.size == 256
+    assert tb.halted == 0
+    assert tb.error is PolyError.NO_ERROR
+    expected_samp = _poly_reference(coeffs, samp_in)
     npt.assert_allclose(np.asarray(tb.samp_out, dtype=np.float32), expected_samp, rtol=1e-5)
 
 
 def test_sim_timing_is_nonzero():
     """Verify that proc_latency delays the output (sim time advances during run)."""
-    _, _, _, sim = _run_sim()
+    _, _, _, _, sim = _run_sim()
     assert sim.env.now > 0
 
 

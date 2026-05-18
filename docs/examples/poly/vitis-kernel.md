@@ -8,96 +8,33 @@ nav_order: 2
 
 ## Overview
 
-On the Vitis HLS side, the generated schema headers make the accelerator code much simpler.  
-Instead of manually packing and unpacking AXI4-Stream words, the kernel can read and write typed protocol objects directly.
+On the Vitis HLS side, the kernel runs a persistent `while (true)` loop driven by an `ap_ctrl_hs` AXI-Lite control register. The host configures coefficients in the AXI-Lite register map, writes `ap_start`, and the kernel processes streamed commands until it sees an `END` header (clean exit) or hits an error (halt).
 
-In this example, the generated serializers and deserializers handle the stream encoding for:
+Generated schema headers make the protocol code much simpler. The kernel reads and writes typed protocol objects directly:
 
-- `PolyCmdHdr`
-- `PolyRespHdr`
-- `PolyRespFtr`
-- `SampDataIn`
-- `SampDataOut`
+- `PolyCmdHdr` — command header with `cmd_type` (`DATA` / `END`), `tx_id`, `nsamp`
+- `PolyRespHdr` — per-transaction response header echoing `tx_id`
+- `CoeffArray` — polynomial coefficient array (read from the AXI-Lite regmap)
 
-As a result, the kernel implementation mainly consists of:
+The accelerator's control/status block is described in Python on `PolyAccelComponent` using `VitisRegMap`:
 
-- reading the command header,
-- evaluating the polynomial on streamed input samples,
-- writing response records back to the output stream.
+- `halted` (`R`, 1 bit) — `1` if the kernel halted on error
+- `error` (`R`, 8 bits) — last error code (`PolyError` enum)
+- `tx_id` (`R`, 16 bits) — `tx_id` of the offending transaction
+- `coeffs` (`RW`, 4 × Float32) — polynomial coefficients
 
-This keeps the HLS code focused on algorithm behavior and transaction flow rather than low-level stream formatting.
+The matching C++ kernel signature exposes the same fields as `s_axilite` arguments.
 
 ## Implementation code
 
-The HLS kernel is implemented in [`examples/poly/poly.cpp`](https://github.com/sdrangan/pysilicon/blob/main/examples/poly/poly.cpp).
+The HLS kernel is implemented in [`examples/poly/poly.cpp`](https://github.com/sdrangan/pysilicon/blob/main/examples/poly/poly.cpp). It declares one AXI-Lite control bundle covering coefficients, status registers, and the `ap_ctrl_hs` `return` port. The loop body:
 
-```cpp
-#include <ap_axi_sdata.h>
-#include <ap_int.h>
-#include <hls_stream.h>
+- reads a `PolyCmdHdr` from the input stream;
+- if `cmd_type == END`, breaks out of the loop and returns;
+- on TLAST framing errors latches `halted`/`error`/`tx_id` and returns;
+- otherwise emits a `PolyRespHdr`, processes `nsamp` lane-packed samples through Horner evaluation, and emits the result stream.
 
-#include "poly.hpp"
-
-static float eval_poly_horner(const float coeff[4], float x) {
-#pragma HLS INLINE
-    float y = coeff[3];
-    y = y * x + coeff[2];
-    y = y * x + coeff[1];
-    y = y * x + coeff[0];
-    return y;
-}
-
-void poly(hls::stream<axis_word_t>& in_stream, hls::stream<axis_word_t>& out_stream) {
-#pragma HLS INTERFACE axis port=in_stream
-#pragma HLS INTERFACE axis port=out_stream
-#pragma HLS INTERFACE ap_ctrl_none port=return
-
-    PolyCmdHdr cmd_hdr;
-    cmd_hdr.read_axi4_stream<WORD_BW>(in_stream);
-
-    PolyRespHdr resp_hdr;
-    resp_hdr.tx_id = cmd_hdr.tx_id;
-    resp_hdr.write_axi4_stream<WORD_BW>(out_stream, false);
-
-    static const int pf = SampDataIn::pf<WORD_BW>();
-    float x_lane[pf];
-    float y_lane[pf];
-#pragma HLS ARRAY_PARTITION variable=x_lane complete dim=1
-#pragma HLS ARRAY_PARTITION variable=y_lane complete dim=1
-
-    int nrem = cmd_hdr.nsamp;
-    for (int i = 0; i < cmd_hdr.nsamp; i += pf) {
-        SampDataIn::read_axi4_stream_elem<WORD_BW>(in_stream, x_lane, nrem);
-
-        for (int k = 0; k < pf; ++k) {
-#pragma HLS UNROLL
-            if (k < nrem) {
-                y_lane[k] = eval_poly_horner(cmd_hdr.coeffs.data, x_lane[k]);
-            }
-        }
-
-        bool tlast = (nrem <= pf);
-        SampDataOut::write_axi4_stream_elem<WORD_BW>(out_stream, y_lane, tlast, nrem);
-
-        nrem -= pf;
-    }
-
-    PolyRespFtr resp_ftr;
-    resp_ftr.nsamp_read = cmd_hdr.nsamp;
-    resp_ftr.error = PolyError::NO_ERROR;
-    resp_ftr.write_axi4_stream<WORD_BW>(out_stream);
-}
-```
-
-The generated schema classes remove most of the stream-handling boilerplate:
-
-- `cmd_hdr.read_axi4_stream<WORD_BW>(in_stream)` reads the typed command header directly from the AXI4-Stream input
-- `resp_hdr.write_axi4_stream<WORD_BW>(out_stream, false)` writes the response header in the correct stream format
-- `SampDataIn::read_axi4_stream_elem<WORD_BW>(...)` reads packed sample payload elements into a local array
-- `SampDataOut::write_axi4_stream_elem<WORD_BW>(...)` writes result payload elements back to the stream
-- `resp_ftr.write_axi4_stream<WORD_BW>(out_stream)` emits the closing footer record
-
-The kernel itself is therefore mostly standard HLS algorithm code plus a small amount of protocol sequencing.
+When the function returns, Vitis asserts `ap_done`, the host reads the regmap status, and re-launches via the platform reset controller if it needs to clear `halted`.
 
 ---
 
