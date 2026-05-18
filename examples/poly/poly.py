@@ -12,6 +12,14 @@ from pysilicon.hw.clock import Clock
 from pysilicon.hw.dataschema import DataArray, DataList, EnumField, FloatField, IntField
 from pysilicon.hw.hw_component import HwComponent, HwParam
 from pysilicon.hw.interface import StreamIF, StreamIFMaster, StreamIFSlave
+from pysilicon.hw.memif import DirectMMIF, MMIFMaster
+from pysilicon.hw.regmap import (
+    Bit,
+    RegAccess,
+    RegField,
+    VitisRegMap,
+    VitisRegMapMMIFSlave,
+)
 from pysilicon.hw.synth import sim_only, synthesizable
 from pysilicon.simulation.logger import Logger, NullLogger
 from pysilicon.simulation.simobj import ProcessGen, SimObj
@@ -129,7 +137,14 @@ class PolySimResult:
 
 @dataclass
 class PolyAccelComponent(HwComponent):
-    """SimPy model of the polynomial accelerator kernel."""
+    """SimPy model of the polynomial accelerator kernel.
+
+    Control/status is exposed via an AXI-Lite VitisRegMap; the host writes
+    ``ap_start`` to launch ``on_start``, which loops reading commands from
+    the input stream until it sees an END header or hits an error.
+    Coefficients live in the regmap and must be configured before launch
+    (they default to zeros, which produces an all-zero output stream).
+    """
 
     in_bw:        HwParam[int] = 32
     out_bw:       HwParam[int] = 32
@@ -143,20 +158,39 @@ class PolyAccelComponent(HwComponent):
         super().__post_init__()
         self.s_in  = StreamIFSlave( name=f'{self.name}_s_in',  sim=self.sim, bitwidth=self.in_bw)
         self.m_out = StreamIFMaster(name=f'{self.name}_m_out', sim=self.sim, bitwidth=self.out_bw)
-        self.add_endpoint(self.s_in)
-        self.add_endpoint(self.m_out)
+        self.regmap = VitisRegMap({
+            "halted": RegField(Bit,            RegAccess.R,  description="1 = halted on error"),
+            "error":  RegField(PolyErrorField, RegAccess.R,  description="Last error code"),
+            "tx_id":  RegField(TxIdField,      RegAccess.R,  description="TX id of halted txn"),
+            "coeffs": RegField(CoeffArray,     RegAccess.RW, description="Polynomial coefficients"),
+        })
+        self.s_lite = VitisRegMapMMIFSlave(
+            name=f'{self.name}_s_lite', sim=self.sim, bitwidth=32,
+            regmap=self.regmap, on_start=self.on_start,
+        )
+        for ep in (self.s_in, self.m_out, self.s_lite):
+            self.add_endpoint(ep)
         self._job: int = 0
 
     @sim_only
     def _inc_job(self) -> None:
         self._job += 1
 
-    def run_proc(self) -> ProcessGen[None]:
+    def on_start(self) -> ProcessGen[None]:
+        """Kernel body — invoked by VitisRegMapMMIFSlave on host ap_start write."""
         while True:
             self.logger.log(event='proc_begin', job=self._job)
             cmd_hdr: PolyCmdHdr = yield from self.s_in.get(PolyCmdHdr)
-            yield from self.evaluate(cmd_hdr, self.s_in, self.m_out)
+            if cmd_hdr.cmd_type == PolyCmdType.END:
+                self.logger.log(event='proc_end', job=self._job)
+                return
+            err = yield from self.evaluate(cmd_hdr, self.s_in, self.m_out)
             self._inc_job()
+            if err != PolyError.NO_ERROR:
+                self.regmap.set("error",  err)
+                self.regmap.set("tx_id",  cmd_hdr.tx_id)
+                self.regmap.set("halted", 1)
+                return
 
     @synthesizable
     def evaluate(
@@ -164,7 +198,8 @@ class PolyAccelComponent(HwComponent):
         cmd_hdr: PolyCmdHdr,
         s_in: StreamIFSlave,
         m_out: StreamIFMaster,
-    ) -> ProcessGen[None]:
+    ) -> ProcessGen[PolyError]:
+        """Process one DATA transaction. Returns NO_ERROR or an error code."""
         resp_hdr = PolyRespHdr()
         resp_hdr.tx_id = cmd_hdr.tx_id
         self.logger.log(event='resp_hdr_write_begin', job=self._job)
@@ -173,9 +208,10 @@ class PolyAccelComponent(HwComponent):
         self.logger.log(event='samp_read_begin', job=self._job)
         samp_in, tstart = yield from s_in.get_pipelined(Float32, count=cmd_hdr.nsamp)
 
+        coeffs = self.regmap.get("coeffs").val
         y = np.zeros_like(samp_in, dtype=np.float32)
         power = np.ones_like(samp_in, dtype=np.float32)
-        for coeff in cmd_hdr.coeffs:
+        for coeff in coeffs:
             y += coeff * power
             power *= samp_in
 
@@ -187,12 +223,9 @@ class PolyAccelComponent(HwComponent):
         yield from m_out.write_pipelined(SchemaArray(data=y, elem_type=Float32), t_out_start)
         self.logger.log(event='samp_out_write_end', job=self._job)
 
-        resp_ftr = PolyRespFtr()
-        resp_ftr.nsamp_read = len(samp_in)
-        resp_ftr.error = (PolyError.NO_ERROR if len(samp_in) == cmd_hdr.nsamp
-                          else PolyError.WRONG_NSAMP)
-        yield from m_out.write(resp_ftr)
-        self.logger.log(event='proc_end', job=self._job)
+        if len(samp_in) != cmd_hdr.nsamp:
+            return PolyError.WRONG_NSAMP
+        return PolyError.NO_ERROR
 
 
 @dataclass(kw_only=True)
