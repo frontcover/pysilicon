@@ -5,9 +5,21 @@ from pathlib import Path
 import numpy as np
 import pytest
 
-from examples.poly.poly import PolyError, PolySimResult
+from examples.poly.poly import (
+    Float32,
+    PolyAccelComponent,
+    PolyCmdHdr,
+    PolyCmdType,
+    PolyError,
+    PolyRespHdr,
+    PolySimResult,
+    PolyTB,
+    connect,
+)
 from examples.poly.poly_build import build_poly_dag
 from pysilicon.build.build import BuildConfig
+from pysilicon.hw.clock import Clock
+from pysilicon.simulation.simulation import Simulation
 from pysilicon.toolchain import toolchain
 
 
@@ -44,7 +56,7 @@ def test_poly_simulate_matches_expected_outputs(tmp_path: Path) -> None:
     assert results['py_sim'].success
 
     sim_result = PolySimResult.from_paths(
-        cmd_hdr_path=results['build_inputs'].path('cmd_hdr'),
+        cmd_hdr_path=results['build_inputs'].path('data_cmd_hdr'),
         samp_in_path=results['build_inputs'].path('samp_in'),
         resp_dir=results['py_sim'].path('sim_dir'),
     )
@@ -53,9 +65,9 @@ def test_poly_simulate_matches_expected_outputs(tmp_path: Path) -> None:
     assert sim_result.samp_in is not None
     assert sim_result.resp_hdr is not None
     assert sim_result.samp_out is not None
-    assert sim_result.resp_ftr is not None
     assert sim_result.passed is True
-    assert sim_result.resp_ftr.error is PolyError.NO_ERROR
+    assert sim_result.halted == 0
+    assert sim_result.error is PolyError.NO_ERROR
     assert sim_result.samp_out.dtype == np.float32
 
 
@@ -100,7 +112,7 @@ def test_poly_timing_bandwidth_and_unroll(tmp_path: Path) -> None:
             through='validate_timing',
         )
         sim_result = PolySimResult.from_paths(
-            cmd_hdr_path=results['build_inputs'].path('cmd_hdr'),
+            cmd_hdr_path=results['build_inputs'].path('data_cmd_hdr'),
             samp_in_path=results['build_inputs'].path('samp_in'),
             resp_dir=results['py_sim'].path('sim_dir'),
         )
@@ -139,6 +151,69 @@ def test_poly_timing_bandwidth_and_unroll(tmp_path: Path) -> None:
     )
 
 
+class _FailingPolyAccelComponent(PolyAccelComponent):
+    """Accelerator variant whose `evaluate()` always returns WRONG_NSAMP.
+
+    Drives the halt-on-error path through `on_start` end-to-end: the regmap
+    latches halted/error/tx_id, the slave clears _busy, and the host reads
+    the status back over AXI-Lite. The real evaluate() can't naturally
+    return WRONG_NSAMP under SimPy (get_pipelined zero-pads up to ``count``),
+    so we inject the failure here while preserving the real stream contract
+    (resp_hdr + samp_out written before returning).
+    """
+
+    def evaluate(self, cmd_hdr, s_in, m_out):  # type: ignore[override]
+        from pysilicon.hw.arrayutils import SchemaArray
+        resp_hdr = PolyRespHdr()
+        resp_hdr.tx_id = cmd_hdr.tx_id
+        yield from m_out.write(resp_hdr)
+        _samp_in, _tstart = yield from s_in.get_pipelined(Float32, count=cmd_hdr.nsamp)
+        zero_out = np.zeros(int(cmd_hdr.nsamp), dtype=np.float32)
+        yield from m_out.write(SchemaArray(data=zero_out, elem_type=Float32))
+        return PolyError.WRONG_NSAMP
+
+
+def test_poly_halts_on_error(tmp_path: Path) -> None:
+    """Kernel latches halted/error/tx_id and returns when evaluate fails."""
+    nsamp = 100
+    tx_id = 17
+
+    cmd_hdr = PolyCmdHdr()
+    cmd_hdr.cmd_type = PolyCmdType.DATA
+    cmd_hdr.tx_id    = tx_id
+    cmd_hdr.nsamp    = nsamp
+
+    samp_in = np.linspace(0.0, 1.0, nsamp, dtype=np.float32)
+    coeffs  = np.array([1.0, -2.0, -3.0, 4.0], dtype=np.float32)
+
+    sim = Simulation()
+    clk = Clock(freq=_CLK_FREQ)
+    accel = _FailingPolyAccelComponent(name="poly_accel", sim=sim, clk=clk)
+    tb = PolyTB(name="poly_tb", sim=sim,
+                cmd_hdr=cmd_hdr, samp_in=samp_in, coeffs=coeffs)
+    connect(sim, tb, accel, clk)
+    sim.run_sim()
+
+    assert tb.halted == 1, f"expected halted=1, got {tb.halted}"
+    assert tb.error == PolyError.WRONG_NSAMP, (
+        f"expected WRONG_NSAMP, got {tb.error!r}"
+    )
+    assert tb.tx_id_status == tx_id, (
+        f"expected tx_id={tx_id}, got {tb.tx_id_status}"
+    )
+
+    sim_result = PolySimResult(
+        cmd_hdr=cmd_hdr,
+        samp_in=samp_in,
+        resp_hdr=tb.resp_hdr,
+        samp_out=tb.samp_out,
+        halted=tb.halted,
+        error=tb.error,
+        tx_id=tb.tx_id_status,
+    )
+    assert sim_result.passed is False
+
+
 @pytest.mark.vitis
 def test_poly_vitis_cosim_matches_python_model(tmp_path: Path) -> None:
     if not toolchain.find_vitis_path():
@@ -157,7 +232,7 @@ def test_poly_vitis_cosim_matches_python_model(tmp_path: Path) -> None:
 
     assert results['validate_csim'].success, results['validate_csim'].message
 
-    cmd_hdr_path = results['build_inputs'].path('cmd_hdr')
+    cmd_hdr_path = results['build_inputs'].path('data_cmd_hdr')
     samp_in_path = results['build_inputs'].path('samp_in')
     sim_result = PolySimResult.from_paths(
         cmd_hdr_path=cmd_hdr_path, samp_in_path=samp_in_path,
@@ -172,6 +247,7 @@ def test_poly_vitis_cosim_matches_python_model(tmp_path: Path) -> None:
     cosim_reports = list(sim_report_dir.glob("*cosim*")) if sim_report_dir.exists() else []
 
     assert vitis_result.passed is True
-    assert vitis_result.resp_ftr.error is PolyError.NO_ERROR
+    assert vitis_result.halted == 0
+    assert vitis_result.error is PolyError.NO_ERROR
     assert np.allclose(vitis_result.samp_out, sim_result.samp_out[:vitis_result.samp_out.size], rtol=1e-6, atol=1e-6)
     assert cosim_reports, f"No cosim report found in {sim_report_dir}"
