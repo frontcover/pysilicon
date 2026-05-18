@@ -36,6 +36,24 @@ Read end-to-end before writing code:
 10. **No `_status_clear` AXI-Lite bit in v1.** The C-sim case doesn't need it (each test creates a fresh kernel invocation); the production case can use `ap_rst_n` from the platform reset controller. Keep the regmap minimal for the first migration.
 11. **`PolySimResult` replaces `resp_ftr` with three fields** (`halted: bool`, `error: PolyError`, `tx_id: int`) read from the regmap at end-of-simulation. Drop `resp_ftr` entirely; rename `passed` property to derive from `error == NO_ERROR and halted == 0`.
 
+## PR split
+
+The migration is split into two PRs. The boundary is the Python/C++ language line, because the C++ work requires Vitis-in-the-loop verification that CI cannot perform.
+
+### PR1 — Python migration (headless, CI-verifiable)
+
+In scope: Phases 1, 2, 3, 4, 7, 8, 9. Phases 7 and 9 are scoped to the Python-side changes only (BuildInputsStep updates, Python-side doc updates). The `ValidateCSimStep` and Vitis-side doc edits may also land in PR1 since they are gated by `@pytest.mark.vitis` and will simply not execute in CI without a Vitis install — they become effective once PR2 lands.
+
+Acceptance for PR1 is "all non-Vitis tests pass and the Python pipeline runs cleanly through `validate_timing`." See [Acceptance criteria (PR1)](#acceptance-criteria-pr1).
+
+### PR2 — C++ migration (requires local Vitis)
+
+In scope: Phases 5 and 6. Out of CI's reach; the developer with Vitis access opens this PR after PR1 lands, runs `pytest -m vitis tests/examples/test_poly_demo.py` locally to verify, and pushes.
+
+A separate plan file is not strictly needed — a follow-up issue can reference Phases 5–6 of this plan directly. When opening PR2, copy [Phase 5](#phase-5--c-kernel-examplespolypolycpp-polyhpp) and [Phase 6](#phase-6--c-testbench-examplespolypoly_tbcpp) from this document into the issue body for the implementer's convenience.
+
+---
+
 ## Architecture summary
 
 ### Files touched
@@ -671,10 +689,9 @@ Update the five poly docs to reflect:
 
 ---
 
-## Acceptance criteria
+## Acceptance criteria (PR1)
 
-- `pytest tests/examples/test_poly_demo.py` passes (excluding `@pytest.mark.vitis` tests, which require a Vitis install).
-- `pytest -m vitis tests/examples/test_poly_demo.py` passes when run in an environment with Vitis (CI may skip).
+- `pytest tests/examples/test_poly_demo.py` passes (excluding `@pytest.mark.vitis` tests).
 - `python -m examples.poly.poly_build --through validate_timing` succeeds with default params.
 - `python -m examples.poly.poly_build --status` lists every artifact (including `coeffs`, `data_cmd_hdr`, `end_cmd_hdr`, `regmap_status`).
 - `mypy examples/poly/poly.py examples/poly/poly_build.py` passes.
@@ -682,6 +699,13 @@ Update the five poly docs to reflect:
 - No remaining references to `PolyRespFtr` anywhere in the tree.
 - No remaining references to `sync_status.json` anywhere in the tree.
 - The poly Python module still exports `PolyError`, `PolyAccelComponent`, `PolyCmdHdr`, `PolyRespHdr`, `PolyTB`, `PolySimResult`, `SCHEMA_CLASSES`, `connect` (other names may change).
+
+## Acceptance criteria (PR2)
+
+- `pytest -m vitis tests/examples/test_poly_demo.py` passes locally in a Vitis-enabled environment.
+- `python -m examples.poly.poly_build` (full pipeline, no `--through`) succeeds.
+- `examples/poly/poly.cpp` and `examples/poly/poly_tb.cpp` produce a `regmap_status.json` that `ValidateCSimStep` compares cleanly against the Python `regmap_status.json` from PR1.
+- All PR1 acceptance criteria still hold.
 
 ## Open decisions
 
@@ -703,16 +727,20 @@ These are flagged where the implementation has a real choice to make. The recomm
 
 ## Commit structure
 
-Single PR. Within the PR, suggested commit sequence for review-friendliness:
+### PR1 commits (Python, headless)
 
 1. `schema: add PolyCmdType, drop PolyRespFtr, move coeffs out of PolyCmdHdr`
 2. `python: rewrite PolyAccelComponent on VitisRegMap + on_start`
 3. `python: rewrite PolyTB to drive ap_start, DATA+END, read regmap status`
 4. `python: update PolySimResult and PySimStep for regmap_status.json`
 5. `build: BuildInputsStep produces coeffs/data_cmd_hdr/end_cmd_hdr; ValidateCSimStep reads regmap_status`
-6. `cpp: persistent while-loop kernel with s_axilite control/status`
-7. `cpp: testbench sends DATA+END, writes regmap_status.json`
-8. `tests: update for regmap status, add halt-on-error test`
-9. `docs: update poly docs for the regmap-based control model`
+6. `tests: update for regmap status, add halt-on-error test`
+7. `docs: update Python-side poly docs (index, python-flow); update Vitis-side docs to describe the new contract`
 
-Commits 6 and 7 are the ones that require Vitis-in-the-loop verification — they may need adjustment after `pytest -m vitis` reveals what the synthesis flow actually accepts. Commits 1–5 + 8–9 can be exercised headlessly via pure Python tests.
+### PR2 commits (C++, requires local Vitis)
+
+1. `cpp: persistent while-loop kernel with s_axilite control/status`
+2. `cpp: testbench sends DATA+END, writes regmap_status.json`
+3. `docs: refresh vitis-kernel.md and vitis_tb.md to match the implemented kernel`
+
+PR1 is end-to-end verifiable in CI. PR2 needs an environment with Vitis HLS installed to run `pytest -m vitis tests/examples/test_poly_demo.py` for true verification; the docs can be polished against the synthesized result.
