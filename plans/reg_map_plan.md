@@ -167,18 +167,9 @@ Read the implemented module and confirm:
 - Quick-reference table at the bottom of regmap.md is accurate.
 - The worked-example code in regmap.md type-checks against the implemented API (it doesn't have to be runnable since it depends on the unmigrated poly, but the imports and call shapes must match).
 
-### Phase 5 — Poly migration (Python side, separate PR)
+### Phase 5 — Poly migration
 
-**Out of scope for the core regmap PR.** This phase is documented here so the migration can follow as its own PR once Phases 1–4 land. Do not bundle it.
-
-The migration touches:
-- [examples/poly/poly.py](../examples/poly/poly.py): replace the `PolyRespFtr`-based error reporting with a `VitisRegMap` per the [worked example](../docs/guide/interface/regmap.md#worked-example-poly-accelerator). Drop `run_proc`; add `on_start`. Drop the resp_ftr.bin output. Update the `PolyTB` testbench to write `ap_start` before sending stream data, and to poll `halted`/`error` instead of reading a footer.
-- [examples/poly/poly.py](../examples/poly/poly.py): update `PolySimResult` to drop the `resp_ftr` field and add a `regmap_status: PolyStatus` snapshot read from the regmap at end-of-simulation.
-- The `PolyError` enum stays (it's the schema for the `error` field).
-- C++ side ([examples/poly/poly.cpp](../examples/poly/poly.cpp), [examples/poly/poly.hpp](../examples/poly/poly.hpp)): add `s_axilite` control/status interface, restructure `poly()` into a persistent `while(true)` with halt-on-error returning the function, drop the `PolyRespFtr` write path. **This requires Vitis-in-the-loop verification and is best handled in person, not by a background agent.**
-- [examples/poly/poly_build.py](../examples/poly/poly_build.py), [examples/poly/poly_tb.cpp](../examples/poly/poly_tb.cpp), and the `tests/examples/test_poly_*` files all need corresponding updates.
-
-A separate plan file (`plans/poly_regmap_migration.md`) should be written before starting this phase.
+**Out of scope for the core regmap PR.** Documented as its own plan: see [plans/poly_regmap_migration.md](poly_regmap_migration.md). That plan handles the Python-side rewrite (`VitisRegMap`, `on_start`, dropped `PolyRespFtr`), the C++ kernel restructure (persistent `while(true)`, `s_axilite` control/status), and the related testbench / build-pipeline / docs updates as a single PR — including the END-command convention that prevents Vitis C-sim from hanging on the persistent kernel.
 
 ## Acceptance criteria for the core PR (Phases 1–4)
 

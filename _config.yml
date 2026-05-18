@@ -27,6 +27,7 @@ just_the_docs:
 exclude:
   - pysilicon/
   - tests/
+  - plans/
   - CLAUDE.md
   - pyproject.toml
   - Gemfile
