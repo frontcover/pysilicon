@@ -6,7 +6,6 @@ import json
 import time as _time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
 
 import numpy as np
 
@@ -210,8 +209,10 @@ class CSimStep(BuildStep):
                 capture_output=not live_output,
                 env=vitis_env,
             )
-            if result.stdout: print(result.stdout)
-            if result.stderr: print(result.stderr)
+            if result.stdout:
+                print(result.stdout)
+            if result.stderr:
+                print(result.stderr)
         except Exception as exc:
             raise RuntimeError(str(exc))
         return {"csim_data_dir": data_dir}
@@ -294,8 +295,10 @@ class CSynthStep(BuildStep):
                 capture_output=not live_output,
                 env=vitis_env,
             )
-            if result.stdout: print(result.stdout)
-            if result.stderr: print(result.stderr)
+            if result.stdout:
+                print(result.stdout)
+            if result.stderr:
+                print(result.stderr)
         except Exception as exc:
             raise RuntimeError(str(exc))
         report_dir = config.root_dir / "pysilicon_poly_proj" / "solution1"
