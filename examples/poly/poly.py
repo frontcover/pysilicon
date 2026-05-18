@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass, field
 from enum import IntEnum
 from pathlib import Path
@@ -91,17 +92,24 @@ SCHEMA_CLASSES = [
 
 @dataclass(slots=True)
 class PolySimResult:
-    """Result bundle from a polynomial accelerator simulation run."""
+    """Result bundle from a polynomial accelerator simulation run.
 
-    cmd_hdr: PolyCmdHdr
-    samp_in: npt.NDArray[np.float32]
+    The per-transaction footer is gone; halt/error status comes from the
+    regmap and is serialized to ``regmap_status.json`` alongside the
+    sample-data outputs.
+    """
+
+    cmd_hdr:  PolyCmdHdr
+    samp_in:  npt.NDArray[np.float32]
     resp_hdr: PolyRespHdr
     samp_out: npt.NDArray[np.float32]
-    resp_ftr: PolyRespFtr
+    halted:   int
+    error:    PolyError
+    tx_id:    int
 
     @property
     def passed(self) -> bool:
-        return self.resp_ftr.error == PolyError.NO_ERROR
+        return self.error == PolyError.NO_ERROR and self.halted == 0
 
     @classmethod
     def from_paths(
@@ -114,8 +122,7 @@ class PolySimResult:
 
         ``cmd_hdr_path`` / ``samp_in_path`` point at the input test vectors
         (written by BuildInputsStep); ``resp_dir`` is the directory holding
-        ``resp_hdr.bin``, ``samp_out.bin`` and ``resp_ftr.bin`` (written by
-        PySimStep or ValidateCSimStep).
+        ``resp_hdr.bin``, ``samp_out.bin`` and ``regmap_status.json``.
         """
         cmd_hdr = PolyCmdHdr().read_uint32_file(cmd_hdr_path)
         samp_in = np.array(
@@ -123,15 +130,19 @@ class PolySimResult:
             dtype=np.float32,
         )
         resp_hdr = PolyRespHdr().read_uint32_file(resp_dir / "resp_hdr.bin")
-        resp_ftr = PolyRespFtr().read_uint32_file(resp_dir / "resp_ftr.bin")
+        status = json.loads((resp_dir / "regmap_status.json").read_text(encoding="utf-8"))
+        samp_out_len = int(cmd_hdr.nsamp)
         samp_out = np.array(
             read_uint32_file(resp_dir / "samp_out.bin", elem_type=Float32,
-                             shape=int(resp_ftr.nsamp_read)),
+                             shape=samp_out_len),
             dtype=np.float32,
         )
         return cls(
             cmd_hdr=cmd_hdr, samp_in=samp_in,
-            resp_hdr=resp_hdr, samp_out=samp_out, resp_ftr=resp_ftr,
+            resp_hdr=resp_hdr, samp_out=samp_out,
+            halted=int(status["halted"]),
+            error=PolyError(int(status["error"])),
+            tx_id=int(status["tx_id"]),
         )
 
 

@@ -21,15 +21,15 @@ from pysilicon.toolchain import toolchain
 
 try:
     from examples.poly.poly import (
-        Float32, PolyAccelComponent, PolyCmdHdr,
-        PolyRespFtr, PolyRespHdr, PolyTB,
+        Float32, PolyAccelComponent, PolyCmdHdr, PolyCmdType,
+        PolyError, PolyRespHdr, PolyTB,
         SCHEMA_CLASSES, WORD_BW_SUPPORTED, CoeffArray,
         connect,
     )
 except ModuleNotFoundError:
     from poly import (  # type: ignore[no-redef]  # direct execution
-        Float32, PolyAccelComponent, PolyCmdHdr,
-        PolyRespFtr, PolyRespHdr, PolyTB,
+        Float32, PolyAccelComponent, PolyCmdHdr, PolyCmdType,
+        PolyError, PolyRespHdr, PolyTB,
         SCHEMA_CLASSES, WORD_BW_SUPPORTED, CoeffArray,
         connect,
     )
@@ -94,7 +94,7 @@ class GenCppStep(BuildStep):
 @dataclass(kw_only=True)
 class PySimStep(BuildStep):
     description = "Run the Python SimPy simulation and write results to results/sim/."
-    consumes    = ["poly_source", "cmd_hdr", "samp_in"]
+    consumes    = ["poly_source", "coeffs", "data_cmd_hdr", "samp_in"]
     produces    = {"sim_dir": Path("results/sim"), "log": Path("results/sim_log.csv")}
     params      = {"clk_freq": 100e6, "in_bw": 32, "out_bw": 32,
                    "unroll_factor": 1, "log_file": "results/sim_log.csv"}
@@ -104,14 +104,15 @@ class PySimStep(BuildStep):
         return {"log": config.root_dir / log_file}
 
     def run(self, config: BuildConfig,
-            cmd_hdr, samp_in,          # Path objects from BuildInputsStep
+            coeffs, data_cmd_hdr, samp_in,    # Path objects from BuildInputsStep
             clk_freq, in_bw, out_bw, unroll_factor, log_file,
             **_) -> dict:
-        cmd_hdr_obj = PolyCmdHdr().read_uint32_file(cmd_hdr)
+        cmd_hdr_obj = PolyCmdHdr().read_uint32_file(data_cmd_hdr)
         samp_in_arr = np.array(
             read_uint32_file(samp_in, elem_type=Float32, shape=int(cmd_hdr_obj.nsamp)),
             dtype=np.float32,
         )
+        coeffs_obj = CoeffArray().read_uint32_file(coeffs)
         sim = Simulation()
         clk = Clock(freq=clk_freq)
         log_path = config.root_dir / log_file
@@ -124,7 +125,9 @@ class PySimStep(BuildStep):
             clk=clk, logger=logger,
         )
         tb = PolyTB(name="poly_tb", sim=sim,
-                    cmd_hdr=cmd_hdr_obj, samp_in=samp_in_arr, word_bw=in_bw)
+                    cmd_hdr=cmd_hdr_obj, samp_in=samp_in_arr,
+                    coeffs=np.asarray(coeffs_obj.val, dtype=np.float32),
+                    word_bw=in_bw)
         connect(sim, tb, accel, clk)
         sim.run_sim()
         sim_dir = config.root_dir / "results" / "sim"
@@ -132,7 +135,14 @@ class PySimStep(BuildStep):
         tb.resp_hdr.write_uint32_file(sim_dir / "resp_hdr.bin")
         write_uint32_file(tb.samp_out, elem_type=Float32,
                           file_path=sim_dir / "samp_out.bin", nwrite=len(tb.samp_out))
-        tb.resp_ftr.write_uint32_file(sim_dir / "resp_ftr.bin")
+        status = {
+            "halted": int(tb.halted) if tb.halted is not None else 0,
+            "error":  int(tb.error)  if tb.error  is not None else int(PolyError.NO_ERROR),
+            "tx_id":  int(tb.tx_id_status) if tb.tx_id_status is not None else 0,
+        }
+        (sim_dir / "regmap_status.json").write_text(
+            json.dumps(status, indent=2), encoding="utf-8"
+        )
         return {"sim_dir": sim_dir, "log": log_path}
 
 
