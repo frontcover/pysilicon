@@ -230,39 +230,86 @@ class PolyAccelComponent(HwComponent):
 
 @dataclass(kw_only=True)
 class PolyTB(SimObj):
-    """Drives one polynomial transaction and captures the response."""
+    """Drives one polynomial transaction and captures the response.
 
-    cmd_hdr: PolyCmdHdr
-    samp_in: npt.NDArray[np.float32]
-    word_bw: int = 32
+    Writes ``coeffs`` to the regmap, asserts ap_start, sends one DATA
+    cmd_hdr + samples, reads back the resp_hdr + samp_out pair, sends an
+    END cmd_hdr to terminate the kernel loop, then reads halted/error/tx_id
+    from the regmap.
+    """
+
+    cmd_hdr:   PolyCmdHdr
+    samp_in:   npt.NDArray[np.float32]
+    coeffs:    npt.NDArray[np.float32]
+    word_bw:   int = 32
+    base_addr: int = 0x0
 
     def __post_init__(self) -> None:
         super().__post_init__()
-        self.m_in  = StreamIFMaster(name=f'{self.name}_m_in',  sim=self.sim, bitwidth=self.word_bw)
-        self.s_out = StreamIFSlave( name=f'{self.name}_s_out', sim=self.sim, bitwidth=self.word_bw)
-        self.resp_hdr: PolyRespHdr | None = None
-        self.samp_out: npt.NDArray[np.float32] | None = None
-        self.resp_ftr: PolyRespFtr | None = None
+        self.m_in   = StreamIFMaster(name=f'{self.name}_m_in',   sim=self.sim, bitwidth=self.word_bw)
+        self.s_out  = StreamIFSlave( name=f'{self.name}_s_out',  sim=self.sim, bitwidth=self.word_bw)
+        self.m_lite = MMIFMaster(    name=f'{self.name}_m_lite', sim=self.sim, bitwidth=32)
+        self.resp_hdr:     PolyRespHdr | None              = None
+        self.samp_out:     npt.NDArray[np.float32] | None  = None
+        self.halted:       int | None                      = None
+        self.error:        PolyError | None                = None
+        self.tx_id_status: int | None                      = None
+        self._regmap_ref:  VitisRegMap | None              = None
 
     def run_proc(self) -> ProcessGen[None]:
         bw = self.word_bw
+        regmap = self._regmap()
+
+        yield from self.m_lite.write_schema(
+            CoeffArray(self.coeffs),
+            addr=self.base_addr + regmap.offset_of("coeffs"),
+        )
+
+        yield from regmap.start(self.m_lite, base_addr=self.base_addr)
+
         yield from self.m_in.write(self.cmd_hdr.serialize(word_bw=bw))
         yield from self.m_in.write(write_array(self.samp_in, elem_type=Float32, word_bw=bw))
 
         resp_words = yield from self.s_out.get()
         samp_words = yield from self.s_out.get()
-        ftr_words  = yield from self.s_out.get()
-
         self.resp_hdr = PolyRespHdr().deserialize(resp_words, word_bw=bw)
-        self.samp_out = read_array(samp_words, elem_type=Float32, word_bw=bw, shape=int(self.cmd_hdr.nsamp))
-        self.resp_ftr = PolyRespFtr().deserialize(ftr_words, word_bw=bw)
+        self.samp_out = read_array(samp_words, elem_type=Float32, word_bw=bw,
+                                   shape=int(self.cmd_hdr.nsamp))
+
+        end_hdr = PolyCmdHdr()
+        end_hdr.cmd_type = PolyCmdType.END
+        end_hdr.tx_id    = 0
+        end_hdr.nsamp    = 0
+        yield from self.m_in.write(end_hdr.serialize(word_bw=bw))
+
+        yield self.timeout(0)
+        halted_field = yield from self.m_lite.read_schema(
+            Bit, addr=self.base_addr + regmap.offset_of("halted"))
+        error_field = yield from self.m_lite.read_schema(
+            PolyErrorField, addr=self.base_addr + regmap.offset_of("error"))
+        tx_id_field = yield from self.m_lite.read_schema(
+            TxIdField, addr=self.base_addr + regmap.offset_of("tx_id"))
+        self.halted       = int(halted_field.val)
+        self.error        = PolyError(int(error_field.val))
+        self.tx_id_status = int(tx_id_field.val)
+
+    def _regmap(self) -> VitisRegMap:
+        if self._regmap_ref is None:
+            raise RuntimeError(
+                "PolyTB._regmap_ref is unset; call connect() before run_sim()."
+            )
+        return self._regmap_ref
 
 
 def connect(sim: Simulation, tb: PolyTB, accel: PolyAccelComponent, clk: Clock) -> None:
-    """Wire a testbench's master/slave ports to the accelerator via two StreamIFs."""
+    """Wire a testbench's master/slave ports to the accelerator via two StreamIFs and a DirectMMIF."""
     in_stream  = StreamIF(sim=sim, clk=clk)
     out_stream = StreamIF(sim=sim, clk=clk)
+    lite_link  = DirectMMIF(sim=sim, clk=clk, byte_addressable=True)
     in_stream.bind( "master", tb.m_in)
     in_stream.bind( "slave",  accel.s_in)
     out_stream.bind("master", accel.m_out)
     out_stream.bind("slave",  tb.s_out)
+    lite_link.bind( "master", tb.m_lite)
+    lite_link.bind( "slave",  accel.s_lite)
+    tb._regmap_ref = accel.regmap
