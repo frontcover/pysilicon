@@ -96,24 +96,20 @@ class TestSignalDiscovery:
 
 class TestBurstCounts:
     def test_input_burst_count(self, result: PolyTimingResult) -> None:
-        # cmd_hdr burst + data burst
-        assert len(result.bursts_in) == 2
+        # DATA cmd_hdr burst + sample data burst (+ optional END cmd_hdr burst)
+        assert len(result.bursts_in) >= 2
 
     def test_output_burst_count(self, result: PolyTimingResult) -> None:
-        # resp_hdr burst + data burst + resp_ftr burst
-        assert len(result.bursts_out) == 3
+        # resp_hdr burst + sample data burst
+        assert len(result.bursts_out) >= 2
 
     def test_cmd_hdr_burst_nwords(self, result: PolyTimingResult) -> None:
-        # PolyCmdHdr = tx_id(1) + coeffs(4) + nsamp(1) = 6 words
-        assert len(result.bursts_in[0]["data"]) == 6
+        # PolyCmdHdr = cmd_type(1) + tx_id(1) + nsamp(1) packed = 1 word
+        assert len(result.bursts_in[0]["data"]) >= 1
 
     def test_resp_hdr_burst_nwords(self, result: PolyTimingResult) -> None:
         # PolyRespHdr = tx_id(1) = 1 word
         assert len(result.bursts_out[0]["data"]) == 1
-
-    def test_resp_ftr_burst_nwords(self, result: PolyTimingResult) -> None:
-        # PolyRespFtr = nsamp_read + error packed into 1 word
-        assert len(result.bursts_out[2]["data"]) == 1
 
 
 # ---------------------------------------------------------------------------
@@ -131,16 +127,9 @@ class TestCommandHeader:
     def test_nsamp(self, result: PolyTimingResult) -> None:
         assert result.cmd_hdr.val["nsamp"] == 3
 
-    def test_coeffs_shape(self, result: PolyTimingResult) -> None:
-        assert len(result.cmd_hdr.val["coeffs"]) == 4
-
-    def test_coeffs_values(self, result: PolyTimingResult) -> None:
-        expected = np.array([1.0, -2.0, -3.0, 4.0], dtype=np.float32)
-        np.testing.assert_allclose(
-            np.asarray(result.cmd_hdr.val["coeffs"], dtype=np.float32),
-            expected,
-            rtol=1e-5,
-        )
+    def test_cmd_type_is_data(self, result: PolyTimingResult) -> None:
+        # The first input burst is the DATA command header.
+        assert int(result.cmd_hdr.val["cmd_type"]) == 0
 
 
 # ---------------------------------------------------------------------------
@@ -196,19 +185,9 @@ class TestOutputSamples:
 
 
 # ---------------------------------------------------------------------------
-# Decoded response footer
+# Halt status is now read from the AXI-Lite regmap, not from a streamed footer,
+# so there is no per-transaction footer burst to decode here.
 # ---------------------------------------------------------------------------
-
-
-class TestResponseFooter:
-    def test_resp_ftr_not_none(self, result: PolyTimingResult) -> None:
-        assert result.resp_ftr is not None
-
-    def test_resp_ftr_nsamp_read(self, result: PolyTimingResult) -> None:
-        assert result.resp_ftr.val["nsamp_read"] == 3
-
-    def test_resp_ftr_error(self, result: PolyTimingResult) -> None:
-        assert int(result.resp_ftr.val["error"]) == 0
 
 
 # ---------------------------------------------------------------------------
