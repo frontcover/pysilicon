@@ -53,7 +53,7 @@ Each `burst` dict has keys `data`, `beat_type`, `start_idx`, and `tstart`.
 
 ```python
 import sys
-sys.path.insert(0, "examples/poly")   # make poly_demo importable
+sys.path.insert(0, "examples/poly")   # make the sibling poly / timing_analysis modules importable
 from timing_analysis import analyze_poly_vcd
 
 result = analyze_poly_vcd("vcd/dump.vcd")
@@ -121,17 +121,6 @@ To zoom into a specific time range, pass `trange=(t_start_ns, t_end_ns)`:
 
 ```python
 ax = plot_poly_timing(result, trange=(0, 500), show=True)
-```
-
-## Using the `PolyTest` convenience wrapper
-
-`PolyTest` exposes `analyze_timing()` as a thin wrapper:
-
-```python
-from poly_demo import PolyTest
-
-test = PolyTest()
-result = test.analyze_timing("vcd/dump.vcd")
 ```
 
 ## Stable test fixture

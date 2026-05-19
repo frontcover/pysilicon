@@ -27,14 +27,37 @@ The matching C++ kernel signature exposes the same fields as `s_axilite` argumen
 
 ## Implementation code
 
-The HLS kernel is implemented in [`examples/poly/poly.cpp`](https://github.com/sdrangan/pysilicon/blob/main/examples/poly/poly.cpp). It declares one AXI-Lite control bundle covering coefficients, status registers, and the `ap_ctrl_hs` `return` port. The loop body:
+The HLS kernel is implemented in [`examples/poly/poly.cpp`](https://github.com/sdrangan/pysilicon/blob/main/examples/poly/poly.cpp). It declares one AXI-Lite control bundle covering coefficients, status registers, and the `ap_ctrl_hs` `return` port. The function signature:
+
+```cpp
+void poly(hls::stream<axis_word_t>& in_stream,
+          hls::stream<axis_word_t>& out_stream,
+          const float coeffs[4],
+          ap_uint<1>& halted,
+          ap_uint<8>& error_code,
+          ap_uint<16>& tx_id_status);
+```
+
+The interface pragmas wire the scalars and the `return` port to the same AXI-Lite bundle as the coefficient array:
+
+```cpp
+#pragma HLS INTERFACE axis port=in_stream
+#pragma HLS INTERFACE axis port=out_stream
+#pragma HLS INTERFACE s_axilite port=coeffs       bundle=control
+#pragma HLS INTERFACE s_axilite port=halted       bundle=control
+#pragma HLS INTERFACE s_axilite port=error_code   bundle=control
+#pragma HLS INTERFACE s_axilite port=tx_id_status bundle=control
+#pragma HLS INTERFACE s_axilite port=return       bundle=control
+```
+
+The loop body:
 
 - reads a `PolyCmdHdr` from the input stream;
-- if `cmd_type == END`, breaks out of the loop and returns;
-- on TLAST framing errors latches `halted`/`error`/`tx_id` and returns;
-- otherwise emits a `PolyRespHdr`, processes `nsamp` lane-packed samples through Horner evaluation, and emits the result stream.
+- if `cmd_type == END`, breaks out of the loop and returns cleanly;
+- on TLAST framing errors latches `halted` / `error_code` / `tx_id_status` and breaks (no stream flush — the host re-launches via platform reset);
+- otherwise emits a `PolyRespHdr`, processes `nsamp` lane-packed samples through Horner evaluation using the `s_axilite` `coeffs` argument, emits the result stream, and validates the sample-burst framing the same way.
 
-When the function returns, Vitis asserts `ap_done`, the host reads the regmap status, and re-launches via the platform reset controller if it needs to clear `halted`.
+When the function returns, Vitis asserts `ap_done`, the host reads the regmap status (`halted` / `error_code` / `tx_id_status`), and — if anything other than `NO_ERROR` is reported — re-launches the kernel by asserting `ap_rst_n` via the platform reset controller and then writing a fresh `ap_start`.
 
 ---
 
