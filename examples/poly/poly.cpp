@@ -32,7 +32,7 @@ void poly(hls::stream<axis_word_t>& in_stream,
 #pragma HLS INTERFACE s_axilite port=return       bundle=control
 
     ap_uint<1>  local_halted = 0;
-    ap_uint<8>  local_error  = (ap_uint<8>)PolyError::NO_ERROR;
+    ap_uint<8>  local_error  = (ap_uint<8>)static_cast<unsigned int>(PolyError::NO_ERROR);
     ap_uint<16> local_tx_id  = 0;
 
     static const int pf = float32_array_utils::pf<WORD_BW>();
@@ -57,13 +57,13 @@ void poly(hls::stream<axis_word_t>& in_stream,
         // Validate framing of the command-header burst.
         if (cmd_hdr_tlast == streamutils::tlast_status::tlast_early) {
             local_halted = 1;
-            local_error  = (ap_uint<8>)PolyError::TLAST_EARLY_CMD_HDR;
+            local_error  = (ap_uint<8>)static_cast<unsigned int>(PolyError::TLAST_EARLY_CMD_HDR);
             local_tx_id  = cmd_hdr.tx_id;
             break;
         }
         if (cmd_hdr_tlast == streamutils::tlast_status::no_tlast) {
             local_halted = 1;
-            local_error  = (ap_uint<8>)PolyError::NO_TLAST_CMD_HDR;
+            local_error  = (ap_uint<8>)static_cast<unsigned int>(PolyError::NO_TLAST_CMD_HDR);
             local_tx_id  = cmd_hdr.tx_id;
             break;
         }
@@ -114,19 +114,19 @@ void poly(hls::stream<axis_word_t>& in_stream,
         // ------------------------------------------------------------------
         if (samp_in_tlast == streamutils::tlast_status::tlast_early) {
             local_halted = 1;
-            local_error  = (ap_uint<8>)PolyError::TLAST_EARLY_SAMP_IN;
+            local_error  = (ap_uint<8>)static_cast<unsigned int>(PolyError::TLAST_EARLY_SAMP_IN);
             local_tx_id  = cmd_hdr.tx_id;
             break;
         }
         if (samp_in_tlast == streamutils::tlast_status::no_tlast) {
             local_halted = 1;
-            local_error  = (ap_uint<8>)PolyError::NO_TLAST_SAMP_IN;
+            local_error  = (ap_uint<8>)static_cast<unsigned int>(PolyError::NO_TLAST_SAMP_IN);
             local_tx_id  = cmd_hdr.tx_id;
             break;
         }
         if (nsamp_read != cmd_hdr.nsamp) {
             local_halted = 1;
-            local_error  = (ap_uint<8>)PolyError::WRONG_NSAMP;
+            local_error  = (ap_uint<8>)static_cast<unsigned int>(PolyError::WRONG_NSAMP);
             local_tx_id  = cmd_hdr.tx_id;
             break;
         }
