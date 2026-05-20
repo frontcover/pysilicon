@@ -74,3 +74,39 @@ def test_return_at_top_of_while():
     assert isinstance(tree, WhileStmt)
     assert isinstance(tree.body, SeqStmt)
     assert any(isinstance(s, ReturnStmt) for s in tree.body.stmts)
+
+
+# ---------------------------------------------------------------------------
+# Phase 2: != in CaseStmt
+# ---------------------------------------------------------------------------
+
+class _NotEqIfComp(HwComponent):
+    def run_proc(self):
+        while True:
+            x = yield from self.ep.get()
+            if x.f != 0:
+                return
+
+
+def test_case_stmt_not_eq_op():
+    comp = _make_comp(_NotEqIfComp)
+    tree = HwStmtExtractor(comp).extract()
+    case_stmt = tree.body.stmts[1]
+    assert isinstance(case_stmt, CaseStmt)
+    assert case_stmt.op == '!='
+
+
+class _EqIfComp(HwComponent):
+    def run_proc(self):
+        while True:
+            x = yield from self.ep.get()
+            if x.f == 0:
+                return
+
+
+def test_case_stmt_eq_op_default():
+    comp = _make_comp(_EqIfComp)
+    tree = HwStmtExtractor(comp).extract()
+    case_stmt = tree.body.stmts[1]
+    assert isinstance(case_stmt, CaseStmt)
+    assert case_stmt.op == '=='

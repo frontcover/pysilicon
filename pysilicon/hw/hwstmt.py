@@ -71,12 +71,16 @@ class WhileStmt(HwStmt):
 
 @dataclass
 class CaseStmt(HwStmt):
-    """Restricted ``if var.field == value:`` — maps to switch/if-else in C++."""
+    """Restricted ``if var.field <op> value:`` — maps to switch/if-else in C++.
+
+    ``op`` is ``'=='`` or ``'!='``.
+    """
     var: HwVar
     field: str
     value: object  # enum value or literal
     if_true: SeqStmt
     if_false: SeqStmt | None = None
+    op: str = '=='
 
 
 @dataclass

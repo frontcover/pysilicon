@@ -182,20 +182,20 @@ class HwStmtExtractor:
         )
 
     def _visit_if(self, node: ast.If) -> CaseStmt:
-        # Only: if var.field == EnumValue:
+        # Only: if var.field == EnumValue:  or  if var.field != EnumValue:
         test = node.test
         if not isinstance(test, ast.Compare):
             raise SynthesisError(
                 f"Non-synthesizable 'if' condition at line {node.lineno}; "
-                f"only 'if var.field == value:' is allowed"
+                f"only 'if var.field == value:' or 'if var.field != value:' is allowed"
             )
         if (len(test.ops) != 1
-                or not isinstance(test.ops[0], ast.Eq)
+                or not isinstance(test.ops[0], (ast.Eq, ast.NotEq))
                 or not isinstance(test.left, ast.Attribute)
                 or not isinstance(test.left.value, ast.Name)):
             raise SynthesisError(
                 f"Non-synthesizable 'if' condition at line {node.lineno}; "
-                f"only 'if var.field == value:' is allowed"
+                f"only 'if var.field == value:' or 'if var.field != value:' is allowed"
             )
         var_name = test.left.value.id
         if var_name not in self._scope:
@@ -205,6 +205,7 @@ class HwStmtExtractor:
         hw_var = self._scope[var_name]
         field_name = test.left.attr
         cmp_val = self._eval_const(test.comparators[0])
+        op = '==' if isinstance(test.ops[0], ast.Eq) else '!='
         body_stmts = self._visit_stmts(node.body)
         else_stmts = self._visit_stmts(node.orelse) if node.orelse else None
         return CaseStmt(
@@ -213,6 +214,7 @@ class HwStmtExtractor:
             value=cmp_val,
             if_true=SeqStmt(stmts=body_stmts),
             if_false=SeqStmt(stmts=else_stmts) if else_stmts is not None else None,
+            op=op,
         )
 
     # ------------------------------------------------------------------
