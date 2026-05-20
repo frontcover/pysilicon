@@ -64,8 +64,10 @@ class HlsCodegenStep(BuildStep):
     def run(self, config: BuildConfig, **_) -> dict[str, Any]:
         comp = self.comp_class(name="_codegen", sim=Simulation())
         files = kernel_files_to_str(comp)
-        assert config.root_dir is not None
-        out_root = config.root_dir / self.output_dir
+        # BuildConfig.__post_init__ normalises root_dir to a Path, but the type
+        # annotation is broader; narrow it here.
+        root_dir = Path(config.root_dir) if config.root_dir is not None else Path.cwd()
+        out_root = root_dir / self.output_dir
         out_root.mkdir(parents=True, exist_ok=True)
 
         artifacts: dict[str, Any] = {}

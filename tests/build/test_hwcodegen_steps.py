@@ -3,8 +3,6 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import pytest
-
 from pysilicon.build.build import BuildConfig
 from pysilicon.build.hwcodegen_steps import HlsCodegenStep
 from pysilicon.build.hwgen import kernel_files_to_str
