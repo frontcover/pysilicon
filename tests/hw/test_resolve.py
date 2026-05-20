@@ -14,7 +14,6 @@ from pysilicon.hw.hwstmt import (
     CaseStmt,
     FieldRef,
     HwVar,
-    ReturnStmt,
     SeqStmt,
     WhileStmt,
 )
