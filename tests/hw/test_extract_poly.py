@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import pytest
 
-from pysilicon.build.hwcodegen import HwStmtExtractor
+from pysilicon.build.hwcodegen import HwStmtExtractor, SynthesisError
 from pysilicon.hw.hw_component import HwComponent
 from pysilicon.hw.hwstmt import (
     CaseStmt,
@@ -11,7 +11,7 @@ from pysilicon.hw.hwstmt import (
     SeqStmt,
     WhileStmt,
 )
-from pysilicon.hw.synth import synthesizable
+from pysilicon.hw.synth import sim_only, synthesizable
 from pysilicon.simulation.simulation import Simulation
 
 
@@ -120,6 +120,64 @@ def test_extract_kernel_no_regmap_uses_run_proc():
     from pysilicon.build.hwcodegen import extract_kernel
     comp = _make_comp(_EqIfComp)
     tree = extract_kernel(comp)
+    assert isinstance(tree, WhileStmt)
+
+
+# ---------------------------------------------------------------------------
+# Phase 4: No-implicit-capture rule
+# ---------------------------------------------------------------------------
+
+class _CaptureProcLatencyComp(HwComponent):
+    proc_latency: int = 10
+
+    def run_proc(self):
+        while True:
+            x = yield from self.ep.get()
+            y = self.proc_latency
+            yield from self.ep.write(x)
+
+
+def test_implicit_capture_plain_field_raises():
+    comp = _make_comp(_CaptureProcLatencyComp)
+    with pytest.raises(SynthesisError, match="proc_latency"):
+        HwStmtExtractor(comp).extract()
+
+
+class _SimOnlyLoggerStub:
+    @sim_only
+    def log(self, **kwargs):
+        pass
+
+
+class _SimOnlyCallComp(HwComponent):
+    def run_proc(self):
+        while True:
+            self.logger.log(event='proc_begin')
+            x = yield from self.ep.get()
+            yield from self.ep.write(x)
+
+
+def test_sim_only_chain_does_not_raise():
+    sim = Simulation()
+    comp = _SimOnlyCallComp(sim=sim)
+    comp.ep = _MockEndpoint()
+    comp.logger = _SimOnlyLoggerStub()
+    tree = HwStmtExtractor(comp).extract()
+    assert isinstance(tree, WhileStmt)
+    # The @sim_only call is dropped: body is [get, write], not [log, get, write].
+    assert len(tree.body.stmts) == 2
+
+
+class _SynthEndpointCallComp(HwComponent):
+    def run_proc(self):
+        while True:
+            x = yield from self.ep.get()
+            yield from self.ep.write(x)
+
+
+def test_synth_endpoint_call_does_not_raise():
+    comp = _make_comp(_SynthEndpointCallComp)
+    tree = HwStmtExtractor(comp).extract()
     assert isinstance(tree, WhileStmt)
 
 

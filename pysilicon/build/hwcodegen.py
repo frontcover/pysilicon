@@ -65,10 +65,81 @@ class HwStmtExtractor:
             raise SynthesisError(
                 f"{self._method_name} source did not parse as a function"
             )
+        self._validate_no_implicit_capture(func_def)
         stmts = self._visit_stmts(func_def.body)
         if len(stmts) == 1:
             return stmts[0]
         return SeqStmt(stmts=stmts)
+
+    # ------------------------------------------------------------------
+    # Implicit-capture pre-pass
+    # ------------------------------------------------------------------
+
+    def _validate_no_implicit_capture(self, func_def: ast.FunctionDef) -> None:
+        """Reject ``self.X`` attribute reads that aren't part of a known pattern.
+
+        Allowed reads:
+          - The function chain of a call whose target is ``@synthesizable`` or
+            ``@sim_only`` (e.g. ``self.s_in.get`` in ``self.s_in.get(...)``).
+          - Reads that resolve to a ``@sim_only`` callable.
+          - Reads that resolve to an ``InterfaceEndpoint`` or a ``RegMap``
+            (endpoint references passed into synthesizable calls).
+
+        Anything else — a plain field like ``self.proc_latency`` used in an
+        expression — raises ``SynthesisError``.
+
+        Subtrees of ``@sim_only`` call statements are skipped entirely so the
+        rule doesn't apply to their arguments either.
+        """
+        from pysilicon.hw.interface import InterfaceEndpoint
+        from pysilicon.hw.regmap import RegMap
+
+        extractor = self
+
+        class _Validator(ast.NodeVisitor):
+            def __init__(self) -> None:
+                self._allowed_attr_ids: set[int] = set()
+
+            def visit_Call(self, node: ast.Call) -> None:
+                method = extractor._resolve_method(node.func)
+                if getattr(method, '_is_sim_only', False):
+                    return  # drop entire @sim_only call subtree
+                self._mark_allowed(node.func)
+                for arg in node.args:
+                    self.visit(arg)
+                for kw in node.keywords:
+                    self.visit(kw.value)
+
+            def _mark_allowed(self, attr_node: ast.expr) -> None:
+                while isinstance(attr_node, ast.Attribute):
+                    self._allowed_attr_ids.add(id(attr_node))
+                    attr_node = attr_node.value
+
+            def visit_Attribute(self, node: ast.Attribute) -> None:
+                if id(node) in self._allowed_attr_ids:
+                    return
+                root: ast.expr = node
+                while isinstance(root, ast.Attribute):
+                    root = root.value
+                if not (isinstance(root, ast.Name) and root.id == 'self'):
+                    self.generic_visit(node)
+                    return
+                obj = extractor._resolve_obj(node)
+                if obj is not None and (
+                    getattr(obj, '_is_sim_only', False)
+                    or getattr(obj, '_is_synthesizable', False)
+                    or isinstance(obj, (InterfaceEndpoint, RegMap))
+                ):
+                    return
+                lineno = getattr(node, 'lineno', '?')
+                raise SynthesisError(
+                    f"Implicit capture of 'self.{node.attr}' at line {lineno}. "
+                    f"Reads of self.X inside a synthesizable method are forbidden "
+                    f"unless 'X' is @sim_only, an endpoint, or a RegMap. Mark the "
+                    f"value @sim_only or pass it explicitly."
+                )
+
+        _Validator().visit(func_def)
 
     # ------------------------------------------------------------------
     # Statement dispatch
