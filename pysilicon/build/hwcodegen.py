@@ -18,9 +18,12 @@ if TYPE_CHECKING:
 from pysilicon.hw.hwstmt import (
     CaseStmt,
     ContinueStmt,
+    FieldRef,
     HookStmt,
     HwStmt,
     HwVar,
+    Ref,
+    ReturnStmt,
     SeqStmt,
     SynthCallStmt,
     WhileStmt,
@@ -83,6 +86,8 @@ class HwStmtExtractor:
             return self._visit_expr_stmt(stmt)
         if isinstance(stmt, ast.If):
             return self._visit_if(stmt)
+        if isinstance(stmt, ast.Return):
+            return self._visit_return(stmt)
         raise SynthesisError(
             f"Non-synthesizable statement {type(stmt).__name__}"
             + (f" at line {stmt.lineno}" if hasattr(stmt, 'lineno') else "")
@@ -154,6 +159,26 @@ class HwStmtExtractor:
             return self._make_call_stmt(method, inputs, [])
         raise SynthesisError(
             f"Non-synthesizable expression statement at line {node.lineno}"
+        )
+
+    def _visit_return(self, node: ast.Return) -> ReturnStmt:
+        if node.value is None:
+            return ReturnStmt(value=None)
+        val = node.value
+        if isinstance(val, ast.Name):
+            if val.id not in self._scope:
+                raise SynthesisError(
+                    f"Return of undefined variable '{val.id}' at line {node.lineno}"
+                )
+            return ReturnStmt(value=Ref(var=self._scope[val.id]))
+        if (isinstance(val, ast.Attribute)
+                and isinstance(val.value, ast.Name)
+                and val.value.id in self._scope):
+            return ReturnStmt(
+                value=FieldRef(var=self._scope[val.value.id], field=val.attr)
+            )
+        raise SynthesisError(
+            f"Non-synthesizable return value at line {node.lineno}"
         )
 
     def _visit_if(self, node: ast.If) -> CaseStmt:

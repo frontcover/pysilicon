@@ -105,3 +105,9 @@ class HookStmt(HwStmt):
     method: object              # bound callable with _is_synthesizable=True
     inputs: list               # HwVar | ast node
     outputs: list[HwVar]
+
+
+@dataclass
+class ReturnStmt(HwStmt):
+    """``return`` from the kernel function. Optional return value."""
+    value: HwExpr | None = None
