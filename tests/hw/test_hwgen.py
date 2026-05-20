@@ -537,6 +537,63 @@ def test_header_to_cpp_forward_decl_has_no_pragmas():
     assert "#pragma HLS" not in hpp
 
 
+# ---------------------------------------------------------------------------
+# Kernel-files Phase 5: kernel_to_cpp + impl_stub_to_cpp + driver
+# ---------------------------------------------------------------------------
+
+def test_kernel_to_cpp_substrings():
+    from pysilicon.build.hwgen import kernel_to_cpp
+    from tests.hw.test_resolve import DemoComponent
+
+    comp = DemoComponent(name="demo", sim=Simulation())
+    cpp = kernel_to_cpp(comp)
+
+    for sub in [
+        '#include "demo.hpp"',
+        "void demo(",
+        "#pragma HLS INTERFACE axis port=s_in",
+        "while (true)",
+    ]:
+        assert sub in cpp, f"Missing substring: {sub!r}\n--- cpp ---\n{cpp}"
+    # Closing brace at end of file.
+    assert cpp.rstrip().endswith("}")
+
+
+def test_impl_stub_to_cpp_substrings():
+    from pysilicon.build.hwcodegen import extract_kernel
+    from pysilicon.build.hwgen import _collect_hooks, impl_stub_to_cpp
+    from tests.hw.test_resolve import DemoComponent
+
+    comp = DemoComponent(name="demo", sim=Simulation())
+    tree = extract_kernel(comp)
+    hooks = _collect_hooks(tree)
+    assert len(hooks) == 1
+    process = hooks[0]
+
+    stub = impl_stub_to_cpp(comp, process)
+    for sub in [
+        '#include "demo.hpp"',
+        "ap_uint<8> process(DemoCmdHdr cmd) {",
+        "// TODO: implement process",
+        "return ap_uint<8>(0);",
+    ]:
+        assert sub in stub, f"Missing substring: {sub!r}\n--- stub ---\n{stub}"
+    assert stub.rstrip().endswith("}")
+
+
+def test_kernel_files_to_str_keys():
+    from pysilicon.build.hwgen import kernel_files_to_str
+    from tests.hw.test_resolve import DemoComponent
+
+    comp = DemoComponent(name="demo", sim=Simulation())
+    files = kernel_files_to_str(comp)
+    assert set(files.keys()) == {
+        "demo.hpp",
+        "demo.cpp",
+        "demo_process_impl.cpp",
+    }
+
+
 def test_kernel_body_to_cpp_demo_component_contains_expected_substrings():
     from pysilicon.build.hwgen import kernel_body_to_cpp
     # Reuse the DemoComponent fixture from tests/hw/test_resolve.py.

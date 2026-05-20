@@ -494,3 +494,62 @@ def kernel_body_to_cpp(comp: HwComponent) -> str:
     ctx = CodegenCtx(comp=comp, params=synth_ctx.params, indent=1)
     body = to_cpp(tree, ctx)
     return f"{{\n{body}\n}}"
+
+
+def kernel_to_cpp(comp) -> str:
+    """Build the content of ``<component>.cpp`` — kernel function with body."""
+    header_name = f"{cpp_kernel_name(type(comp))}.hpp"
+    sig_with_pragmas = kernel_signature(comp)
+    body = kernel_body_to_cpp(comp)
+    body_inner = body.removeprefix("{\n").removesuffix("\n}")
+    return (
+        f'#include "{header_name}"\n\n'
+        f"{sig_with_pragmas}\n"
+        f"{body_inner}\n"
+        f"}}\n"
+    )
+
+
+def _stub_default_return(ret_cpp: str) -> str:
+    """Best-effort default ``return ...;`` for a stub body so the file compiles."""
+    if ret_cpp == "void":
+        return ""
+    if ret_cpp.startswith("ap_uint") or ret_cpp.startswith("ap_int"):
+        return f"return {ret_cpp}(0);"
+    if ret_cpp in ("float", "double"):
+        return f"return {ret_cpp}(0);"
+    # struct: default-construct
+    return f"return {ret_cpp}{{}};"
+
+
+def impl_stub_to_cpp(comp, hook_method) -> str:
+    """Build the first-time stub content for one hook impl file."""
+    header_name = f"{cpp_kernel_name(type(comp))}.hpp"
+    ret_cpp, args = hook_signature(hook_method)
+    arg_str = ", ".join(arg_decl for _, arg_decl in args)
+    default = _stub_default_return(ret_cpp)
+    body_lines = [f"    // TODO: implement {hook_method.__name__}"]
+    if default:
+        body_lines.append(f"    {default}")
+    body = "\n".join(body_lines)
+    return (
+        f'#include "{header_name}"\n\n'
+        f"{ret_cpp} {hook_method.__name__}({arg_str}) {{\n"
+        f"{body}\n"
+        f"}}\n"
+    )
+
+
+def kernel_files_to_str(comp) -> dict[str, str]:
+    """Top-level driver. Returns ``{filename: contents}`` for all generated files."""
+    from pysilicon.build.hwcodegen import extract_kernel
+
+    name = cpp_kernel_name(type(comp))
+    files: dict[str, str] = {
+        f"{name}.hpp": header_to_cpp(comp),
+        f"{name}.cpp": kernel_to_cpp(comp),
+    }
+    tree = extract_kernel(comp)
+    for hook in _collect_hooks(tree):
+        files[f"{name}_{hook.__name__}_impl.cpp"] = impl_stub_to_cpp(comp, hook)
+    return files
