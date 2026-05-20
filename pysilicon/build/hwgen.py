@@ -15,6 +15,11 @@ from pysilicon.hw.hwstmt import (
     SeqStmt,
     WhileStmt,
 )
+from pysilicon.hw.interface import (
+    StreamDrainStmt,
+    StreamGetStmt,
+    StreamWriteStmt,
+)
 
 if TYPE_CHECKING:
     from pysilicon.hw.hw_component import HwComponent
@@ -51,6 +56,12 @@ def to_cpp(stmt: HwStmt, ctx: CodegenCtx) -> str:
         return f"{ctx.pad()}continue;"
     if isinstance(stmt, CaseStmt):
         return _emit_case(stmt, ctx)
+    if isinstance(stmt, StreamGetStmt):
+        return _emit_stream_get(stmt, ctx)
+    if isinstance(stmt, StreamWriteStmt):
+        return _emit_stream_write(stmt, ctx)
+    if isinstance(stmt, StreamDrainStmt):
+        return _emit_stream_drain(stmt, ctx)
     raise NotImplementedError(
         f"Codegen for {type(stmt).__name__} not implemented yet"
     )
@@ -93,6 +104,47 @@ def _emit_expr(expr, ctx: CodegenCtx) -> str:
     if isinstance(expr, FieldRef):
         return f"{expr.var.name}.{expr.field}"
     return _emit_literal(expr)
+
+
+def _emit_stream_get(stmt: StreamGetStmt, ctx: CodegenCtx) -> str:
+    # stmt.inputs = [schema_class]; stmt.outputs = [HwVar]
+    schema_cls = stmt.inputs[0]
+    out = stmt.outputs[0]
+    cpp_type = schema_cls.cpp_class_name()
+    stream_name = _endpoint_name(stmt.method.__self__, ctx)
+    pad = ctx.pad()
+    return (
+        f"{pad}{cpp_type} {out.name};\n"
+        f"{pad}{out.name}.read_axi4_stream<WORD_BW>({stream_name});"
+    )
+
+
+def _emit_stream_write(stmt: StreamWriteStmt, ctx: CodegenCtx) -> str:
+    # stmt.inputs = [HwVar of the value to write]
+    value = stmt.inputs[0]
+    stream_name = _endpoint_name(stmt.method.__self__, ctx)
+    pad = ctx.pad()
+    return f"{pad}{value.name}.write_axi4_stream<WORD_BW>({stream_name}, true);"
+
+
+def _emit_stream_drain(stmt: StreamDrainStmt, ctx: CodegenCtx) -> str:
+    stream_name = _endpoint_name(stmt.method.__self__, ctx)
+    pad = ctx.pad()
+    return f"{pad}streamutils::flush_axi4_stream_to_tlast<WORD_BW>({stream_name});"
+
+
+def _endpoint_name(endpoint, ctx: CodegenCtx) -> str:
+    """Find the Python attribute name on ``ctx.comp`` that this endpoint is bound to."""
+    key = id(endpoint)
+    if key in ctx.endpoint_names:
+        return ctx.endpoint_names[key]
+    for name, val in vars(ctx.comp).items():
+        if val is endpoint:
+            ctx.endpoint_names[key] = name
+            return name
+    raise RuntimeError(
+        f"Endpoint {endpoint!r} not found on component {type(ctx.comp).__name__}"
+    )
 
 
 def _emit_literal(value) -> str:

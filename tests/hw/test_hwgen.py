@@ -117,3 +117,90 @@ def test_unhandled_stmt_raises_not_implemented():
 
     with pytest.raises(NotImplementedError):
         to_cpp(_Bogus(), _ctx())  # type: ignore[arg-type]
+
+
+# ---------------------------------------------------------------------------
+# Phase 2: Stream statements
+# ---------------------------------------------------------------------------
+
+class _FakeSchema:
+    @classmethod
+    def cpp_class_name(cls) -> str:
+        return "DemoCmdHdr"
+
+
+class _FakeEndpoint:
+    """Stand-in object used as the bound `self` of a stream method."""
+
+
+class _FakeBoundMethod:
+    """Carries ``__self__`` so ``_endpoint_name`` can locate the endpoint."""
+    def __init__(self, endpoint):
+        self.__self__ = endpoint
+
+
+def _comp_with_endpoints(**endpoints):
+    """Create a HwComponent and stash endpoints as attributes for vars() lookup."""
+    comp = HwComponent(name='c', sim=Simulation())
+    for name, ep in endpoints.items():
+        setattr(comp, name, ep)
+    return comp
+
+
+def test_stream_get_emits_decl_and_read():
+    from pysilicon.hw.interface import StreamGetStmt
+    s_in = _FakeEndpoint()
+    comp = _comp_with_endpoints(s_in=s_in)
+    ctx = CodegenCtx(comp=comp)
+    stmt = StreamGetStmt(
+        method=_FakeBoundMethod(s_in),
+        inputs=[_FakeSchema],
+        outputs=[HwVar(name='cmd', typ=_FakeSchema)],
+    )
+    expected = (
+        "    DemoCmdHdr cmd;\n"
+        "    cmd.read_axi4_stream<WORD_BW>(s_in);"
+    )
+    assert to_cpp(stmt, ctx) == expected
+
+
+def test_stream_write_emits_call():
+    from pysilicon.hw.interface import StreamWriteStmt
+    m_out = _FakeEndpoint()
+    comp = _comp_with_endpoints(m_out=m_out)
+    ctx = CodegenCtx(comp=comp)
+    stmt = StreamWriteStmt(
+        method=_FakeBoundMethod(m_out),
+        inputs=[HwVar(name='resp', typ=None)],
+        outputs=[],
+    )
+    assert to_cpp(stmt, ctx) == "    resp.write_axi4_stream<WORD_BW>(m_out, true);"
+
+
+def test_stream_drain_emits_flush():
+    from pysilicon.hw.interface import StreamDrainStmt
+    s_in = _FakeEndpoint()
+    comp = _comp_with_endpoints(s_in=s_in)
+    ctx = CodegenCtx(comp=comp)
+    stmt = StreamDrainStmt(
+        method=_FakeBoundMethod(s_in),
+        inputs=[],
+        outputs=[],
+    )
+    assert to_cpp(stmt, ctx) == (
+        "    streamutils::flush_axi4_stream_to_tlast<WORD_BW>(s_in);"
+    )
+
+
+def test_endpoint_name_not_found_raises():
+    from pysilicon.hw.interface import StreamGetStmt
+    rogue = _FakeEndpoint()
+    comp = _comp_with_endpoints()  # no endpoint set
+    ctx = CodegenCtx(comp=comp)
+    stmt = StreamGetStmt(
+        method=_FakeBoundMethod(rogue),
+        inputs=[_FakeSchema],
+        outputs=[HwVar(name='x', typ=_FakeSchema)],
+    )
+    with pytest.raises(RuntimeError, match="not found"):
+        to_cpp(stmt, ctx)
