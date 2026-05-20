@@ -412,6 +412,72 @@ def test_cpp_kernel_name_override():
     assert cpp_kernel_name(_Overridden) == "my_custom_name"
 
 
+# ---------------------------------------------------------------------------
+# Kernel-files Phase 2: hook_signature derivation
+# ---------------------------------------------------------------------------
+
+# Module-level imports so typing.get_type_hints() can resolve annotations
+# from the module's __globals__ (annotations are stringified under
+# `from __future__ import annotations`).
+from pysilicon.hw.interface import StreamIFSlave as _StreamIFSlave
+from pysilicon.hw.synth import synthesizable as _synthesizable
+from pysilicon.simulation.simobj import ProcessGen as _ProcessGen
+from tests.hw.test_resolve import DemoCmdHdr as _DemoCmdHdr
+from tests.hw.test_resolve import DemoError as _DemoError
+
+
+@_synthesizable
+def _hook_evaluate(self, cmd: _DemoCmdHdr) -> _ProcessGen[_DemoError]:
+    yield None
+    return _DemoError.OK
+
+
+@_synthesizable
+def _hook_with_stream(
+    self,
+    cmd: _DemoCmdHdr,
+    s_in: _StreamIFSlave,
+) -> _ProcessGen[None]:
+    yield None
+
+
+@_synthesizable
+def _hook_bad(self, x):  # no annotation
+    return x
+
+
+@_synthesizable
+def _hook_no_return(self, cmd: _DemoCmdHdr):
+    pass
+
+
+def test_hook_signature_str_simple():
+    from pysilicon.build.hwgen import hook_signature_str
+    assert hook_signature_str(_hook_evaluate) == (
+        "ap_uint<8> _hook_evaluate(DemoCmdHdr cmd)"
+    )
+
+
+def test_hook_signature_str_with_stream_endpoint():
+    from pysilicon.build.hwgen import hook_signature_str
+    sig = hook_signature_str(_hook_with_stream)
+    assert "DemoCmdHdr cmd" in sig
+    assert "hls::stream<streamutils::axi4s_word<WORD_BW>>& s_in" in sig
+    assert sig.startswith("void _hook_with_stream(")
+
+
+def test_hook_signature_missing_annotation_raises():
+    from pysilicon.build.hwgen import hook_signature
+    with pytest.raises(RuntimeError, match="'x'"):
+        hook_signature(_hook_bad)
+
+
+def test_hook_signature_no_return_annotation_is_void():
+    from pysilicon.build.hwgen import hook_signature
+    ret, _args = hook_signature(_hook_no_return)
+    assert ret == "void"
+
+
 def test_kernel_body_to_cpp_demo_component_contains_expected_substrings():
     from pysilicon.build.hwgen import kernel_body_to_cpp
     # Reuse the DemoComponent fixture from tests/hw/test_resolve.py.

@@ -283,6 +283,55 @@ def cpp_type(typ) -> str:
     raise RuntimeError(f"cpp_type: cannot translate {typ!r}")
 
 
+def hook_signature(method) -> tuple[str, list[tuple[str, str]]]:
+    """Return ``(return_cpp_type, [(arg_name, arg_decl), ...])`` for a hook.
+
+    Drops ``self``. Unwraps ``ProcessGen[T]`` return annotations (which alias
+    to ``Generator[Event, Any, T]``). Endpoint-typed args become axis
+    ``hls::stream<...>&`` references; other args translate via :func:`cpp_type`.
+    """
+    import collections.abc
+    import inspect
+    import typing
+
+    from pysilicon.hw.interface import StreamIFMaster, StreamIFSlave
+
+    hints = typing.get_type_hints(method)
+    sig = inspect.signature(method)
+    param_names = [name for name in sig.parameters if name != 'self']
+    args: list[tuple[str, str]] = []
+    for name in param_names:
+        annot = hints.get(name)
+        if annot is None:
+            raise RuntimeError(
+                f"Hook '{method.__name__}' parameter '{name}' has no type annotation"
+            )
+        if isinstance(annot, type) and issubclass(annot, (StreamIFSlave, StreamIFMaster)):
+            args.append(
+                (name, f"hls::stream<streamutils::axi4s_word<WORD_BW>>& {name}")
+            )
+            continue
+        args.append((name, f"{cpp_type(annot)} {name}"))
+    ret = hints.get('return')
+    if ret is None:
+        ret_cpp = "void"
+    else:
+        # ProcessGen[T] = Generator[Event, Any, T]; unwrap to T.
+        if typing.get_origin(ret) is collections.abc.Generator:
+            gen_args = typing.get_args(ret)
+            if len(gen_args) == 3:
+                ret = gen_args[2]
+        ret_cpp = "void" if ret is type(None) else cpp_type(ret)
+    return ret_cpp, args
+
+
+def hook_signature_str(method) -> str:
+    """Return the full C++ declaration string for a hook (no body, no semicolon)."""
+    ret_cpp, args = hook_signature(method)
+    arg_str = ", ".join(arg_decl for _, arg_decl in args)
+    return f"{ret_cpp} {method.__name__}({arg_str})"
+
+
 def cpp_kernel_name(comp_class) -> str:
     """Default kernel function name.
 
