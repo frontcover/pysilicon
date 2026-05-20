@@ -493,7 +493,13 @@ def _kernel_signature_decl(comp) -> str:
 
 
 def header_to_cpp(comp) -> str:
-    """Build the content of ``<component>.hpp``."""
+    """Build the content of ``<component>.hpp``.
+
+    Kernel forward declaration stays in the global namespace.  Hook
+    forward declarations are grouped inside a single
+    ``namespace <ns> { ... }`` block when one is resolved; an opt-out
+    component (``cpp_namespace = ""``) leaves them in global.
+    """
     from pysilicon.build.hwcodegen import extract_kernel
 
     tree = extract_kernel(comp)
@@ -504,9 +510,18 @@ def header_to_cpp(comp) -> str:
         lines.append(f'#include "include/{s.cpp_class_name().lower()}.h"')  # type: ignore[attr-defined]
     lines.append('')
     lines.append(_kernel_signature_decl(comp))
-    lines.append('')
-    for hook in _collect_hooks(tree):
-        lines.append(f"{hook_signature_str(hook)};")
+    hooks = _collect_hooks(tree)
+    if hooks:
+        ns = resolved_namespace(type(comp))
+        lines.append('')
+        if ns is None:
+            for hook in hooks:
+                lines.append(f"{hook_signature_str(hook)};")
+        else:
+            lines.append(f"namespace {ns} {{")
+            for hook in hooks:
+                lines.append(f"    {hook_signature_str(hook)};")
+            lines.append("}")
     return "\n".join(lines) + "\n"
 
 
@@ -554,7 +569,11 @@ def _stub_default_return(ret_cpp: str) -> str:
 
 
 def impl_stub_to_cpp(comp, hook_method) -> str:
-    """Build the first-time stub content for one hook impl file."""
+    """Build the first-time stub content for one hook impl file.
+
+    When a namespace is resolved for the component, the function
+    definition is wrapped in a ``namespace <ns> { ... }`` block.
+    """
     header_name = f"{cpp_kernel_name(type(comp))}.hpp"
     ret_cpp, args = hook_signature(hook_method)
     arg_str = ", ".join(arg_decl for _, arg_decl in args)
@@ -563,11 +582,17 @@ def impl_stub_to_cpp(comp, hook_method) -> str:
     if default:
         body_lines.append(f"    {default}")
     body = "\n".join(body_lines)
-    return (
-        f'#include "{header_name}"\n\n'
+    func_def = (
         f"{ret_cpp} {hook_method.__name__}({arg_str}) {{\n"
         f"{body}\n"
-        f"}}\n"
+        f"}}"
+    )
+    ns = resolved_namespace(type(comp))
+    if ns is not None:
+        func_def = f"namespace {ns} {{\n{func_def}\n}}"
+    return (
+        f'#include "{header_name}"\n\n'
+        f"{func_def}\n"
     )
 
 

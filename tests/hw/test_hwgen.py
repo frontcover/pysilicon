@@ -615,9 +615,17 @@ def test_header_to_cpp_demo_component_substrings():
         '#include "include/democmdhdr.h"',
         "void demo(",
         ");",  # forward decl terminator
+        "namespace demo {",
         "ap_uint<8> process(DemoCmdHdr cmd);",
     ]:
         assert sub in hpp, f"Missing substring: {sub!r}\n--- hpp ---\n{hpp}"
+
+    # Kernel decl must be outside (before) the namespace block;
+    # the hook decl must be inside.
+    kernel_idx = hpp.index("void demo(")
+    ns_idx = hpp.index("namespace demo {")
+    process_idx = hpp.index("ap_uint<8> process(DemoCmdHdr cmd);")
+    assert kernel_idx < ns_idx < process_idx
 
 
 def test_header_to_cpp_forward_decl_has_no_pragmas():
@@ -666,12 +674,82 @@ def test_impl_stub_to_cpp_substrings():
     stub = impl_stub_to_cpp(comp, process)
     for sub in [
         '#include "demo.hpp"',
+        "namespace demo {",
         "ap_uint<8> process(DemoCmdHdr cmd) {",
         "// TODO: implement process",
         "return ap_uint<8>(0);",
     ]:
         assert sub in stub, f"Missing substring: {sub!r}\n--- stub ---\n{stub}"
     assert stub.rstrip().endswith("}")
+
+
+def test_header_to_cpp_opt_out_emits_no_namespace_block():
+    from typing import ClassVar
+    from dataclasses import dataclass
+    from pysilicon.build.hwgen import header_to_cpp
+    from tests.hw.test_resolve import DemoComponent
+
+    @dataclass
+    class _OptOutDemo(DemoComponent):
+        cpp_namespace: ClassVar[str | None] = ""
+
+    comp = _OptOutDemo(name="optout", sim=Simulation())
+    hpp = header_to_cpp(comp)
+    assert "namespace " not in hpp
+    # The hook decl still appears, just not wrapped.
+    assert "ap_uint<8> process(DemoCmdHdr cmd);" in hpp
+
+
+def test_impl_stub_to_cpp_opt_out_emits_no_namespace_block():
+    from typing import ClassVar
+    from dataclasses import dataclass
+    from pysilicon.build.hwcodegen import extract_kernel
+    from pysilicon.build.hwgen import _collect_hooks, impl_stub_to_cpp
+    from tests.hw.test_resolve import DemoComponent
+
+    @dataclass
+    class _OptOutDemo(DemoComponent):
+        cpp_namespace: ClassVar[str | None] = ""
+
+    comp = _OptOutDemo(name="optout", sim=Simulation())
+    tree = extract_kernel(comp)
+    process = _collect_hooks(tree)[0]
+    stub = impl_stub_to_cpp(comp, process)
+    assert "namespace " not in stub
+    assert "ap_uint<8> process(DemoCmdHdr cmd) {" in stub
+
+
+def test_header_to_cpp_custom_namespace():
+    from typing import ClassVar
+    from dataclasses import dataclass
+    from pysilicon.build.hwgen import header_to_cpp
+    from tests.hw.test_resolve import DemoComponent
+
+    @dataclass
+    class _CustomNsDemo(DemoComponent):
+        cpp_namespace: ClassVar[str | None] = "custom"
+
+    comp = _CustomNsDemo(name="cn", sim=Simulation())
+    hpp = header_to_cpp(comp)
+    assert "namespace custom {" in hpp
+
+
+def test_impl_stub_to_cpp_custom_namespace():
+    from typing import ClassVar
+    from dataclasses import dataclass
+    from pysilicon.build.hwcodegen import extract_kernel
+    from pysilicon.build.hwgen import _collect_hooks, impl_stub_to_cpp
+    from tests.hw.test_resolve import DemoComponent
+
+    @dataclass
+    class _CustomNsDemo(DemoComponent):
+        cpp_namespace: ClassVar[str | None] = "custom"
+
+    comp = _CustomNsDemo(name="cn", sim=Simulation())
+    tree = extract_kernel(comp)
+    process = _collect_hooks(tree)[0]
+    stub = impl_stub_to_cpp(comp, process)
+    assert "namespace custom {" in stub
 
 
 def test_kernel_files_to_str_keys():
