@@ -24,12 +24,29 @@ from typing import Any, Callable, Literal
 import numpy as np
 
 from pysilicon.hw.dataschema import DataSchema, IntField, Words
+from pysilicon.hw.hwstmt import SynthCallStmt
 from pysilicon.hw.memif import MMIFMaster, MMIFSlave
+from pysilicon.hw.synth import synthesizable
 from pysilicon.simulation.simobj import ProcessGen
 
 # Single-bit unsigned integer field alias.
 # Could become a real class in a future version.
 Bit: type[IntField] = IntField.specialize(bitwidth=1, signed=False)
+
+
+# ---------------------------------------------------------------------------
+# Synthesizable IR nodes for regmap accesses
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class RegMapGetStmt(SynthCallStmt):
+    """Synthesizable read of a regmap field — emits an AXI-Lite scalar read."""
+
+
+@dataclass
+class RegMapSetStmt(SynthCallStmt):
+    """Synthesizable write to a regmap field — emits an AXI-Lite scalar write."""
 
 
 # ---------------------------------------------------------------------------
@@ -194,11 +211,13 @@ class RegMap:
     # Owner-side value access
     # ------------------------------------------------------------------
 
+    @synthesizable(stmt_class=RegMapGetStmt)
     def get(self, name: str) -> Any:
         """Deserialize the backing buffer and return a schema instance."""
         f = self._fields[name]
         return f.schema().deserialize(self._buffers[name], word_bw=self.bitwidth)
 
+    @synthesizable(stmt_class=RegMapSetStmt)
     def set(self, name: str, value: Any) -> None:
         """Overwrite the field's backing buffer from a schema instance or raw value.
 

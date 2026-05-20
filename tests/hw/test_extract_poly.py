@@ -181,6 +181,76 @@ def test_synth_endpoint_call_does_not_raise():
     assert isinstance(tree, WhileStmt)
 
 
+# ---------------------------------------------------------------------------
+# Phase 5: RegMap get/set are synthesizable
+# ---------------------------------------------------------------------------
+
+def test_regmap_set_produces_regmap_set_stmt():
+    from pysilicon.hw.dataschema import IntField
+    from pysilicon.hw.regmap import (
+        Bit, RegAccess, RegField, RegMap, RegMapSetStmt, VitisRegMap,
+    )
+
+    class _RegMapWriteComp(HwComponent):
+        def __post_init__(self):
+            super().__post_init__()
+            self.regmap = VitisRegMap({
+                "error": RegField(IntField.specialize(bitwidth=8, signed=False),
+                                  RegAccess.R),
+            })
+
+        def run_proc(self):
+            while True:
+                v = yield from self.ep.get()
+                self.regmap.set("error", v)
+
+    sim = Simulation()
+    comp = _RegMapWriteComp(sim=sim)
+    comp.ep = _MockEndpoint()
+    tree = HwStmtExtractor(comp).extract()
+    assert isinstance(tree, WhileStmt)
+    set_stmt = tree.body.stmts[1]
+    assert isinstance(set_stmt, RegMapSetStmt)
+    # First input is the "error" field name (as ast.Constant); second is the HwVar `v`.
+    import ast as _ast
+    from pysilicon.hw.hwstmt import HwVar
+    assert isinstance(set_stmt.inputs[0], _ast.Constant)
+    assert set_stmt.inputs[0].value == "error"
+    assert isinstance(set_stmt.inputs[1], HwVar)
+    assert set_stmt.inputs[1].name == "v"
+
+
+def test_regmap_get_produces_regmap_get_stmt():
+    from pysilicon.hw.dataschema import IntField
+    from pysilicon.hw.regmap import (
+        RegAccess, RegField, RegMapGetStmt, VitisRegMap,
+    )
+
+    class _RegMapReadComp(HwComponent):
+        def __post_init__(self):
+            super().__post_init__()
+            self.regmap = VitisRegMap({
+                "coeffs": RegField(IntField.specialize(bitwidth=8, signed=False),
+                                   RegAccess.RW),
+            })
+
+        def run_proc(self):
+            while True:
+                coeffs = self.regmap.get("coeffs")
+                yield from self.ep.write(coeffs)
+
+    sim = Simulation()
+    comp = _RegMapReadComp(sim=sim)
+    comp.ep = _MockEndpoint()
+    tree = HwStmtExtractor(comp).extract()
+    assert isinstance(tree, WhileStmt)
+    get_stmt = tree.body.stmts[0]
+    assert isinstance(get_stmt, RegMapGetStmt)
+    # Output `coeffs` was bound as a HwVar; the write call references it.
+    assert len(get_stmt.outputs) == 1
+    assert get_stmt.outputs[0].name == "coeffs"
+
+
 def test_extract_kernel_with_regmap_uses_on_start():
     """A component with a VitisRegMapMMIFSlave endpoint extracts on_start."""
     import sys
