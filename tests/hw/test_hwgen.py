@@ -192,6 +192,67 @@ def test_stream_drain_emits_flush():
     )
 
 
+# ---------------------------------------------------------------------------
+# Phase 3: Regmap statements
+# ---------------------------------------------------------------------------
+
+def test_regmap_set_literal():
+    from pysilicon.hw.regmap import RegMapSetStmt
+    stmt = RegMapSetStmt(
+        method=None,
+        inputs=['halted', 1],
+        outputs=[],
+    )
+    assert to_cpp(stmt, _ctx()) == "    halted = 1;"
+
+
+def test_regmap_set_hwvar():
+    from pysilicon.hw.regmap import RegMapSetStmt
+    stmt = RegMapSetStmt(
+        method=None,
+        inputs=['error', HwVar(name='err', typ=DemoError)],
+        outputs=[],
+    )
+    assert to_cpp(stmt, _ctx()) == "    error = err;"
+
+
+def test_regmap_set_field_ref():
+    from pysilicon.hw.hwstmt import FieldRef
+    from pysilicon.hw.regmap import RegMapSetStmt
+    stmt = RegMapSetStmt(
+        method=None,
+        inputs=['tx_id', FieldRef(var=HwVar(name='cmd', typ=None), field='tx_id')],
+        outputs=[],
+    )
+    assert to_cpp(stmt, _ctx()) == "    tx_id = cmd.tx_id;"
+
+
+def test_regmap_get_with_typed_output():
+    from pysilicon.hw.regmap import RegMapGetStmt
+
+    class _CoeffArray:
+        @classmethod
+        def cpp_class_name(cls):
+            return "CoeffArray"
+
+    stmt = RegMapGetStmt(
+        method=None,
+        inputs=['coeffs'],
+        outputs=[HwVar(name='coeffs', typ=_CoeffArray)],
+    )
+    assert to_cpp(stmt, _ctx()) == "    CoeffArray coeffs = coeffs;"
+
+
+def test_regmap_get_with_untyped_output_falls_back_to_auto():
+    from pysilicon.hw.regmap import RegMapGetStmt
+    stmt = RegMapGetStmt(
+        method=None,
+        inputs=['coeffs'],
+        outputs=[HwVar(name='coeffs', typ=None)],
+    )
+    assert to_cpp(stmt, _ctx()) == "    auto coeffs = coeffs;"
+
+
 def test_endpoint_name_not_found_raises():
     from pysilicon.hw.interface import StreamGetStmt
     rogue = _FakeEndpoint()

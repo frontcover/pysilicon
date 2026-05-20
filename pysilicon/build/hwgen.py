@@ -20,6 +20,7 @@ from pysilicon.hw.interface import (
     StreamGetStmt,
     StreamWriteStmt,
 )
+from pysilicon.hw.regmap import RegMapGetStmt, RegMapSetStmt
 
 if TYPE_CHECKING:
     from pysilicon.hw.hw_component import HwComponent
@@ -62,6 +63,10 @@ def to_cpp(stmt: HwStmt, ctx: CodegenCtx) -> str:
         return _emit_stream_write(stmt, ctx)
     if isinstance(stmt, StreamDrainStmt):
         return _emit_stream_drain(stmt, ctx)
+    if isinstance(stmt, RegMapGetStmt):
+        return _emit_regmap_get(stmt, ctx)
+    if isinstance(stmt, RegMapSetStmt):
+        return _emit_regmap_set(stmt, ctx)
     raise NotImplementedError(
         f"Codegen for {type(stmt).__name__} not implemented yet"
     )
@@ -145,6 +150,26 @@ def _endpoint_name(endpoint, ctx: CodegenCtx) -> str:
     raise RuntimeError(
         f"Endpoint {endpoint!r} not found on component {type(ctx.comp).__name__}"
     )
+
+
+def _emit_regmap_get(stmt: RegMapGetStmt, ctx: CodegenCtx) -> str:
+    # stmt.inputs = [field_name str]; stmt.outputs = [HwVar]
+    field_name = stmt.inputs[0]
+    out = stmt.outputs[0]
+    cpp_type = (
+        out.typ.cpp_class_name()
+        if hasattr(out.typ, 'cpp_class_name')
+        else 'auto'
+    )
+    return f"{ctx.pad()}{cpp_type} {out.name} = {field_name};"
+
+
+def _emit_regmap_set(stmt: RegMapSetStmt, ctx: CodegenCtx) -> str:
+    # stmt.inputs = [field_name str, value (HwVar | FieldRef | literal)]
+    field_name = stmt.inputs[0]
+    value = stmt.inputs[1]
+    rhs = _emit_expr(value, ctx)
+    return f"{ctx.pad()}{field_name} = {rhs};"
 
 
 def _emit_literal(value) -> str:
