@@ -131,3 +131,94 @@ def test_rerun_does_not_touch_existing_impl_mtime(tmp_path: Path):
 
     step.run(config)
     assert impl.stat().st_mtime == backdated
+
+
+# ---------------------------------------------------------------------------
+# Phase 3: DAG integration + freshness skipping
+# ---------------------------------------------------------------------------
+
+def _make_dag_with_source(tmp_path: Path):
+    """Build a DAG with a real SourceStep + HlsCodegenStep against ``tmp_path``."""
+    from pysilicon.build.build import BuildDag, SourceStep
+
+    src = tmp_path / "demo_source.py"
+    src.write_text("# placeholder source\n", encoding="utf-8")
+
+    dag = BuildDag()
+    dag.add(SourceStep(artifact="demo_src", path="demo_source.py"))
+    dag.add(HlsCodegenStep(
+        comp_class=DemoComponent,
+        source_artifact="demo_src",
+        output_dir="gen",
+    ))
+    return dag, src
+
+
+def test_dag_run_writes_all_three_files(tmp_path: Path):
+    dag, _src = _make_dag_with_source(tmp_path)
+    results = dag.run(BuildConfig(root_dir=tmp_path))
+
+    for name, result in results.items():
+        assert result.success, f"{name} failed: {result.message}"
+
+    gen = tmp_path / "gen"
+    assert (gen / "demo.hpp").exists()
+    assert (gen / "demo.cpp").exists()
+    assert (gen / "demo_process_impl.cpp").exists()
+
+
+def test_dag_second_run_skips_step(tmp_path: Path):
+    dag, _src = _make_dag_with_source(tmp_path)
+    config = BuildConfig(root_dir=tmp_path)
+    dag.run(config)
+    results = dag.run(config)
+    codegen = results["HlsCodegenStep"]
+    assert codegen.success
+    assert codegen.skipped is True
+
+
+def test_dag_source_touch_invalidates_step(tmp_path: Path):
+    import os
+    dag, src = _make_dag_with_source(tmp_path)
+    config = BuildConfig(root_dir=tmp_path)
+    dag.run(config)
+
+    # Touch the source forward so the produced files look stale relative to it.
+    future = src.stat().st_mtime + 10.0
+    os.utime(src, (future, future))
+
+    results = dag.run(config)
+    assert results["HlsCodegenStep"].skipped is False
+
+
+def test_dag_rebuild_preserves_impl_under_cascade(tmp_path: Path):
+    """Even when the .hpp/.cpp are re-generated on cascade, impl file is sticky."""
+    import os
+    dag, src = _make_dag_with_source(tmp_path)
+    config = BuildConfig(root_dir=tmp_path)
+    dag.run(config)
+
+    impl = tmp_path / "gen" / "demo_process_impl.cpp"
+    custom = "// user-edited content\n"
+    impl.write_text(custom, encoding="utf-8")
+
+    future = src.stat().st_mtime + 10.0
+    os.utime(src, (future, future))
+
+    results = dag.run(config)
+    assert results["HlsCodegenStep"].skipped is False
+    assert impl.read_text(encoding="utf-8") == custom
+
+
+def test_dag_force_reruns_step_but_impl_stays_sticky(tmp_path: Path):
+    dag, _src = _make_dag_with_source(tmp_path)
+    config = BuildConfig(root_dir=tmp_path)
+    dag.run(config)
+
+    impl = tmp_path / "gen" / "demo_process_impl.cpp"
+    custom = "// user-edited\n"
+    impl.write_text(custom, encoding="utf-8")
+
+    results = dag.run(config, force=True)
+    assert results["HlsCodegenStep"].skipped is False
+    assert impl.read_text(encoding="utf-8") == custom
