@@ -74,9 +74,67 @@ def _walk(stmt, scope, comp, module, globs):
         stmt.inputs = [
             _resolve_input(x, scope, comp, module, globs) for x in stmt.inputs
         ]
+        _populate_output_types(stmt, comp)
         for v in stmt.outputs:
             scope[v.name] = v
         return
+
+
+def _populate_output_types(stmt, comp):
+    """Set ``HwVar.typ`` on each output, per per-statement-type rules.
+
+    Statements whose return type can't be determined locally leave ``typ``
+    as ``None`` and are refined by later phases.
+    """
+    from pysilicon.hw.hwstmt import FunctionStmt
+    from pysilicon.hw.interface import StreamGetPipelinedStmt, StreamGetStmt
+    from pysilicon.hw.regmap import RegMapGetStmt
+
+    if isinstance(stmt, StreamGetStmt) and stmt.outputs:
+        stmt.outputs[0].typ = stmt.inputs[0]
+        return
+    if isinstance(stmt, StreamGetPipelinedStmt) and stmt.outputs:
+        # 2-tuple placeholder until SchemaArray[T] typing exists.
+        stmt.outputs[0].typ = ('SchemaArray', stmt.inputs[0])
+        return
+    if isinstance(stmt, RegMapGetStmt) and stmt.outputs:
+        field_name = stmt.inputs[0]
+        stmt.outputs[0].typ = comp.regmap._fields[field_name].schema
+        return
+    if isinstance(stmt, FunctionStmt) and stmt.outputs:
+        ret = _unwrap_return_type(stmt.method)
+        if ret is None:
+            return
+        import typing
+        if typing.get_origin(ret) is tuple and len(stmt.outputs) > 1:
+            for var, t in zip(stmt.outputs, typing.get_args(ret)):
+                var.typ = t
+        else:
+            stmt.outputs[0].typ = ret
+        return
+    # All other statement types: leave typ=None on any outputs.
+
+
+def _unwrap_return_type(method):
+    """Return the method's declared return type, unwrapping ``ProcessGen[T]``.
+
+    ``ProcessGen`` is a ``Generator[Event, Any, T]`` alias, so we look for
+    a ``Generator`` origin and return its third type argument.
+    """
+    import collections.abc
+    import typing
+    try:
+        hints = typing.get_type_hints(method)
+    except Exception:
+        return None
+    ret = hints.get('return')
+    if ret is None:
+        return None
+    if typing.get_origin(ret) is collections.abc.Generator:
+        args = typing.get_args(ret)
+        if len(args) == 3:
+            return args[2]
+    return ret
 
 
 def _resolve_input(x, scope, comp, module, globs):

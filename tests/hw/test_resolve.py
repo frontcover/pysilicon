@@ -224,6 +224,86 @@ def test_resolve_unresolved_name_raises():
         resolve_kernel(tree, comp)
 
 
+# ---------------------------------------------------------------------------
+# Phase 3: HwVar.typ population
+# ---------------------------------------------------------------------------
+
+def test_stream_get_output_typ_is_schema_class():
+    comp = _make_demo()
+    tree = _extract_and_resolve(comp)
+    cmd_var = tree.body.stmts[0].outputs[0]
+    assert cmd_var.name == 'cmd'
+    assert cmd_var.typ is DemoCmdHdr
+
+
+def test_function_stmt_output_typ_unwraps_process_gen():
+    comp = _make_demo()
+    tree = _extract_and_resolve(comp)
+    err_var = tree.body.stmts[2].outputs[0]
+    assert err_var.name == 'err'
+    assert err_var.typ is DemoError
+
+
+def test_regmap_get_output_typ_is_field_schema():
+    """A component that reads a regmap field gets a typed HwVar."""
+    from pysilicon.hw.dataschema import FloatField
+
+    Float32 = FloatField.specialize(bitwidth=32)
+
+    @dataclass
+    class _RegMapReadDemo(HwComponent):
+        def __post_init__(self) -> None:
+            super().__post_init__()
+            self.s_in = StreamIFSlave(
+                name=f'{self.name}_s_in', sim=self.sim, bitwidth=32,
+            )
+            self.regmap = VitisRegMap({
+                "gain": RegField(Float32, RegAccess.RW),
+            })
+            self.s_lite = VitisRegMapMMIFSlave(
+                name=f'{self.name}_s_lite', sim=self.sim, bitwidth=32,
+                regmap=self.regmap, on_start=self.on_start,
+            )
+            for ep in (self.s_in, self.s_lite):
+                self.add_endpoint(ep)
+
+        def on_start(self) -> ProcessGen[None]:
+            while True:
+                gain = self.regmap.get("gain")  # noqa: F841 — used by test
+                yield from self.s_in.get(DemoCmdHdr)
+                return
+
+    comp = _RegMapReadDemo(name="rmr", sim=Simulation())
+    tree = _extract_and_resolve(comp)
+    gain_stmt = tree.body.stmts[0]
+    assert gain_stmt.outputs[0].name == 'gain'
+    assert gain_stmt.outputs[0].typ is Float32
+
+
+def test_every_hwvar_has_typ_after_resolution():
+    comp = _make_demo()
+    tree = _extract_and_resolve(comp)
+    seen: list[HwVar] = []
+
+    def _collect(stmt):
+        if isinstance(stmt, WhileStmt):
+            _collect(stmt.body)
+        elif isinstance(stmt, SeqStmt):
+            for s in stmt.stmts:
+                _collect(s)
+        elif isinstance(stmt, CaseStmt):
+            _collect(stmt.if_true)
+            if stmt.if_false is not None:
+                _collect(stmt.if_false)
+        elif hasattr(stmt, 'outputs'):
+            seen.extend(stmt.outputs)
+
+    _collect(tree)
+    assert seen, "expected at least one HwVar in the resolved tree"
+    for v in seen:
+        assert v.typ is not None, f"HwVar {v.name!r} has no typ after resolution"
+
+
 def test_resolve_no_ast_nodes_in_inputs():
     """Walking the resolved tree should find no ast.AST nodes in any inputs."""
     comp = _make_demo()
