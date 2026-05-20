@@ -136,3 +136,114 @@ def test_field_case_stmt_has_field_name():
     assert isinstance(case, CaseStmt)
     assert case.field == 'cmd_type'
     assert case.op == '=='
+
+
+# ---------------------------------------------------------------------------
+# Phase 2: Input resolution
+# ---------------------------------------------------------------------------
+
+def _extract_and_resolve(comp: HwComponent, method_name: str = 'on_start'):
+    from pysilicon.build.hwresolve import resolve_kernel
+    tree = HwStmtExtractor(comp, method_name=method_name).extract()
+    return resolve_kernel(tree, comp)
+
+
+def test_resolve_stream_get_class_input():
+    """`s_in.get(DemoCmdHdr)` — DemoCmdHdr Name resolves to the class."""
+    comp = _make_demo()
+    tree = _extract_and_resolve(comp)
+    body = tree.body.stmts
+    get_stmt = body[0]
+    assert get_stmt.inputs[0] is DemoCmdHdr
+
+
+def test_resolve_regmap_set_constant_and_hwvar():
+    """`self.regmap.set("error", err)` — string + HwVar."""
+    comp = _make_demo()
+    tree = _extract_and_resolve(comp)
+    body = tree.body.stmts
+    case_err = body[3]
+    set_error = case_err.if_true.stmts[0]
+    assert set_error.inputs[0] == "error"
+    assert isinstance(set_error.inputs[1], HwVar)
+    assert set_error.inputs[1].name == "err"
+
+
+def test_resolve_regmap_set_field_ref():
+    """`self.regmap.set("tx_id", cmd.tx_id)` — cmd.tx_id becomes FieldRef."""
+    comp = _make_demo()
+    tree = _extract_and_resolve(comp)
+    body = tree.body.stmts
+    case_err = body[3]
+    set_tx_id = case_err.if_true.stmts[1]
+    assert set_tx_id.inputs[0] == "tx_id"
+    arg = set_tx_id.inputs[1]
+    assert isinstance(arg, FieldRef)
+    assert arg.var.name == "cmd"
+    assert arg.field == "tx_id"
+
+
+def test_resolve_case_stmt_value_is_enum_member():
+    """`if err != DemoError.OK` — value becomes the enum member, not a string."""
+    comp = _make_demo()
+    tree = _extract_and_resolve(comp)
+    body = tree.body.stmts
+    case_err = body[3]
+    assert case_err.value is DemoError.OK
+
+
+def test_resolve_case_stmt_field_value_is_enum_member():
+    """`if cmd.cmd_type == DemoCmdType.END` — value resolves to enum member."""
+    comp = _make_demo()
+    tree = _extract_and_resolve(comp)
+    body = tree.body.stmts
+    case_end = body[1]
+    assert case_end.value is DemoCmdType.END
+
+
+def test_resolve_unresolved_name_raises():
+    """Reference to a name that doesn't exist anywhere triggers ResolutionError."""
+    from pysilicon.build.hwresolve import ResolutionError, resolve_kernel
+
+    @dataclass
+    class _BadDemo(HwComponent):
+        def __post_init__(self) -> None:
+            super().__post_init__()
+            self.s_in = StreamIFSlave(
+                name=f'{self.name}_s_in', sim=self.sim, bitwidth=32,
+            )
+            self.add_endpoint(self.s_in)
+
+        def run_proc(self) -> ProcessGen[None]:
+            while True:
+                yield from self.s_in.get(NotARealClass)  # noqa: F821
+
+    comp = _BadDemo(name="bad", sim=Simulation())
+    tree = HwStmtExtractor(comp, method_name='run_proc').extract()
+    with pytest.raises(ResolutionError, match="NotARealClass"):
+        resolve_kernel(tree, comp)
+
+
+def test_resolve_no_ast_nodes_in_inputs():
+    """Walking the resolved tree should find no ast.AST nodes in any inputs."""
+    comp = _make_demo()
+    tree = _extract_and_resolve(comp)
+
+    def _check(stmt):
+        if isinstance(stmt, WhileStmt):
+            _check(stmt.body)
+        elif isinstance(stmt, SeqStmt):
+            for s in stmt.stmts:
+                _check(s)
+        elif isinstance(stmt, CaseStmt):
+            assert not isinstance(stmt.value, ast.AST), \
+                f"CaseStmt.value still an ast node: {ast.dump(stmt.value)}"
+            _check(stmt.if_true)
+            if stmt.if_false is not None:
+                _check(stmt.if_false)
+        elif hasattr(stmt, 'inputs'):
+            for x in stmt.inputs:
+                assert not isinstance(x, ast.AST), \
+                    f"Unresolved ast node in inputs: {ast.dump(x)}"
+
+    _check(tree)

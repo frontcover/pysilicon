@@ -1,0 +1,140 @@
+"""Resolve raw AST nodes in an ``HwStmt`` tree to real Python values.
+
+``HwStmtExtractor`` produces a tree whose ``inputs`` lists and
+``CaseStmt.value`` fields may still contain ``ast.*`` nodes (names,
+constants, attribute chains).  ``resolve_kernel`` walks the tree, looks
+up module-level names, converts ``ast.Attribute`` references rooted at a
+bound ``HwVar`` into ``FieldRef``, and leaves no ``ast.*`` nodes behind.
+"""
+from __future__ import annotations
+
+import ast
+import sys
+from typing import TYPE_CHECKING
+
+from pysilicon.hw.hwstmt import (
+    CaseStmt,
+    FieldRef,
+    HwStmt,
+    HwVar,
+    ReturnStmt,
+    SeqStmt,
+    SynthCallStmt,
+    WhileStmt,
+)
+
+if TYPE_CHECKING:
+    from pysilicon.hw.hw_component import HwComponent
+
+
+class ResolutionError(Exception):
+    """Raised when an AST node in the IR cannot be resolved to a value."""
+
+
+def resolve_kernel(tree: HwStmt, comp: HwComponent) -> HwStmt:
+    """Walk *tree* and replace AST nodes in inputs/values with real values.
+
+    Mutates *tree* in place. Also returns it for chaining.
+    """
+    scope: dict[str, HwVar] = {}
+    method = _kernel_method(comp)
+    module = sys.modules.get(method.__module__)
+    globs = getattr(method, '__globals__', {})
+    _walk(tree, scope, comp, module, globs)
+    return tree
+
+
+def _kernel_method(comp):
+    """Mirror extract_kernel's selection: on_start if regmap-bearing, else run_proc."""
+    from pysilicon.hw.regmap import VitisRegMapMMIFSlave
+    for ep in getattr(comp, 'endpoints', {}).values():
+        if isinstance(ep, VitisRegMapMMIFSlave):
+            return comp.on_start
+    return comp.run_proc
+
+
+def _walk(stmt, scope, comp, module, globs):
+    """Recurse over the tree, resolving as we go and tracking HwVar scope."""
+    if isinstance(stmt, WhileStmt):
+        _walk(stmt.body, scope, comp, module, globs)
+        return
+    if isinstance(stmt, SeqStmt):
+        for child in stmt.stmts:
+            _walk(child, scope, comp, module, globs)
+        return
+    if isinstance(stmt, CaseStmt):
+        stmt.value = _resolve_value(stmt.value, scope, comp, module, globs)
+        _walk(stmt.if_true, scope, comp, module, globs)
+        if stmt.if_false is not None:
+            _walk(stmt.if_false, scope, comp, module, globs)
+        return
+    if isinstance(stmt, ReturnStmt):
+        return
+    if isinstance(stmt, SynthCallStmt):
+        stmt.inputs = [
+            _resolve_input(x, scope, comp, module, globs) for x in stmt.inputs
+        ]
+        for v in stmt.outputs:
+            scope[v.name] = v
+        return
+
+
+def _resolve_input(x, scope, comp, module, globs):
+    """Resolve one element of an inputs list.
+
+    Already-resolved values (``HwVar``, primitives, classes, endpoints) pass
+    through. ``ast`` nodes are converted to their referenced Python values.
+    """
+    if isinstance(x, HwVar):
+        return x
+    if isinstance(x, ast.Constant):
+        return x.value
+    if isinstance(x, ast.Name):
+        if x.id in scope:
+            return scope[x.id]
+        return _lookup_name(x.id, module, globs, x)
+    if isinstance(x, ast.Attribute):
+        root = _attribute_root(x)
+        if isinstance(root, ast.Name) and root.id in scope:
+            # var.field — convert to FieldRef on the bound var.
+            # Multi-level chains (var.field.subfield) are out of scope.
+            if not isinstance(x.value, ast.Name):
+                raise ResolutionError(
+                    f"Nested attribute chain {ast.dump(x)} not supported"
+                )
+            return FieldRef(var=scope[root.id], field=x.attr)
+        return _resolve_attr_chain(x, module, globs)
+    return x
+
+
+def _resolve_value(v, scope, comp, module, globs):
+    """Resolve a ``CaseStmt.value`` (literal, enum member, etc.)."""
+    if isinstance(v, ast.AST):
+        return _resolve_input(v, scope, comp, module, globs)
+    return v
+
+
+def _attribute_root(node):
+    while isinstance(node, ast.Attribute):
+        node = node.value
+    return node
+
+
+def _lookup_name(name, module, globs, ast_node):
+    if name in globs:
+        return globs[name]
+    if module is not None and hasattr(module, name):
+        return getattr(module, name)
+    raise ResolutionError(
+        f"Cannot resolve name '{name}' at line {getattr(ast_node, 'lineno', '?')}"
+    )
+
+
+def _resolve_attr_chain(node, module, globs):
+    """Resolve ``Module.X`` / ``Module.X.Y`` as a Python value."""
+    if isinstance(node, ast.Name):
+        return _lookup_name(node.id, module, globs, node)
+    if isinstance(node, ast.Attribute):
+        parent = _resolve_attr_chain(node.value, module, globs)
+        return getattr(parent, node.attr)
+    raise ResolutionError(f"Unsupported expression {ast.dump(node)}")

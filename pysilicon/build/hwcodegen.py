@@ -416,9 +416,11 @@ class HwStmtExtractor:
             obj = self._resolve_obj(node.value)
             if obj is not None:
                 return getattr(obj, node.attr, node.attr)
-            return node.attr
+            # Module-level reference (e.g. DemoCmdType.END) — preserve the AST
+            # node so the resolver can turn it into the real Python value.
+            return node
         if isinstance(node, ast.Name):
-            return node.id
+            return node
         raise SynthesisError(
             f"Cannot evaluate constant expression: {ast.dump(node)}"
         )
