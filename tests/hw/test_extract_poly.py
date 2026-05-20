@@ -7,6 +7,7 @@ from pysilicon.build.hwcodegen import HwStmtExtractor, SynthesisError
 from pysilicon.hw.hw_component import HwComponent
 from pysilicon.hw.hwstmt import (
     CaseStmt,
+    FunctionStmt,
     ReturnStmt,
     SeqStmt,
     WhileStmt,
@@ -249,6 +250,86 @@ def test_regmap_get_produces_regmap_get_stmt():
     # Output `coeffs` was bound as a HwVar; the write call references it.
     assert len(get_stmt.outputs) == 1
     assert get_stmt.outputs[0].name == "coeffs"
+
+
+# ---------------------------------------------------------------------------
+# Phase 6: FunctionStmt for user-written @synthesizable methods
+# ---------------------------------------------------------------------------
+
+class _UserMethodComp(HwComponent):
+    @synthesizable
+    def evaluate(self, x):
+        yield None
+        return x
+
+    def run_proc(self):
+        while True:
+            x = yield from self.ep.get()
+            y = yield from self.evaluate(x)
+            yield from self.ep.write(y)
+
+
+def test_user_method_produces_function_stmt():
+    comp = _make_comp(_UserMethodComp)
+    tree = HwStmtExtractor(comp).extract()
+    eval_stmt = tree.body.stmts[1]
+    assert isinstance(eval_stmt, FunctionStmt)
+    assert eval_stmt.method.__name__ == 'evaluate'
+    assert eval_stmt.impl_file is None
+
+
+class _UserMethodImplFileComp(HwComponent):
+    @synthesizable(impl_file="custom.cpp")
+    def evaluate(self, x):
+        yield None
+        return x
+
+    def run_proc(self):
+        while True:
+            x = yield from self.ep.get()
+            y = yield from self.evaluate(x)
+            yield from self.ep.write(y)
+
+
+def test_user_method_impl_file_propagates():
+    comp = _make_comp(_UserMethodImplFileComp)
+    tree = HwStmtExtractor(comp).extract()
+    eval_stmt = tree.body.stmts[1]
+    assert isinstance(eval_stmt, FunctionStmt)
+    assert eval_stmt.impl_file == "custom.cpp"
+
+
+def test_user_method_inputs_resolve_endpoint_reference():
+    from pysilicon.hw.interface import StreamIFSlave
+
+    class _UserMethodWithEndpointComp(HwComponent):
+        def __post_init__(self):
+            super().__post_init__()
+            self.s_in = StreamIFSlave(
+                name=f'{self.name}_s_in', sim=self.sim, bitwidth=32,
+            )
+            self.add_endpoint(self.s_in)
+
+        @synthesizable
+        def evaluate(self, x, ep):
+            yield None
+            return x
+
+        def run_proc(self):
+            while True:
+                x = yield from self.s_in.get()
+                y = yield from self.evaluate(x, self.s_in)
+
+    sim = Simulation()
+    comp = _UserMethodWithEndpointComp(sim=sim)
+    tree = HwStmtExtractor(comp).extract()
+    eval_stmt = tree.body.stmts[1]
+    assert isinstance(eval_stmt, FunctionStmt)
+    # First arg is the HwVar `x`; second is the resolved endpoint object.
+    from pysilicon.hw.hwstmt import HwVar
+    assert isinstance(eval_stmt.inputs[0], HwVar)
+    assert eval_stmt.inputs[0].name == 'x'
+    assert eval_stmt.inputs[1] is comp.s_in
 
 
 def test_extract_kernel_with_regmap_uses_on_start():

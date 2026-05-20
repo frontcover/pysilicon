@@ -101,14 +101,14 @@ class SynthCallStmt(HwStmt):
 
 
 @dataclass
-class HookStmt(HwStmt):
-    """A call to a ``@synthesizable`` user compute method (``_synth_fn=None``).
+class FunctionStmt(SynthCallStmt):
+    """Call to a user-written ``@synthesizable`` method (no ``synth_fn``).
 
-    At codegen time emits a call to a user-written function in ``_impl.cpp``.
+    Codegen emits a forward declaration in ``<component>.hpp`` and a call
+    site in ``<component>.cpp``. The implementation lives in the impl file
+    (default ``<component>_<function>_impl.cpp``), hand-written by the user.
     """
-    method: object              # bound callable with _is_synthesizable=True
-    inputs: list               # HwVar | ast node
-    outputs: list[HwVar]
+    impl_file: str | None = None
 
 
 @dataclass

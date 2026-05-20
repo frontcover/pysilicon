@@ -19,7 +19,7 @@ from pysilicon.hw.hwstmt import (
     CaseStmt,
     ContinueStmt,
     FieldRef,
-    HookStmt,
+    FunctionStmt,
     HwStmt,
     HwVar,
     Ref,
@@ -340,7 +340,10 @@ class HwStmtExtractor:
         synth_fn = getattr(method, '_synth_fn', None)
         if synth_fn is not None:
             return SynthCallStmt(method=method, inputs=inputs, outputs=outputs)
-        return HookStmt(method=method, inputs=inputs, outputs=outputs)
+        impl_file = getattr(method, '_impl_file', None)
+        return FunctionStmt(
+            method=method, inputs=inputs, outputs=outputs, impl_file=impl_file,
+        )
 
     # ------------------------------------------------------------------
     # Resolution helpers

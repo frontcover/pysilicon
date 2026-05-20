@@ -6,7 +6,7 @@ from pysilicon.build.hwcodegen import HwStmtExtractor, SynthesisError
 from pysilicon.hw.hw_component import HwComponent
 from pysilicon.hw.hwstmt import (
     ContinueStmt,
-    HookStmt,
+    FunctionStmt,
     HwVar,
     SeqStmt,
     SynthCallStmt,
@@ -122,11 +122,11 @@ class _HookComp(HwComponent):
             yield from self.ep.write(y)
 
 
-def test_extract_hook_produces_hook_stmt():
+def test_extract_hook_produces_function_stmt():
     comp = _make_comp(_HookComp)
     tree = HwStmtExtractor(comp).extract()
     compute_stmt = tree.body.stmts[1]
-    assert isinstance(compute_stmt, HookStmt)
+    assert isinstance(compute_stmt, FunctionStmt)
     assert compute_stmt.outputs[0].name == 'y'
 
 
