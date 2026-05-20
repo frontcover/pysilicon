@@ -327,3 +327,58 @@ def test_resolve_no_ast_nodes_in_inputs():
                     f"Unresolved ast node in inputs: {ast.dump(x)}"
 
     _check(tree)
+
+
+# ---------------------------------------------------------------------------
+# Phase 4: extract_kernel returns a resolved tree
+# ---------------------------------------------------------------------------
+
+def test_extract_kernel_returns_resolved_tree():
+    """extract_kernel(comp) returns a tree with no ast.AST nodes in inputs."""
+    from pysilicon.build.hwcodegen import extract_kernel
+    comp = _make_demo()
+    tree = extract_kernel(comp)
+
+    def _check(stmt):
+        if isinstance(stmt, WhileStmt):
+            _check(stmt.body)
+        elif isinstance(stmt, SeqStmt):
+            for s in stmt.stmts:
+                _check(s)
+        elif isinstance(stmt, CaseStmt):
+            assert not isinstance(stmt.value, ast.AST)
+            _check(stmt.if_true)
+            if stmt.if_false is not None:
+                _check(stmt.if_false)
+        elif hasattr(stmt, 'inputs'):
+            for x in stmt.inputs:
+                assert not isinstance(x, ast.AST)
+
+    _check(tree)
+
+
+def test_extract_kernel_populates_hwvar_types():
+    """Every HwVar emitted by a recognised statement has a non-None typ."""
+    from pysilicon.build.hwcodegen import extract_kernel
+    comp = _make_demo()
+    tree = extract_kernel(comp)
+
+    seen: list[HwVar] = []
+
+    def _collect(stmt):
+        if isinstance(stmt, WhileStmt):
+            _collect(stmt.body)
+        elif isinstance(stmt, SeqStmt):
+            for s in stmt.stmts:
+                _collect(s)
+        elif isinstance(stmt, CaseStmt):
+            _collect(stmt.if_true)
+            if stmt.if_false is not None:
+                _collect(stmt.if_false)
+        elif hasattr(stmt, 'outputs'):
+            seen.extend(stmt.outputs)
+
+    _collect(tree)
+    assert seen
+    for v in seen:
+        assert v.typ is not None, f"HwVar {v.name!r} has no typ"

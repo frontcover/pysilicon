@@ -446,10 +446,18 @@ class HwStmtExtractor:
 
 
 def extract_kernel(comp: HwComponent) -> HwStmt:
-    """Pick ``on_start`` if the component has a ``VitisRegMapMMIFSlave`` endpoint;
-    otherwise extract ``run_proc``."""
-    from pysilicon.hw.regmap import VitisRegMapMMIFSlave  # local: avoid cycle
+    """Extract the kernel body and return a fully-resolved ``HwStmt`` tree.
+
+    Picks ``on_start`` if the component has a ``VitisRegMapMMIFSlave``
+    endpoint, otherwise ``run_proc``.  The returned tree has every ``ast.*``
+    node replaced with the real Python value and every output ``HwVar``
+    typed where possible.
+    """
+    from pysilicon.build.hwresolve import resolve_kernel  # local: avoid cycle
+    from pysilicon.hw.regmap import VitisRegMapMMIFSlave
     for ep in getattr(comp, 'endpoints', {}).values():
         if isinstance(ep, VitisRegMapMMIFSlave):
-            return HwStmtExtractor(comp, method_name='on_start').extract()
-    return HwStmtExtractor(comp, method_name='run_proc').extract()
+            tree = HwStmtExtractor(comp, method_name='on_start').extract()
+            return resolve_kernel(tree, comp)
+    tree = HwStmtExtractor(comp, method_name='run_proc').extract()
+    return resolve_kernel(tree, comp)
