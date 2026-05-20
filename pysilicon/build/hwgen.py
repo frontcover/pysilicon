@@ -395,6 +395,90 @@ def cpp_kernel_name(comp_class) -> str:
     return snake.removesuffix('_component')
 
 
+def _collect_schemas(tree: HwStmt, comp) -> list[type]:
+    """Return the unique ``DataSchema`` subclasses referenced by the kernel.
+
+    Sources walked:
+      - ``HwVar.typ`` on every ``stmt.outputs`` in the resolved tree.
+      - Every regmap field schema (if the component carries a regmap).
+    """
+    schemas: dict[str, type] = {}
+
+    def visit(node):
+        if isinstance(node, WhileStmt):
+            visit(node.body)
+        elif isinstance(node, SeqStmt):
+            for c in node.stmts:
+                visit(c)
+        elif isinstance(node, CaseStmt):
+            visit(node.if_true)
+            if node.if_false is not None:
+                visit(node.if_false)
+        for v in getattr(node, 'outputs', []):
+            typ = v.typ
+            if isinstance(typ, type) and issubclass(typ, DataSchema):
+                schemas[typ.cpp_class_name()] = typ
+
+    visit(tree)
+    regmap_slave = _discover_regmap(comp)
+    if regmap_slave is not None:
+        for fld in regmap_slave.regmap._fields.values():
+            s = fld.schema
+            if isinstance(s, type) and issubclass(s, DataSchema):
+                schemas[s.cpp_class_name()] = s
+    return list(schemas.values())
+
+
+def _collect_hooks(tree: HwStmt) -> list:
+    """Return the bound methods of every ``FunctionStmt`` reachable from ``tree``."""
+    result: list = []
+    seen: set[int] = set()
+
+    def visit(node):
+        if isinstance(node, FunctionStmt):
+            key = id(node.method)
+            if key not in seen:
+                seen.add(key)
+                result.append(node.method)
+        if isinstance(node, WhileStmt):
+            visit(node.body)
+        elif isinstance(node, SeqStmt):
+            for c in node.stmts:
+                visit(c)
+        elif isinstance(node, CaseStmt):
+            visit(node.if_true)
+            if node.if_false is not None:
+                visit(node.if_false)
+
+    visit(tree)
+    return result
+
+
+def _kernel_signature_decl(comp) -> str:
+    """Same as :func:`kernel_signature` but without pragmas; trailing ``;``."""
+    full = kernel_signature(comp)
+    head, _sep, _tail = full.partition('\n) {')
+    return head + '\n);'
+
+
+def header_to_cpp(comp) -> str:
+    """Build the content of ``<component>.hpp``."""
+    from pysilicon.build.hwcodegen import extract_kernel
+
+    tree = extract_kernel(comp)
+    schemas = _collect_schemas(tree, comp)
+    lines = ['#pragma once', '']
+    lines.append('#include "include/streamutils_hls.h"')
+    for s in schemas:
+        lines.append(f'#include "include/{s.cpp_class_name().lower()}.h"')
+    lines.append('')
+    lines.append(_kernel_signature_decl(comp))
+    lines.append('')
+    for hook in _collect_hooks(tree):
+        lines.append(f"{hook_signature_str(hook)};")
+    return "\n".join(lines) + "\n"
+
+
 def kernel_body_to_cpp(comp: HwComponent) -> str:
     """Top-level driver: extract + resolve + codegen.
 

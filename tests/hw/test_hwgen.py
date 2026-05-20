@@ -505,6 +505,38 @@ def test_kernel_signature_demo_component():
         assert sub in sig, f"Missing substring: {sub!r}\n--- sig ---\n{sig}"
 
 
+# ---------------------------------------------------------------------------
+# Kernel-files Phase 4: header_to_cpp
+# ---------------------------------------------------------------------------
+
+def test_header_to_cpp_demo_component_substrings():
+    from pysilicon.build.hwgen import header_to_cpp
+    from tests.hw.test_resolve import DemoComponent
+
+    comp = DemoComponent(name="demo", sim=Simulation())
+    hpp = header_to_cpp(comp)
+
+    for sub in [
+        "#pragma once",
+        '#include "include/streamutils_hls.h"',
+        '#include "include/democmdhdr.h"',
+        "void demo(",
+        ");",  # forward decl terminator
+        "ap_uint<8> process(DemoCmdHdr cmd);",
+    ]:
+        assert sub in hpp, f"Missing substring: {sub!r}\n--- hpp ---\n{hpp}"
+
+
+def test_header_to_cpp_forward_decl_has_no_pragmas():
+    from pysilicon.build.hwgen import header_to_cpp
+    from tests.hw.test_resolve import DemoComponent
+
+    comp = DemoComponent(name="demo", sim=Simulation())
+    hpp = header_to_cpp(comp)
+    # The .hpp must NOT include any HLS pragmas — those live in the .cpp.
+    assert "#pragma HLS" not in hpp
+
+
 def test_kernel_body_to_cpp_demo_component_contains_expected_substrings():
     from pysilicon.build.hwgen import kernel_body_to_cpp
     # Reuse the DemoComponent fixture from tests/hw/test_resolve.py.
