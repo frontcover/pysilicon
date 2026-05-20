@@ -1,9 +1,12 @@
 """Walk a resolved ``HwStmt`` tree and emit C++ source as a string."""
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
+from enum import IntEnum
 from typing import TYPE_CHECKING
 
+from pysilicon.hw.dataschema import DataSchema, EnumField, FloatField, IntField
 from pysilicon.hw.hwstmt import (
     CaseStmt,
     ContinueStmt,
@@ -236,6 +239,63 @@ def _emit_literal(value) -> str:
     if isinstance(value, str):
         return f'"{value}"'
     return repr(value)
+
+
+def cpp_type(typ) -> str:
+    """Translate a Python type or ``HwVar.typ`` marker to its HLS C++ representation.
+
+    Rules (matching the kernel-files plan):
+
+    - ``IntField`` (``signed=False``) → ``ap_uint<bw>``
+    - ``IntField`` (``signed=True``)  → ``ap_int<bw>``
+    - ``EnumField`` (and bare ``IntEnum`` subclasses) → ``ap_uint<8>`` (v1)
+    - ``FloatField`` (bitwidth 32) → ``float``; (bitwidth 64) → ``double``
+    - Other ``DataSchema`` subclasses → ``cls.cpp_class_name()``
+    - The 2-tuple ``('SchemaArray', elem_type)`` → ``<elem>[MAX_N] /* TODO ... */``
+    - ``None`` → ``RuntimeError`` (unresolved type leaked through)
+    """
+    if typ is None:
+        raise RuntimeError("cpp_type called with None — unresolved HwVar leaked")
+    if isinstance(typ, tuple) and len(typ) == 2 and typ[0] == 'SchemaArray':
+        inner = cpp_type(typ[1])
+        return f"{inner}[MAX_N] /* TODO: real SchemaArray typing */"
+    if isinstance(typ, type) and issubclass(typ, DataSchema):
+        if issubclass(typ, IntField):
+            bw = typ.get_bitwidth()
+            signed = getattr(typ, 'signed', False)
+            return f"ap_int<{bw}>" if signed else f"ap_uint<{bw}>"
+        if issubclass(typ, FloatField):
+            bw = typ.get_bitwidth()
+            if bw == 32:
+                return "float"
+            if bw == 64:
+                return "double"
+            raise RuntimeError(
+                f"FloatField bitwidth {bw} not supported (32 or 64 only)"
+            )
+        if issubclass(typ, EnumField):
+            return "ap_uint<8>"  # v1 simplification; widen later if needed
+        return typ.cpp_class_name()
+    # Bare IntEnum subclasses (e.g. resolved FunctionStmt return types) map the
+    # same as EnumField. The plan explicitly bounds enums at 8 bits for v1.
+    if isinstance(typ, type) and issubclass(typ, IntEnum):
+        return "ap_uint<8>"
+    raise RuntimeError(f"cpp_type: cannot translate {typ!r}")
+
+
+def cpp_kernel_name(comp_class) -> str:
+    """Default kernel function name.
+
+    ``CamelCase`` → ``snake_case`` with a trailing ``_component`` stripped:
+    ``DemoComponent → demo``, ``PolyAccelComponent → poly_accel``. Override
+    per class by setting ``cpp_kernel_name: ClassVar[str | None] = "..."``.
+    """
+    override = getattr(comp_class, 'cpp_kernel_name', None)
+    if override:
+        return override
+    name = comp_class.__name__
+    snake = re.sub(r'(?<!^)(?=[A-Z])', '_', name).lower()
+    return snake.removesuffix('_component')
 
 
 def kernel_body_to_cpp(comp: HwComponent) -> str:

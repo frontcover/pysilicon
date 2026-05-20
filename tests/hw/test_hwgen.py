@@ -318,6 +318,100 @@ def test_function_stmt_multi_output_raises():
 # Phase 5: kernel_body_to_cpp end-to-end
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# Kernel-files Phase 1: cpp_type + cpp_kernel_name
+# ---------------------------------------------------------------------------
+
+def test_cpp_type_intfield_unsigned():
+    from pysilicon.build.hwgen import cpp_type
+    from pysilicon.hw.dataschema import IntField
+    assert cpp_type(IntField.specialize(bitwidth=16, signed=False)) == "ap_uint<16>"
+
+
+def test_cpp_type_intfield_signed():
+    from pysilicon.build.hwgen import cpp_type
+    from pysilicon.hw.dataschema import IntField
+    assert cpp_type(IntField.specialize(bitwidth=8, signed=True)) == "ap_int<8>"
+
+
+def test_cpp_type_floatfield_32():
+    from pysilicon.build.hwgen import cpp_type
+    from pysilicon.hw.dataschema import FloatField
+    assert cpp_type(FloatField.specialize(bitwidth=32)) == "float"
+
+
+def test_cpp_type_floatfield_64():
+    from pysilicon.build.hwgen import cpp_type
+    from pysilicon.hw.dataschema import FloatField
+    assert cpp_type(FloatField.specialize(bitwidth=64)) == "double"
+
+
+def test_cpp_type_enumfield():
+    from pysilicon.build.hwgen import cpp_type
+    from pysilicon.hw.dataschema import EnumField
+    assert cpp_type(EnumField.specialize(enum_type=DemoError)) == "ap_uint<8>"
+
+
+def test_cpp_type_intenum_direct():
+    """IntEnum subclasses (e.g. resolved FunctionStmt return types) map to ap_uint<8>."""
+    from pysilicon.build.hwgen import cpp_type
+    assert cpp_type(DemoError) == "ap_uint<8>"
+
+
+def test_cpp_type_dataschema_subclass_uses_cpp_class_name():
+    from pysilicon.build.hwgen import cpp_type
+    from pysilicon.hw.dataschema import DataList, IntField
+
+    class MyMsg(DataList):
+        elements = {
+            "x": {"schema": IntField.specialize(bitwidth=8, signed=False)},
+        }
+
+    assert cpp_type(MyMsg) == "MyMsg"
+
+
+def test_cpp_type_schemaarray_placeholder():
+    from pysilicon.build.hwgen import cpp_type
+    from pysilicon.hw.dataschema import FloatField
+    Float32 = FloatField.specialize(bitwidth=32)
+    out = cpp_type(('SchemaArray', Float32))
+    assert "float[MAX_N]" in out
+    assert "TODO" in out
+
+
+def test_cpp_type_none_raises():
+    from pysilicon.build.hwgen import cpp_type
+    with pytest.raises(RuntimeError):
+        cpp_type(None)
+
+
+def test_cpp_kernel_name_demo():
+    from pysilicon.build.hwgen import cpp_kernel_name
+    from tests.hw.test_resolve import DemoComponent
+    assert cpp_kernel_name(DemoComponent) == "demo"
+
+
+def test_cpp_kernel_name_poly_accel():
+    from pysilicon.build.hwgen import cpp_kernel_name
+    import sys
+    from pathlib import Path
+    POLY_DIR = Path(__file__).resolve().parents[2] / "examples" / "poly"
+    if str(POLY_DIR) not in sys.path:
+        sys.path.insert(0, str(POLY_DIR))
+    from poly import PolyAccelComponent
+    assert cpp_kernel_name(PolyAccelComponent) == "poly_accel"
+
+
+def test_cpp_kernel_name_override():
+    from pysilicon.build.hwgen import cpp_kernel_name
+    from typing import ClassVar
+
+    class _Overridden(HwComponent):
+        cpp_kernel_name: ClassVar[str | None] = "my_custom_name"
+
+    assert cpp_kernel_name(_Overridden) == "my_custom_name"
+
+
 def test_kernel_body_to_cpp_demo_component_contains_expected_substrings():
     from pysilicon.build.hwgen import kernel_body_to_cpp
     # Reuse the DemoComponent fixture from tests/hw/test_resolve.py.

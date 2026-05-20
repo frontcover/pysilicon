@@ -80,3 +80,4 @@ class HwComponent(Component):
     """
 
     control_mode: ClassVar[ControlMode] = ControlMode.AUTO
+    cpp_kernel_name: ClassVar[str | None] = None
