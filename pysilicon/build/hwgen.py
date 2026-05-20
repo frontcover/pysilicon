@@ -8,6 +8,7 @@ from pysilicon.hw.hwstmt import (
     CaseStmt,
     ContinueStmt,
     FieldRef,
+    FunctionStmt,
     HwStmt,
     HwVar,
     Ref,
@@ -67,6 +68,8 @@ def to_cpp(stmt: HwStmt, ctx: CodegenCtx) -> str:
         return _emit_regmap_get(stmt, ctx)
     if isinstance(stmt, RegMapSetStmt):
         return _emit_regmap_set(stmt, ctx)
+    if isinstance(stmt, FunctionStmt):
+        return _emit_function_call(stmt, ctx)
     raise NotImplementedError(
         f"Codegen for {type(stmt).__name__} not implemented yet"
     )
@@ -170,6 +173,55 @@ def _emit_regmap_set(stmt: RegMapSetStmt, ctx: CodegenCtx) -> str:
     value = stmt.inputs[1]
     rhs = _emit_expr(value, ctx)
     return f"{ctx.pad()}{field_name} = {rhs};"
+
+
+def _emit_function_call(stmt: FunctionStmt, ctx: CodegenCtx) -> str:
+    """Emit a call to a ``@synthesizable`` user hook.
+
+    The hook is a free function in C++ (no class wrapping). Inputs become
+    positional arguments; the return value (if any) is assigned to the
+    output ``HwVar``, which is also declared inline.
+    """
+    if len(stmt.outputs) > 1:
+        raise NotImplementedError(
+            "Multi-output FunctionStmt (tuple return) is not supported"
+        )
+    func_name = stmt.method.__name__
+    args = [_emit_call_arg(a, ctx) for a in stmt.inputs]
+    arg_str = ", ".join(args)
+    pad = ctx.pad()
+    if not stmt.outputs:
+        return f"{pad}{func_name}({arg_str});"
+    out = stmt.outputs[0]
+    cpp_type = (
+        out.typ.cpp_class_name()
+        if hasattr(out.typ, 'cpp_class_name')
+        else _cpp_type_for(out.typ)
+    )
+    return f"{pad}{cpp_type} {out.name} = {func_name}({arg_str});"
+
+
+def _cpp_type_for(typ) -> str:
+    """Fallback C++ type for ``HwVar.typ`` values without ``cpp_class_name``."""
+    if typ is None:
+        return 'auto'
+    # IntEnum subclasses lack cpp_class_name but render as themselves in C++.
+    name = getattr(typ, '__name__', None)
+    if name:
+        return name
+    return 'auto'
+
+
+def _emit_call_arg(arg, ctx: CodegenCtx) -> str:
+    """Emit one argument: HwVar -> name, endpoint -> attr name, literal -> literal."""
+    if isinstance(arg, HwVar):
+        return arg.name
+    if isinstance(arg, FieldRef):
+        return f"{arg.var.name}.{arg.field}"
+    from pysilicon.hw.interface import InterfaceEndpoint
+    if isinstance(arg, InterfaceEndpoint):
+        return _endpoint_name(arg, ctx)
+    return _emit_literal(arg)
 
 
 def _emit_literal(value) -> str:

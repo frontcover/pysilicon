@@ -253,6 +253,67 @@ def test_regmap_get_with_untyped_output_falls_back_to_auto():
     assert to_cpp(stmt, _ctx()) == "    auto coeffs = coeffs;"
 
 
+# ---------------------------------------------------------------------------
+# Phase 4: FunctionStmt call sites
+# ---------------------------------------------------------------------------
+
+class _FakeMethod:
+    def __init__(self, name):
+        self.__name__ = name
+
+
+def test_function_stmt_with_typed_output():
+    from pysilicon.hw.hwstmt import FunctionStmt
+    stmt = FunctionStmt(
+        method=_FakeMethod('process'),
+        inputs=[HwVar(name='cmd', typ=None)],
+        outputs=[HwVar(name='err', typ=DemoError)],
+    )
+    assert to_cpp(stmt, _ctx()) == "    DemoError err = process(cmd);"
+
+
+def test_function_stmt_no_outputs():
+    from pysilicon.hw.hwstmt import FunctionStmt
+    stmt = FunctionStmt(
+        method=_FakeMethod('process'),
+        inputs=[HwVar(name='cmd', typ=None)],
+        outputs=[],
+    )
+    assert to_cpp(stmt, _ctx()) == "    process(cmd);"
+
+
+def test_function_stmt_with_endpoint_arg():
+    from pysilicon.hw.hwstmt import FunctionStmt
+    from pysilicon.hw.interface import StreamIFMaster, StreamIFSlave
+    sim = Simulation()
+    s_in = StreamIFSlave(name='s_in_ep', sim=sim, bitwidth=32)
+    m_out = StreamIFMaster(name='m_out_ep', sim=sim, bitwidth=32)
+    comp = HwComponent(name='c', sim=sim)
+    comp.s_in = s_in
+    comp.m_out = m_out
+    ctx = CodegenCtx(comp=comp)
+    stmt = FunctionStmt(
+        method=_FakeMethod('process'),
+        inputs=[HwVar(name='cmd', typ=None), s_in, m_out],
+        outputs=[],
+    )
+    assert to_cpp(stmt, ctx) == "    process(cmd, s_in, m_out);"
+
+
+def test_function_stmt_multi_output_raises():
+    from pysilicon.hw.hwstmt import FunctionStmt
+    stmt = FunctionStmt(
+        method=_FakeMethod('split'),
+        inputs=[HwVar(name='x', typ=None)],
+        outputs=[
+            HwVar(name='a', typ=None),
+            HwVar(name='b', typ=None),
+        ],
+    )
+    with pytest.raises(NotImplementedError, match="Multi-output"):
+        to_cpp(stmt, _ctx())
+
+
 def test_endpoint_name_not_found_raises():
     from pysilicon.hw.interface import StreamGetStmt
     rogue = _FakeEndpoint()
