@@ -15,7 +15,12 @@ from pysilicon.hw.hwstmt import (
     SeqStmt,
     WhileStmt,
 )
+from pysilicon.hw.interface import StreamIFSlave as _StreamIFSlave
+from pysilicon.hw.synth import synthesizable as _synthesizable
+from pysilicon.simulation.simobj import ProcessGen as _ProcessGen
 from pysilicon.simulation.simulation import Simulation
+from tests.hw.test_resolve import DemoCmdHdr as _DemoCmdHdr
+from tests.hw.test_resolve import DemoError as _DemoError
 
 
 class DemoCmdType(IntEnum):
@@ -415,16 +420,9 @@ def test_cpp_kernel_name_override():
 # ---------------------------------------------------------------------------
 # Kernel-files Phase 2: hook_signature derivation
 # ---------------------------------------------------------------------------
-
-# Module-level imports so typing.get_type_hints() can resolve annotations
-# from the module's __globals__ (annotations are stringified under
-# `from __future__ import annotations`).
-from pysilicon.hw.interface import StreamIFSlave as _StreamIFSlave
-from pysilicon.hw.synth import synthesizable as _synthesizable
-from pysilicon.simulation.simobj import ProcessGen as _ProcessGen
-from tests.hw.test_resolve import DemoCmdHdr as _DemoCmdHdr
-from tests.hw.test_resolve import DemoError as _DemoError
-
+# Hook fixtures defined at module level so typing.get_type_hints() can
+# resolve their annotations via the module's __globals__ (annotations are
+# stringified under `from __future__ import annotations`).
 
 @_synthesizable
 def _hook_evaluate(self, cmd: _DemoCmdHdr) -> _ProcessGen[_DemoError]:

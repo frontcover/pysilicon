@@ -398,10 +398,21 @@ def cpp_kernel_name(comp_class) -> str:
 def _collect_schemas(tree: HwStmt, comp) -> list[type]:
     """Return the unique ``DataSchema`` subclasses referenced by the kernel.
 
+    ``IntField`` and ``FloatField`` subclasses are excluded — they map to
+    primitive C++ types (``ap_uint<N>`` / ``float``) and have no header of
+    their own.  Matches the include set in ``poly.hpp``.
+
     Sources walked:
       - ``HwVar.typ`` on every ``stmt.outputs`` in the resolved tree.
       - Every regmap field schema (if the component carries a regmap).
     """
+    def _has_header(typ) -> bool:
+        return (
+            isinstance(typ, type)
+            and issubclass(typ, DataSchema)
+            and not issubclass(typ, (IntField, FloatField))
+        )
+
     schemas: dict[str, type] = {}
 
     def visit(node):
@@ -415,17 +426,15 @@ def _collect_schemas(tree: HwStmt, comp) -> list[type]:
             if node.if_false is not None:
                 visit(node.if_false)
         for v in getattr(node, 'outputs', []):
-            typ = v.typ
-            if isinstance(typ, type) and issubclass(typ, DataSchema):
-                schemas[typ.cpp_class_name()] = typ
+            if _has_header(v.typ):
+                schemas[v.typ.cpp_class_name()] = v.typ
 
     visit(tree)
     regmap_slave = _discover_regmap(comp)
     if regmap_slave is not None:
         for fld in regmap_slave.regmap._fields.values():
-            s = fld.schema
-            if isinstance(s, type) and issubclass(s, DataSchema):
-                schemas[s.cpp_class_name()] = s
+            if _has_header(fld.schema):
+                schemas[fld.schema.cpp_class_name()] = fld.schema
     return list(schemas.values())
 
 
@@ -470,7 +479,7 @@ def header_to_cpp(comp) -> str:
     lines = ['#pragma once', '']
     lines.append('#include "include/streamutils_hls.h"')
     for s in schemas:
-        lines.append(f'#include "include/{s.cpp_class_name().lower()}.h"')
+        lines.append(f'#include "include/{s.cpp_class_name().lower()}.h"')  # type: ignore[attr-defined]
     lines.append('')
     lines.append(_kernel_signature_decl(comp))
     lines.append('')
