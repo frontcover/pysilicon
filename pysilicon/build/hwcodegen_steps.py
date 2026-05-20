@@ -78,10 +78,14 @@ class HlsCodegenStep(BuildStep):
             path.write_text(files[filename], encoding="utf-8")
             artifacts[f"{kn}_{ext}"] = path
 
-        # Impl stubs handled in Phase 2 — for now, populate paths only
-        # so the produces contract is satisfied (no file written yet).
+        # Sticky impl stubs: write only if the file doesn't already exist.
+        # Once an impl file exists (whether the user filled it in or a future
+        # AI-completion step wrote it), codegen never touches it again.
         for hook in self._hook_names:
-            path = out_root / f"{kn}_{hook}_impl.cpp"
+            filename = f"{kn}_{hook}_impl.cpp"
+            path = out_root / filename
+            if not path.exists():
+                path.write_text(files[filename], encoding="utf-8")
             artifacts[f"{kn}_{hook}_impl"] = path
 
         return artifacts

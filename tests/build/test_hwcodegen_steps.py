@@ -90,3 +90,44 @@ def test_run_creates_output_dir(tmp_path: Path):
     step.run(config)
     assert (tmp_path / "nested" / "gen" / "demo.hpp").exists()
     assert (tmp_path / "nested" / "gen" / "demo.cpp").exists()
+
+
+# ---------------------------------------------------------------------------
+# Phase 2: sticky impl-file behavior
+# ---------------------------------------------------------------------------
+
+def test_first_run_creates_impl_stub(tmp_path: Path):
+    step = HlsCodegenStep(comp_class=DemoComponent, source_artifact="demo_src")
+    step.run(BuildConfig(root_dir=tmp_path))
+    impl = tmp_path / "demo_process_impl.cpp"
+    assert impl.exists()
+    content = impl.read_text(encoding="utf-8")
+    assert "// TODO: implement process" in content
+
+
+def test_rerun_preserves_user_edited_impl(tmp_path: Path):
+    step = HlsCodegenStep(comp_class=DemoComponent, source_artifact="demo_src")
+    config = BuildConfig(root_dir=tmp_path)
+    step.run(config)
+
+    impl = tmp_path / "demo_process_impl.cpp"
+    custom = "// hand-written implementation, do not overwrite\n"
+    impl.write_text(custom, encoding="utf-8")
+
+    step.run(config)
+    assert impl.read_text(encoding="utf-8") == custom
+
+
+def test_rerun_does_not_touch_existing_impl_mtime(tmp_path: Path):
+    """A second run must not even rewrite identical contents (mtime is preserved)."""
+    import os
+    step = HlsCodegenStep(comp_class=DemoComponent, source_artifact="demo_src")
+    config = BuildConfig(root_dir=tmp_path)
+    step.run(config)
+
+    impl = tmp_path / "demo_process_impl.cpp"
+    backdated = 1_000_000_000.0
+    os.utime(impl, (backdated, backdated))
+
+    step.run(config)
+    assert impl.stat().st_mtime == backdated
