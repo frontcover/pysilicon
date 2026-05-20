@@ -478,6 +478,33 @@ def test_hook_signature_no_return_annotation_is_void():
     assert ret == "void"
 
 
+# ---------------------------------------------------------------------------
+# Kernel-files Phase 3: kernel_signature
+# ---------------------------------------------------------------------------
+
+def test_kernel_signature_demo_component():
+    from pysilicon.build.hwgen import kernel_signature
+    from tests.hw.test_resolve import DemoComponent
+
+    comp = DemoComponent(name="demo", sim=Simulation())
+    sig = kernel_signature(comp)
+    expected_substrings = [
+        "void demo(",
+        "hls::stream<streamutils::axi4s_word<WORD_BW>>& s_in",
+        "hls::stream<streamutils::axi4s_word<WORD_BW>>& m_out",
+        "ap_uint<1>& ap_start",
+        "ap_uint<1>& halted",
+        "ap_uint<8>& error",
+        "ap_uint<16>& tx_id",
+        "#pragma HLS INTERFACE axis port=s_in",
+        "#pragma HLS INTERFACE axis port=m_out",
+        "#pragma HLS INTERFACE s_axilite port=halted",
+        "#pragma HLS INTERFACE s_axilite port=return",
+    ]
+    for sub in expected_substrings:
+        assert sub in sig, f"Missing substring: {sub!r}\n--- sig ---\n{sig}"
+
+
 def test_kernel_body_to_cpp_demo_component_contains_expected_substrings():
     from pysilicon.build.hwgen import kernel_body_to_cpp
     # Reuse the DemoComponent fixture from tests/hw/test_resolve.py.

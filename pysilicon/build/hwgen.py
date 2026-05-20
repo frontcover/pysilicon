@@ -283,6 +283,54 @@ def cpp_type(typ) -> str:
     raise RuntimeError(f"cpp_type: cannot translate {typ!r}")
 
 
+def _discover_stream_endpoints(comp) -> list[tuple[str, object]]:
+    """Return ``[(attr_name, endpoint)]`` for each stream endpoint on ``comp``."""
+    from pysilicon.hw.interface import StreamIFMaster, StreamIFSlave
+    result: list[tuple[str, object]] = []
+    for name, val in vars(comp).items():
+        if isinstance(val, (StreamIFSlave, StreamIFMaster)):
+            result.append((name, val))
+    return result
+
+
+def _discover_regmap(comp):
+    """Return the component's ``VitisRegMapMMIFSlave`` endpoint, or ``None``."""
+    from pysilicon.hw.regmap import VitisRegMapMMIFSlave
+    for val in vars(comp).values():
+        if isinstance(val, VitisRegMapMMIFSlave):
+            return val
+    return None
+
+
+def kernel_signature(comp) -> str:
+    """Build the kernel function signature and ``#pragma HLS INTERFACE`` lines.
+
+    Returns a multi-line string ending with the opening ``{`` of the function
+    body and the pragmas. The caller appends the body and the closing ``}``.
+    """
+    name = cpp_kernel_name(type(comp))
+    arg_lines: list[str] = []
+    pragma_lines: list[str] = []
+    for attr, _ep in _discover_stream_endpoints(comp):
+        arg_lines.append(
+            f"    hls::stream<streamutils::axi4s_word<WORD_BW>>& {attr}"
+        )
+        pragma_lines.append(f"#pragma HLS INTERFACE axis port={attr}")
+    regmap_slave = _discover_regmap(comp)
+    if regmap_slave is not None:
+        for fname, fld in regmap_slave.regmap._fields.items():
+            arg_lines.append(f"    {cpp_type(fld.schema)}& {fname}")
+            pragma_lines.append(
+                f"#pragma HLS INTERFACE s_axilite port={fname:<12} bundle=control"
+            )
+    pragma_lines.append(
+        "#pragma HLS INTERFACE s_axilite port=return       bundle=control"
+    )
+    arg_block = ",\n".join(arg_lines)
+    pragma_block = "\n".join(pragma_lines)
+    return f"void {name}(\n{arg_block}\n) {{\n{pragma_block}"
+
+
 def hook_signature(method) -> tuple[str, list[tuple[str, str]]]:
     """Return ``(return_cpp_type, [(arg_name, arg_decl), ...])`` for a hook.
 
