@@ -198,6 +198,56 @@ def test_stream_drain_emits_flush():
     )
 
 
+class _FakeParamEndpoint:
+    """Stand-in endpoint whose bitwidth is a HwParamValue."""
+    def __init__(self, param_name: str, value: int = 32) -> None:
+        from pysilicon.hw.hw_component import HwParamValue
+        self.bitwidth = HwParamValue(value, param_name)
+
+
+def test_stream_get_uses_template_name_for_hwparam_endpoint():
+    from pysilicon.hw.interface import StreamGetStmt
+    s_in = _FakeParamEndpoint(param_name="in_bw")
+    comp = _comp_with_endpoints(s_in=s_in)
+    ctx = CodegenCtx(comp=comp)
+    stmt = StreamGetStmt(
+        method=_FakeBoundMethod(s_in),
+        inputs=[_FakeSchema],
+        outputs=[HwVar(name='cmd', typ=_FakeSchema)],
+    )
+    out = to_cpp(stmt, ctx)
+    assert "read_axi4_stream<in_bw>(s_in)" in out
+    assert "<32>" not in out
+
+
+def test_stream_write_uses_template_name_for_hwparam_endpoint():
+    from pysilicon.hw.interface import StreamWriteStmt
+    m_out = _FakeParamEndpoint(param_name="out_bw")
+    comp = _comp_with_endpoints(m_out=m_out)
+    ctx = CodegenCtx(comp=comp)
+    stmt = StreamWriteStmt(
+        method=_FakeBoundMethod(m_out),
+        inputs=[HwVar(name='resp', typ=None)],
+        outputs=[],
+    )
+    out = to_cpp(stmt, ctx)
+    assert "write_axi4_stream<out_bw>(m_out, true)" in out
+
+
+def test_stream_drain_uses_template_name_for_hwparam_endpoint():
+    from pysilicon.hw.interface import StreamDrainStmt
+    s_in = _FakeParamEndpoint(param_name="in_bw")
+    comp = _comp_with_endpoints(s_in=s_in)
+    ctx = CodegenCtx(comp=comp)
+    stmt = StreamDrainStmt(
+        method=_FakeBoundMethod(s_in),
+        inputs=[],
+        outputs=[],
+    )
+    out = to_cpp(stmt, ctx)
+    assert "flush_axi4_stream_to_tlast<in_bw>(s_in)" in out
+
+
 # ---------------------------------------------------------------------------
 # Phase 3: Regmap statements
 # ---------------------------------------------------------------------------
@@ -818,7 +868,9 @@ def test_kernel_body_to_cpp_demo_component_contains_expected_substrings():
     expected = [
         "while (true)",
         "DemoCmdHdr cmd;",
-        "cmd.read_axi4_stream<32>(s_in);",
+        # DemoComponent.s_in has bitwidth = HwParamValue(in_bw, 32) →
+        # template arg is "in_bw", not the literal 32.
+        "cmd.read_axi4_stream<in_bw>(s_in);",
         "if (cmd.cmd_type == DemoCmdType::END)",
         "return;",
         "DemoError err = demo::process(cmd",
@@ -829,6 +881,8 @@ def test_kernel_body_to_cpp_demo_component_contains_expected_substrings():
     ]
     for sub in expected:
         assert sub in body, f"Missing substring: {sub!r}\n--- body ---\n{body}"
+    # Literal '32' should no longer appear in the stream template arg.
+    assert "read_axi4_stream<32>" not in body
 
 
 def test_endpoint_name_not_found_raises():

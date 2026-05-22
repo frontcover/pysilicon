@@ -124,11 +124,11 @@ def _emit_stream_get(stmt: StreamGetStmt, ctx: CodegenCtx) -> str:
     cpp_type = schema_cls.cpp_class_name()
     ep = stmt.method.__self__  # type: ignore[attr-defined]
     stream_name = _endpoint_name(ep, ctx)
-    bw = ep.bitwidth
+    tmpl = _stream_template_arg(ep)
     pad = ctx.pad()
     return (
         f"{pad}{cpp_type} {out.name};\n"
-        f"{pad}{out.name}.read_axi4_stream<{bw}>({stream_name});"
+        f"{pad}{out.name}.read_axi4_stream<{tmpl}>({stream_name});"
     )
 
 
@@ -137,17 +137,17 @@ def _emit_stream_write(stmt: StreamWriteStmt, ctx: CodegenCtx) -> str:
     value = stmt.inputs[0]
     ep = stmt.method.__self__  # type: ignore[attr-defined]
     stream_name = _endpoint_name(ep, ctx)
-    bw = ep.bitwidth
+    tmpl = _stream_template_arg(ep)
     pad = ctx.pad()
-    return f"{pad}{value.name}.write_axi4_stream<{bw}>({stream_name}, true);"
+    return f"{pad}{value.name}.write_axi4_stream<{tmpl}>({stream_name}, true);"
 
 
 def _emit_stream_drain(stmt: StreamDrainStmt, ctx: CodegenCtx) -> str:
     ep = stmt.method.__self__  # type: ignore[attr-defined]
     stream_name = _endpoint_name(ep, ctx)
-    bw = ep.bitwidth
+    tmpl = _stream_template_arg(ep)
     pad = ctx.pad()
-    return f"{pad}streamutils::flush_axi4_stream_to_tlast<{bw}>({stream_name});"
+    return f"{pad}streamutils::flush_axi4_stream_to_tlast<{tmpl}>({stream_name});"
 
 
 def _endpoint_name(endpoint, ctx: CodegenCtx) -> str:
