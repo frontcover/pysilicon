@@ -469,6 +469,74 @@ def hook_signature_str(method) -> str:
     return f"{ret_cpp} {method.__name__}({arg_str})"
 
 
+# ---------------------------------------------------------------------------
+# Hook templating (Phase 10): detect HwParam-driven stream args at the
+# call site and decide whether a hook is emitted as a template (in a .tpp
+# include) or a plain free function (in a .cpp impl).
+# ---------------------------------------------------------------------------
+
+
+def hook_template_params(stmt: FunctionStmt) -> list[str]:
+    """Return the ordered, deduplicated ``HwParam`` names this hook is templated on.
+
+    Walks ``stmt.inputs`` (call-site arguments), collecting the ``param_name``
+    of any stream endpoint whose ``bitwidth`` is a ``HwParamValue``. An empty
+    list means the hook is NOT templated and should be emitted in a ``.cpp``
+    file. A non-empty list means the hook is templated and goes in a ``.tpp``.
+    """
+    from pysilicon.hw.hw_component import HwParamValue
+    from pysilicon.hw.interface import StreamIFMaster, StreamIFSlave
+
+    params: list[str] = []
+    seen: set[str] = set()
+    for inp in stmt.inputs:
+        if isinstance(inp, (StreamIFSlave, StreamIFMaster)):
+            bw = inp.bitwidth
+            if isinstance(bw, HwParamValue) and bw.param_name not in seen:
+                params.append(bw.param_name)
+                seen.add(bw.param_name)
+    return params
+
+
+def _stmt_children(node) -> list:
+    """Return immediate child statements of ``node`` for recursive tree walks."""
+    if isinstance(node, WhileStmt):
+        return [node.body]
+    if isinstance(node, SeqStmt):
+        return list(node.stmts)
+    if isinstance(node, CaseStmt):
+        children = [node.if_true]
+        if node.if_false is not None:
+            children.append(node.if_false)
+        return children
+    return []
+
+
+def _validate_single_call_site(tree, hook_method, template_params: list[str]) -> None:
+    """Templated hooks must be called from one site (or consistently across sites).
+
+    Walks the tree, collects ``hook_template_params`` for every
+    ``FunctionStmt`` targeting ``hook_method``, and raises ``SynthesisError``
+    if any site yields a different param list.
+    """
+    from pysilicon.build.hwcodegen import SynthesisError
+
+    sites: list[list[str]] = []
+
+    def visit(node):
+        if isinstance(node, FunctionStmt) and node.method is hook_method:
+            sites.append(hook_template_params(node))
+        for child in _stmt_children(node):
+            visit(child)
+
+    visit(tree)
+    if len(sites) > 1 and any(s != sites[0] for s in sites[1:]):
+        raise SynthesisError(
+            f"Templated hook '{hook_method.__name__}' called from "
+            f"{len(sites)} sites with inconsistent template params: {sites}"
+        )
+
+
 def cpp_kernel_name(comp_class) -> str:
     """Default kernel function name.
 

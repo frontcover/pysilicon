@@ -897,3 +897,118 @@ def test_endpoint_name_not_found_raises():
     )
     with pytest.raises(RuntimeError, match="not found"):
         to_cpp(stmt, ctx)
+
+
+# ---------------------------------------------------------------------------
+# Hook-template Phase 1: hook_template_params + single-call-site validation
+# ---------------------------------------------------------------------------
+
+def _stream_endpoint(name: str, bitwidth, slave: bool = True):
+    """Build a real StreamIF endpoint with the given (possibly-HwParamValue) bitwidth."""
+    from pysilicon.hw.interface import StreamIFMaster, StreamIFSlave
+    cls = StreamIFSlave if slave else StreamIFMaster
+    return cls(name=name, sim=Simulation(), bitwidth=bitwidth)
+
+
+def test_hook_template_params_empty_inputs():
+    from pysilicon.build.hwgen import hook_template_params
+    from pysilicon.hw.hwstmt import FunctionStmt
+    stmt = FunctionStmt(method=_FakeMethod("h"), inputs=[], outputs=[])
+    assert hook_template_params(stmt) == []
+
+
+def test_hook_template_params_hwvar_only_inputs():
+    from pysilicon.build.hwgen import hook_template_params
+    from pysilicon.hw.hwstmt import FunctionStmt
+    stmt = FunctionStmt(
+        method=_FakeMethod("h"),
+        inputs=[HwVar(name="x", typ=None), HwVar(name="y", typ=None)],
+        outputs=[],
+    )
+    assert hook_template_params(stmt) == []
+
+
+def test_hook_template_params_single_param_endpoint():
+    from pysilicon.build.hwgen import hook_template_params
+    from pysilicon.hw.hw_component import HwParamValue
+    from pysilicon.hw.hwstmt import FunctionStmt
+    ep = _stream_endpoint("s_in_ep", HwParamValue(32, "in_bw"))
+    stmt = FunctionStmt(
+        method=_FakeMethod("h"),
+        inputs=[HwVar(name="cmd", typ=None), ep],
+        outputs=[],
+    )
+    assert hook_template_params(stmt) == ["in_bw"]
+
+
+def test_hook_template_params_two_endpoints_same_param_dedupes():
+    from pysilicon.build.hwgen import hook_template_params
+    from pysilicon.hw.hw_component import HwParamValue
+    from pysilicon.hw.hwstmt import FunctionStmt
+    bw = HwParamValue(32, "in_bw")
+    e1 = _stream_endpoint("a", bw)
+    e2 = _stream_endpoint("b", bw, slave=False)
+    stmt = FunctionStmt(method=_FakeMethod("h"), inputs=[e1, e2], outputs=[])
+    assert hook_template_params(stmt) == ["in_bw"]
+
+
+def test_hook_template_params_two_endpoints_different_params():
+    from pysilicon.build.hwgen import hook_template_params
+    from pysilicon.hw.hw_component import HwParamValue
+    from pysilicon.hw.hwstmt import FunctionStmt
+    e1 = _stream_endpoint("a", HwParamValue(32, "in_bw"))
+    e2 = _stream_endpoint("b", HwParamValue(64, "out_bw"), slave=False)
+    stmt = FunctionStmt(method=_FakeMethod("h"), inputs=[e1, e2], outputs=[])
+    assert hook_template_params(stmt) == ["in_bw", "out_bw"]
+
+
+def test_hook_template_params_raw_int_endpoint_skipped():
+    from pysilicon.build.hwgen import hook_template_params
+    from pysilicon.hw.hw_component import HwParamValue
+    from pysilicon.hw.hwstmt import FunctionStmt
+    raw = _stream_endpoint("raw", 32)
+    param = _stream_endpoint("p", HwParamValue(32, "in_bw"))
+    stmt = FunctionStmt(method=_FakeMethod("h"), inputs=[raw, param], outputs=[])
+    assert hook_template_params(stmt) == ["in_bw"]
+
+
+def test_validate_single_call_site_single_site_ok():
+    from pysilicon.build.hwgen import _validate_single_call_site
+    from pysilicon.hw.hw_component import HwParamValue
+    from pysilicon.hw.hwstmt import FunctionStmt, SeqStmt
+    method = _FakeMethod("h")
+    ep = _stream_endpoint("a", HwParamValue(32, "in_bw"))
+    tree = SeqStmt(stmts=[
+        FunctionStmt(method=method, inputs=[ep], outputs=[]),
+    ])
+    _validate_single_call_site(tree, method, ["in_bw"])
+
+
+def test_validate_single_call_site_consistent_ok():
+    from pysilicon.build.hwgen import _validate_single_call_site
+    from pysilicon.hw.hw_component import HwParamValue
+    from pysilicon.hw.hwstmt import FunctionStmt, SeqStmt
+    method = _FakeMethod("h")
+    ep = _stream_endpoint("a", HwParamValue(32, "in_bw"))
+    tree = SeqStmt(stmts=[
+        FunctionStmt(method=method, inputs=[ep], outputs=[]),
+        FunctionStmt(method=method, inputs=[ep], outputs=[]),
+    ])
+    _validate_single_call_site(tree, method, ["in_bw"])
+
+
+def test_validate_single_call_site_inconsistent_raises():
+    from pysilicon.build.hwcodegen import SynthesisError
+    from pysilicon.build.hwgen import _validate_single_call_site
+    from pysilicon.hw.hw_component import HwParamValue
+    from pysilicon.hw.hwstmt import FunctionStmt, SeqStmt
+    method = _FakeMethod("h")
+    e1 = _stream_endpoint("a", HwParamValue(32, "in_bw"))
+    e2 = _stream_endpoint("b", HwParamValue(64, "out_bw"))
+    tree = SeqStmt(stmts=[
+        FunctionStmt(method=method, inputs=[e1], outputs=[]),
+        FunctionStmt(method=method, inputs=[e2], outputs=[]),
+    ])
+    with pytest.raises(SynthesisError, match="inconsistent"):
+        _validate_single_call_site(tree, method, ["in_bw"])
+
