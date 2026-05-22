@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+import sys
 from dataclasses import dataclass
 from enum import Enum, auto
-from typing import ClassVar, Generic, TypeVar
+from typing import Any, ClassVar, Generic, TypeVar
 import typing
 
 from pysilicon.hw.component import Component
@@ -17,8 +18,48 @@ class HwParam(Generic[T]):
     does not enforce types). At build time the extractor collects all HwParam
     fields from ``get_type_hints()`` and maps them to C++ template names.
 
-    C++ name convention: ``field_name.upper()`` — ``in_bw`` → ``IN_BW``.
+    C++ name convention: the Python field name verbatim — ``in_bw`` →
+    ``in_bw``.
     """
+
+
+class HwConst(Generic[T]):
+    """Marks a class attribute as a class-level constant.
+
+    Translates to ``static constexpr T name = value;`` in generated C++
+    (codegen emission added in a follow-up phase). Immutable by convention —
+    the framework does not prevent reassignment, but the marker signals
+    "do not modify after class definition" to readers and to codegen.
+
+    Usage::
+
+        class CoeffArray(DataArray):
+            ncoeff: HwConst[int] = 4
+            max_shape = (ncoeff,)
+    """
+
+
+def discover_hw_const(cls) -> dict[str, Any]:
+    """Walk the MRO and return ``{field_name: value}`` for every ``HwConst`` field.
+
+    Order is class-MRO declaration order, deduplicated by name (subclass wins).
+    Plain fields, ``HwParam`` fields, and ``ClassVar`` literals are excluded.
+    """
+    result: dict[str, Any] = {}
+    for klass in reversed(cls.__mro__):
+        hints = getattr(klass, '__annotations__', {})
+        mod = sys.modules.get(klass.__module__)
+        globs: dict = vars(mod) if mod is not None else {}
+        for name, hint in hints.items():
+            if isinstance(hint, str):
+                try:
+                    hint = eval(hint, globs)  # noqa: S307
+                except Exception:
+                    continue
+            if typing.get_origin(hint) is HwConst:
+                if hasattr(klass, name):
+                    result[name] = getattr(klass, name)
+    return result
 
 
 class ControlMode(Enum):
