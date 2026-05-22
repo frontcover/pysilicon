@@ -504,7 +504,8 @@ def test_cpp_kernel_name_demo():
     assert cpp_kernel_name(DemoComponent) == "demo"
 
 
-def test_cpp_kernel_name_poly_accel():
+def test_cpp_kernel_name_poly_accel_uses_override():
+    """``PolyAccelComponent`` overrides ``cpp_kernel_name`` to ``"poly"``."""
     from pysilicon.build.hwgen import cpp_kernel_name
     import sys
     from pathlib import Path
@@ -512,7 +513,7 @@ def test_cpp_kernel_name_poly_accel():
     if str(POLY_DIR) not in sys.path:
         sys.path.insert(0, str(POLY_DIR))
     from poly import PolyAccelComponent
-    assert cpp_kernel_name(PolyAccelComponent) == "poly_accel"
+    assert cpp_kernel_name(PolyAccelComponent) == "poly"
 
 
 def test_cpp_kernel_name_override():

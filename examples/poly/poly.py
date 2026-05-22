@@ -4,6 +4,7 @@ import json
 from dataclasses import dataclass, field
 from enum import IntEnum
 from pathlib import Path
+from typing import ClassVar
 
 import numpy as np
 import numpy.typing as npt
@@ -156,6 +157,8 @@ class PolyAccelComponent(HwComponent):
     Coefficients live in the regmap and must be configured before launch
     (they default to zeros, which produces an all-zero output stream).
     """
+
+    cpp_kernel_name: ClassVar[str | None] = "poly"
 
     in_bw:        HwParam[int] = 32
     out_bw:       HwParam[int] = 32
