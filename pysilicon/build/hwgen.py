@@ -656,6 +656,35 @@ def _collect_hooks(tree: HwStmt) -> list:
     return result
 
 
+def _collect_hooks_with_params(tree: HwStmt) -> list[tuple[object, list[str]]]:
+    """Walk ``tree`` and return ``[(method, template_params)]`` per unique hook.
+
+    Validates that every call site of a given hook produces the same
+    ``template_params``; raises ``SynthesisError`` on mismatch.
+    """
+    seen: dict[int, tuple[object, list[str]]] = {}
+
+    def visit(node):
+        if isinstance(node, FunctionStmt):
+            key = id(node.method)
+            tparams = hook_template_params(node)
+            if key not in seen:
+                seen[key] = (node.method, tparams)
+            else:
+                _, existing = seen[key]
+                if existing != tparams:
+                    from pysilicon.build.hwcodegen import SynthesisError
+                    raise SynthesisError(
+                        f"Hook '{node.method.__name__}' called with inconsistent "
+                        f"template params: {existing} vs {tparams}"
+                    )
+        for child in _stmt_children(node):
+            visit(child)
+
+    visit(tree)
+    return list(seen.values())
+
+
 def _kernel_signature_decl(comp) -> str:
     """Same as :func:`kernel_signature` but without pragmas; trailing ``;``."""
     full = kernel_signature(comp)
@@ -670,6 +699,11 @@ def header_to_cpp(comp) -> str:
     forward declarations are grouped inside a single
     ``namespace <ns> { ... }`` block when one is resolved; an opt-out
     component (``cpp_namespace = ""``) leaves them in global.
+
+    Each templated hook (one whose call site passes ``HwParam``-driven
+    stream endpoints) gets its decl prefixed with ``template <int ...>``
+    and triggers an ``#include "<component>_<hook>_impl.tpp"`` line at
+    the bottom of the header.
     """
     from pysilicon.build.hwcodegen import extract_kernel
 
@@ -681,18 +715,30 @@ def header_to_cpp(comp) -> str:
         lines.append(f'#include "include/{s.cpp_class_name().lower()}.h"')  # type: ignore[attr-defined]
     lines.append('')
     lines.append(_kernel_signature_decl(comp))
-    hooks = _collect_hooks(tree)
+
+    hooks = _collect_hooks_with_params(tree)
     if hooks:
         ns = resolved_namespace(type(comp))
         lines.append('')
-        if ns is None:
-            for hook in hooks:
-                lines.append(f"{hook_signature_str(hook)};")
-        else:
+        indent = "    " if ns is not None else ""
+        if ns is not None:
             lines.append(f"namespace {ns} {{")
-            for hook in hooks:
-                lines.append(f"    {hook_signature_str(hook)};")
+        for hook, tparams in hooks:
+            decl = hook_signature_str(hook, template_params=tparams)
+            decl_lines = decl.split("\n")
+            decl_lines[-1] += ";"
+            for line in decl_lines:
+                lines.append(f"{indent}{line}")
+        if ns is not None:
             lines.append("}")
+
+    templated = [(h, p) for h, p in hooks if p]
+    if templated:
+        lines.append("")
+        kn = cpp_kernel_name(type(comp))
+        for hook, _ in templated:
+            lines.append(f'#include "{kn}_{hook.__name__}_impl.tpp"')
+
     return "\n".join(lines) + "\n"
 
 

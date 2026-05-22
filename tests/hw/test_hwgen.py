@@ -20,8 +20,11 @@ from pysilicon.hw.interface import StreamIFSlave as _StreamIFSlave
 from pysilicon.hw.synth import synthesizable as _synthesizable
 from pysilicon.simulation.simobj import ProcessGen as _ProcessGen
 from pysilicon.simulation.simulation import Simulation
+from tests.hw.test_resolve import DemoCmdHdr
 from tests.hw.test_resolve import DemoCmdHdr as _DemoCmdHdr
+from tests.hw.test_resolve import DemoError
 from tests.hw.test_resolve import DemoError as _DemoError
+from tests.hw.test_resolve import DemoErrorField
 
 
 class DemoCmdType(IntEnum):
@@ -586,6 +589,62 @@ def _hook_with_stream(
     yield None
 
 
+from dataclasses import dataclass as _dataclass
+from typing import ClassVar
+
+from pysilicon.hw.regmap import (
+    Bit as _Bit,
+    RegAccess as _RegAccess,
+    RegField as _RegField,
+    VitisRegMap as _VitisRegMap,
+    VitisRegMapMMIFSlave as _VitisRegMapMMIFSlave,
+)
+
+
+@_dataclass
+class _TmplComp(HwComponent):
+    """Component whose synthesizable hook takes a stream arg (triggers templating)."""
+
+    cpp_kernel_name: ClassVar[str | None] = "tcomp"
+    in_bw: HwParam[int] = 32
+
+    def __post_init__(self) -> None:
+        super().__post_init__()
+        self.s_in = _StreamIFSlave(
+            name=f'{self.name}_s_in', sim=self.sim, bitwidth=self.in_bw,
+        )
+        self.m_out = _StreamIFMaster(
+            name=f'{self.name}_m_out', sim=self.sim, bitwidth=self.in_bw,
+        )
+        self.regmap = _VitisRegMap({
+            "halted": _RegField(_Bit, _RegAccess.R),
+            "error": _RegField(DemoErrorField, _RegAccess.R),
+        })
+        self.s_lite = _VitisRegMapMMIFSlave(
+            name=f'{self.name}_s_lite', sim=self.sim, bitwidth=32,
+            regmap=self.regmap, on_start=self.on_start,
+        )
+        for ep in (self.s_in, self.m_out, self.s_lite):
+            self.add_endpoint(ep)
+
+    def on_start(self) -> _ProcessGen[None]:
+        while True:
+            cmd: DemoCmdHdr = yield from self.s_in.get(DemoCmdHdr)
+            if cmd.cmd_type == 0:
+                return
+            yield from self.process(cmd, self.s_in)
+            return
+
+    @_synthesizable
+    def process(
+        self,
+        cmd: DemoCmdHdr,
+        s_in: _StreamIFSlave,
+    ) -> _ProcessGen[DemoError]:
+        yield self.env.timeout(0)
+        return DemoError.OK
+
+
 @_synthesizable
 def _hook_two_streams(
     self,
@@ -1055,4 +1114,37 @@ def test_validate_single_call_site_inconsistent_raises():
     ])
     with pytest.raises(SynthesisError, match="inconsistent"):
         _validate_single_call_site(tree, method, ["in_bw"])
+
+
+# ---------------------------------------------------------------------------
+# Hook-template Phase 3: header_to_cpp emits templated decls + .tpp includes
+# ---------------------------------------------------------------------------
+
+def test_header_to_cpp_non_templated_hook_no_tpp_include():
+    """DemoComponent's process hook (no stream args) keeps the existing shape."""
+    from pysilicon.build.hwgen import header_to_cpp
+    from tests.hw.test_resolve import DemoComponent
+
+    comp = DemoComponent(name="demo", sim=Simulation())
+    hpp = header_to_cpp(comp)
+    assert "ap_uint<8> process(DemoCmdHdr cmd);" in hpp
+    # No tpp include for a non-templated hook.
+    assert "_impl.tpp" not in hpp
+    # No template prefix either.
+    assert "template <" not in hpp.split("namespace demo {")[1]
+
+
+def test_header_to_cpp_templated_hook_emits_template_and_tpp_include():
+    """A hook that takes a HwParam-driven stream endpoint gets templated."""
+    from pysilicon.build.hwgen import header_to_cpp
+
+    comp = _TmplComp(name="tcomp", sim=Simulation())
+    hpp = header_to_cpp(comp)
+    # Inside the namespace block: template prefix + templated arg type.
+    assert "template <int in_bw>" in hpp
+    assert "axi4s_word<in_bw>" in hpp
+    # .tpp include at the bottom for this hook.
+    assert '#include "tcomp_process_impl.tpp"' in hpp
+    # The include must come AFTER the templated decl.
+    assert hpp.index("template <int in_bw>") < hpp.index("tcomp_process_impl.tpp")
 
