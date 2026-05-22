@@ -107,6 +107,8 @@ class RegField:
     on_write:    Callable[[str, int, int], None] | None = None
     on_read:     Callable[[str, int, int], None] | None = None
     offset:      int | None = None
+    is_vitis_auto: bool = False   # True for fields Vitis auto-generates (ap_start, etc.)
+                                  # — present in PySim but skipped in C++ codegen.
 
 
 # ---------------------------------------------------------------------------
@@ -379,6 +381,7 @@ class VitisRegMap(RegMap):
                 RegAccess.W1S,
                 offset=0x00,
                 description="Start the kernel (Vitis ap_ctrl_hs)",
+                is_vitis_auto=True,
             )
         }
         super().__init__({**ctrl, **fields}, bitwidth=bitwidth)
