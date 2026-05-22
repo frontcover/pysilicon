@@ -10,6 +10,7 @@ from pathlib import Path
 import numpy as np
 
 from pysilicon.build.build import BuildConfig, BuildDag, BuildStep, SourceStep
+from pysilicon.build.hwcodegen_steps import HlsCodegenStep
 from pysilicon.build.streamutils import StreamUtilsStep
 from pysilicon.hw.arrayutils import ArrayUtilsStep, read_uint32_file, write_uint32_file
 from pysilicon.hw.clock import Clock
@@ -194,7 +195,10 @@ class ValidateTimingStep(BuildStep):
 @dataclass(kw_only=True)
 class CSimStep(BuildStep):
     description = "Invoke Vitis HLS C-simulation."
-    consumes    = ["poly_cpp", "poly_hpp", "poly_tb", "include_dir", "data_dir"]
+    consumes    = [
+        "handwritten_poly_cpp", "handwritten_poly_hpp", "handwritten_poly_tb",
+        "include_dir", "data_dir",
+    ]
     produces    = {"csim_data_dir": "data_dir"}
     params      = {"live_output": False, "clk_freq": 100e6}
 
@@ -280,7 +284,10 @@ class ValidateCSimStep(BuildStep):
 @dataclass(kw_only=True)
 class CSynthStep(BuildStep):
     description = "Run Vitis HLS C-synthesis and RTL co-simulation."
-    consumes    = ["poly_cpp", "poly_hpp", "include_dir", "csim_data_dir"]
+    consumes    = [
+        "handwritten_poly_cpp", "handwritten_poly_hpp",
+        "include_dir", "csim_data_dir",
+    ]
     produces    = {"report_dir": Path("pysilicon_poly_proj/solution1")}
     params      = {"live_output": False, "clk_freq": 100e6}
 
@@ -370,20 +377,28 @@ def build_poly_dag() -> BuildDag:
         description="Python source for schemas, accelerator, and testbench.",
     ))
     dag.add(SourceStep(
-        artifact="poly_cpp", path=_SOURCE_DIR / "poly.cpp",
+        artifact="handwritten_poly_cpp", path=_SOURCE_DIR / "poly.cpp",
         description="Vitis HLS C++ top-level kernel implementation.",
     ))
     dag.add(SourceStep(
-        artifact="poly_hpp", path=_SOURCE_DIR / "poly.hpp",
+        artifact="handwritten_poly_hpp", path=_SOURCE_DIR / "poly.hpp",
         description="C++ header declaring the kernel interface.",
     ))
     dag.add(SourceStep(
-        artifact="poly_tb", path=_SOURCE_DIR / "poly_tb.cpp",
+        artifact="handwritten_poly_tb", path=_SOURCE_DIR / "poly_tb.cpp",
         description="C++ testbench driving the Vitis kernel.",
     ))
     # Build steps — instance names (snake_case) for nicer CLI output
     dag.add(BuildInputsStep(name="build_inputs"))
     dag.add(GenCppStep(name="gen_cpp"))
+    # HLS codegen for inspection — writes into gen/ alongside the hand-written
+    # poly.cpp/poly.hpp.  Not consumed by csim/csynth in this phase.
+    dag.add(HlsCodegenStep(
+        name="gen_kernel",
+        comp_class=PolyAccelComponent,
+        source_artifact="poly_source",
+        output_dir="gen",
+    ))
     dag.add(PySimStep(name="py_sim"))
     dag.add(ValidateTimingStep(name="validate_timing"))
     dag.add(CSimStep(name="csim"))
