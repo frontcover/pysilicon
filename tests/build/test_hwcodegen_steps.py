@@ -3,6 +3,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from pysilicon.build.build import BuildConfig
 from pysilicon.build.hwcodegen_steps import HlsCodegenStep
 from pysilicon.build.hwgen import kernel_files_to_str
@@ -220,3 +222,75 @@ def test_dag_force_reruns_step_but_impl_stays_sticky(tmp_path: Path):
     results = dag.run(config, force=True)
     assert results["HlsCodegenStep"].skipped is False
     assert impl.read_text(encoding="utf-8") == custom
+
+
+# ---------------------------------------------------------------------------
+# Hook-template Phase 5: per-hook extension awareness + stale-file detection
+# ---------------------------------------------------------------------------
+
+def _make_tmpl_step(tmp_path: Path):
+    """A HlsCodegenStep that targets the templated-hook fixture from test_hwgen."""
+    from tests.hw.test_hwgen import _TmplComp
+    return HlsCodegenStep(
+        comp_class=_TmplComp, source_artifact="demo_src", output_dir="gen",
+    )
+
+
+def test_produces_uses_tpp_extension_for_templated_hook():
+    from tests.hw.test_hwgen import _TmplComp
+    step = HlsCodegenStep(comp_class=_TmplComp, source_artifact="src")
+    produces = step.produces
+    assert produces["tcomp_process_impl"] == Path("tcomp_process_impl.tpp")
+    assert "tcomp_hpp" in produces
+    assert "tcomp_cpp" in produces
+
+
+def test_run_writes_tpp_for_templated_hook(tmp_path: Path):
+    step = _make_tmpl_step(tmp_path)
+    step.run(BuildConfig(root_dir=tmp_path))
+    tpp = tmp_path / "gen" / "tcomp_process_impl.tpp"
+    assert tpp.exists()
+    content = tpp.read_text(encoding="utf-8")
+    assert "template <int in_bw>" in content
+    assert "// TODO: implement process" in content
+
+
+def test_run_sticky_preserves_tpp_on_rerun(tmp_path: Path):
+    step = _make_tmpl_step(tmp_path)
+    config = BuildConfig(root_dir=tmp_path)
+    step.run(config)
+
+    tpp = tmp_path / "gen" / "tcomp_process_impl.tpp"
+    custom = "// user-edited tpp content\n"
+    tpp.write_text(custom, encoding="utf-8")
+
+    step.run(config)
+    assert tpp.read_text(encoding="utf-8") == custom
+
+
+def test_run_stale_cpp_when_hook_now_templated_raises(tmp_path: Path):
+    """A leftover .cpp from a prior non-templated state must trigger an error."""
+    step = _make_tmpl_step(tmp_path)
+    out_dir = tmp_path / "gen"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    stale = out_dir / "tcomp_process_impl.cpp"
+    stale.write_text("// stale non-templated impl\n", encoding="utf-8")
+
+    with pytest.raises(RuntimeError, match="Stale impl file"):
+        step.run(BuildConfig(root_dir=tmp_path))
+
+
+def test_run_stale_tpp_when_hook_now_non_templated_raises(tmp_path: Path):
+    """And the reverse — a leftover .tpp must trigger an error for a .cpp hook."""
+    step = HlsCodegenStep(
+        comp_class=DemoComponent,
+        source_artifact="demo_src",
+        output_dir="gen",
+    )
+    out_dir = tmp_path / "gen"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    stale = out_dir / "demo_process_impl.tpp"
+    stale.write_text("// stale templated impl\n", encoding="utf-8")
+
+    with pytest.raises(RuntimeError, match="Stale impl file"):
+        step.run(BuildConfig(root_dir=tmp_path))
