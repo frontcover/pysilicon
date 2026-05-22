@@ -113,6 +113,39 @@ class SynthContext:
         return cls(component=comp, params=params)
 
 
+class HwParamValue(int):
+    """Int subclass that remembers which ``HwParam`` field it was bound to.
+
+    Created automatically by :meth:`HwComponent.__post_init__` when wrapping
+    raw values for ``HwParam``-annotated fields. Behaves as a plain ``int``
+    for arithmetic, comparison, and protocol checks. Codegen inspects the
+    ``.param_name`` attribute to decide between emitting a template name vs
+    a literal value.
+    """
+
+    param_name: str  # type-only; the runtime attribute is set in __new__
+
+    def __new__(cls, value: int, param_name: str) -> "HwParamValue":
+        obj = super().__new__(cls, int(value))
+        obj.param_name = param_name
+        return obj
+
+    def __repr__(self) -> str:
+        return f"HwParamValue({int(self)!r}, {self.param_name!r})"
+
+    def __str__(self) -> str:
+        # Format / print / f-string must show the integer value, not the
+        # diagnostic repr — codegen f-strings that haven't yet been migrated
+        # to ``_stream_template_arg`` rely on this to keep emitting literals.
+        # Going through a plain int sidesteps int's __str__/__repr__ slot
+        # collision on subclasses that override __repr__.
+        return str(int(self))
+
+    def __format__(self, spec: str) -> str:
+        # Same reason as __str__: f-string formatting must yield the int.
+        return format(int(self), spec)
+
+
 class HwComponent(Component):
     """Base class for synthesizable hardware components.
 
@@ -132,3 +165,38 @@ class HwComponent(Component):
     The kernel function itself is always emitted in the global namespace
     (Vitis HLS requires this).
     """
+
+    def __post_init__(self) -> None:
+        # Wrap HwParam field values BEFORE super().__post_init__ so any
+        # subclass setup that reads self.<param> after super() sees
+        # HwParamValue instances.
+        self._wrap_hw_params()
+        super().__post_init__()
+
+    def _wrap_hw_params(self) -> None:
+        """Replace each ``HwParam[T]`` field value with a ``HwParamValue`` wrapper."""
+        for klass in type(self).__mro__:
+            if klass is HwComponent:
+                break
+            if not issubclass(klass, HwComponent):
+                break
+            raw_ann = vars(klass).get('__annotations__', {})
+            mod = sys.modules.get(klass.__module__)
+            globs: dict = vars(mod) if mod is not None else {}
+            for name, hint_val in raw_ann.items():
+                if isinstance(hint_val, str):
+                    try:
+                        hint = eval(hint_val, globs)  # noqa: S307
+                    except Exception:
+                        continue
+                else:
+                    hint = hint_val
+                if typing.get_origin(hint) is not HwParam:
+                    continue
+                value = getattr(self, name, None)
+                if value is None or isinstance(value, HwParamValue):
+                    continue
+                # object.__setattr__ bypasses the Phase 3 immutability guard.
+                object.__setattr__(
+                    self, name, HwParamValue(int(value), name)
+                )
