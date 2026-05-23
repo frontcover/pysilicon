@@ -620,8 +620,16 @@ def _collect_schemas(tree: HwStmt, comp) -> list[type]:
 
     Sources walked:
       - ``HwVar.typ`` on every ``stmt.outputs`` in the resolved tree.
+      - Hook signatures: arg and return annotations of every ``FunctionStmt``
+        method.  ``ProcessGen[T]`` returns unwrap to ``T``; stream-endpoint
+        types are skipped.
       - Every regmap field schema (if the component carries a regmap).
     """
+    import collections.abc
+    import typing as _typing
+
+    from pysilicon.hw.interface import StreamIFMaster, StreamIFSlave
+
     def _has_header(typ) -> bool:
         return (
             isinstance(typ, type)
@@ -630,6 +638,30 @@ def _collect_schemas(tree: HwStmt, comp) -> list[type]:
         )
 
     schemas: dict[str, type] = {}
+
+    def _add(typ) -> None:
+        if _has_header(typ):
+            schemas[typ.cpp_class_name()] = typ
+
+    def _add_hook_annotations(method) -> None:
+        try:
+            hints = _typing.get_type_hints(method)
+        except Exception:
+            return
+        for name, hint in hints.items():
+            if name == 'return':
+                # ProcessGen[T] = Generator[Event, Any, T]; unwrap to T.
+                if _typing.get_origin(hint) is collections.abc.Generator:
+                    gen_args = _typing.get_args(hint)
+                    if len(gen_args) == 3:
+                        hint = gen_args[2]
+            # Stream-endpoint arg types are not schemas; skip them.
+            if (
+                isinstance(hint, type)
+                and issubclass(hint, (StreamIFSlave, StreamIFMaster))
+            ):
+                continue
+            _add(hint)
 
     def visit(node):
         if isinstance(node, WhileStmt):
@@ -642,15 +674,15 @@ def _collect_schemas(tree: HwStmt, comp) -> list[type]:
             if node.if_false is not None:
                 visit(node.if_false)
         for v in getattr(node, 'outputs', []):
-            if _has_header(v.typ):
-                schemas[v.typ.cpp_class_name()] = v.typ
+            _add(v.typ)
+        if isinstance(node, FunctionStmt):
+            _add_hook_annotations(node.method)
 
     visit(tree)
     regmap_slave = _discover_regmap(comp)
     if regmap_slave is not None:
         for fld in regmap_slave.regmap._fields.values():
-            if _has_header(fld.schema):
-                schemas[fld.schema.cpp_class_name()] = fld.schema
+            _add(fld.schema)
     return list(schemas.values())
 
 

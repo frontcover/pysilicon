@@ -1266,3 +1266,86 @@ def test_kernel_signature_raw_array_regmap_field():
     sig = kernel_signature(comp)
     assert "float coeffs[4]" in sig
     assert "CoeffArray& coeffs" not in sig
+
+
+# ---------------------------------------------------------------------------
+# Phase-12a Phase 2: _collect_schemas walks hook signatures
+# ---------------------------------------------------------------------------
+
+from pysilicon.hw.dataschema import DataList as _DataList
+from pysilicon.hw.dataschema import IntField as _IntField
+
+
+_TxIdField = _IntField.specialize(bitwidth=16, signed=False)
+
+
+class _ExtraHdr(_DataList):
+    """A DataList only ever referenced via a hook arg annotation."""
+    elements = {
+        "tx_id": {"schema": _TxIdField},
+    }
+
+
+@_synthesizable
+def _hook_with_schema_arg(self, hdr: _ExtraHdr) -> _ProcessGen[None]:
+    yield None
+
+
+@_synthesizable
+def _hook_returning_schema(self, x: _DemoCmdHdr) -> _ProcessGen[_ExtraHdr]:
+    yield None
+    return _ExtraHdr()
+
+
+@_synthesizable
+def _hook_stream_only(self, s_in: _StreamIFSlave) -> _ProcessGen[None]:
+    yield None
+
+
+@_synthesizable
+def _hook_mixed_args(
+    self,
+    cmd: _DemoCmdHdr,
+    s_in: _StreamIFSlave,
+    hdr: _ExtraHdr,
+) -> _ProcessGen[None]:
+    yield None
+
+
+def _seq_with_hook(method):
+    from pysilicon.hw.hwstmt import FunctionStmt, SeqStmt
+    return SeqStmt(stmts=[
+        FunctionStmt(method=method, inputs=[], outputs=[]),
+    ])
+
+
+def _bare_comp():
+    return HwComponent(name="c", sim=Simulation())
+
+
+def test_collect_schemas_picks_up_hook_arg_schema():
+    from pysilicon.build.hwgen import _collect_schemas
+    schemas = _collect_schemas(_seq_with_hook(_hook_with_schema_arg), _bare_comp())
+    assert _ExtraHdr in schemas
+
+
+def test_collect_schemas_unwraps_processgen_return():
+    from pysilicon.build.hwgen import _collect_schemas
+    schemas = _collect_schemas(_seq_with_hook(_hook_returning_schema), _bare_comp())
+    assert _DemoCmdHdr in schemas
+    assert _ExtraHdr in schemas
+
+
+def test_collect_schemas_skips_stream_args():
+    from pysilicon.build.hwgen import _collect_schemas
+    schemas = _collect_schemas(_seq_with_hook(_hook_stream_only), _bare_comp())
+    assert _DemoCmdHdr not in schemas
+    assert _ExtraHdr not in schemas
+
+
+def test_collect_schemas_mixed_hook_args():
+    from pysilicon.build.hwgen import _collect_schemas
+    schemas = _collect_schemas(_seq_with_hook(_hook_mixed_args), _bare_comp())
+    assert _DemoCmdHdr in schemas
+    assert _ExtraHdr in schemas
+
