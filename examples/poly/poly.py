@@ -200,7 +200,8 @@ class PolyAccelComponent(HwComponent):
             if cmd_hdr.cmd_type == PolyCmdType.END:
                 self.logger.log(event='proc_end', job=self._job)
                 return
-            err = yield from self.evaluate(cmd_hdr, self.s_in, self.m_out)
+            coeffs = self.regmap.get("coeffs")
+            err = yield from self.evaluate(cmd_hdr, self.s_in, self.m_out, coeffs)
             self._inc_job()
             if err != PolyError.NO_ERROR:
                 self.regmap.set("error",  err)
@@ -214,6 +215,7 @@ class PolyAccelComponent(HwComponent):
         cmd_hdr: PolyCmdHdr,
         s_in: StreamIFSlave,
         m_out: StreamIFMaster,
+        coeffs: CoeffArray,
     ) -> ProcessGen[PolyError]:
         """Process one DATA transaction. Returns NO_ERROR or an error code."""
         resp_hdr = PolyRespHdr()
@@ -224,10 +226,10 @@ class PolyAccelComponent(HwComponent):
         self.logger.log(event='samp_read_begin', job=self._job)
         samp_in, tstart = yield from s_in.get_pipelined(Float32, count=cmd_hdr.nsamp)
 
-        coeffs = self.regmap.get("coeffs").val
+        coeffs_arr = coeffs.val
         y = np.zeros_like(samp_in, dtype=np.float32)
         power = np.ones_like(samp_in, dtype=np.float32)
-        for coeff in coeffs:
+        for coeff in coeffs_arr:
             y += coeff * power
             power *= samp_in
 

@@ -391,7 +391,7 @@ def test_extract_poly_accel_on_start():
     from poly import PolyAccelComponent
     from pysilicon.build.hwcodegen import extract_kernel
     from pysilicon.hw.interface import StreamGetStmt
-    from pysilicon.hw.regmap import RegMapSetStmt
+    from pysilicon.hw.regmap import RegMapGetStmt, RegMapSetStmt
 
     comp = PolyAccelComponent(name='p', sim=Simulation())
     tree = extract_kernel(comp)
@@ -403,19 +403,22 @@ def test_extract_poly_accel_on_start():
     # Expected (logging / _inc_job dropped via @sim_only):
     #   0: cmd_hdr = yield from self.s_in.get(PolyCmdHdr)   → StreamGetStmt
     #   1: if cmd_hdr.cmd_type == PolyCmdType.END: return    → CaseStmt(op='==')
-    #   2: err = yield from self.evaluate(...)              → FunctionStmt
-    #   3: if err != PolyError.NO_ERROR: ...                → CaseStmt(op='!=')
+    #   2: coeffs = self.regmap.get("coeffs")                → RegMapGetStmt
+    #   3: err = yield from self.evaluate(...)              → FunctionStmt
+    #   4: if err != PolyError.NO_ERROR: ...                → CaseStmt(op='!=')
     assert isinstance(body[0], StreamGetStmt)
 
     assert isinstance(body[1], CaseStmt) and body[1].op == '=='
     end_branch = body[1].if_true.stmts
     assert any(isinstance(s, ReturnStmt) for s in end_branch)
 
-    assert isinstance(body[2], FunctionStmt)
-    assert body[2].method.__name__ == 'evaluate'
+    assert isinstance(body[2], RegMapGetStmt)
 
-    assert isinstance(body[3], CaseStmt) and body[3].op == '!='
-    halt_branch = body[3].if_true.stmts
+    assert isinstance(body[3], FunctionStmt)
+    assert body[3].method.__name__ == 'evaluate'
+
+    assert isinstance(body[4], CaseStmt) and body[4].op == '!='
+    halt_branch = body[4].if_true.stmts
     regmap_sets = [s for s in halt_branch if isinstance(s, RegMapSetStmt)]
     assert len(regmap_sets) == 3       # error, tx_id, halted
     assert any(isinstance(s, ReturnStmt) for s in halt_branch)

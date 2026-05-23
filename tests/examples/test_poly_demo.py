@@ -162,8 +162,9 @@ class _FailingPolyAccelComponent(PolyAccelComponent):
     (resp_hdr + samp_out written before returning).
     """
 
-    def evaluate(self, cmd_hdr, s_in, m_out):  # type: ignore[override]
+    def evaluate(self, cmd_hdr, s_in, m_out, coeffs):  # type: ignore[override]
         from pysilicon.hw.arrayutils import array
+        del coeffs  # injected for signature parity; this stub forces an error path.
         resp_hdr = PolyRespHdr()
         resp_hdr.tx_id = cmd_hdr.tx_id
         yield from m_out.write(resp_hdr)
