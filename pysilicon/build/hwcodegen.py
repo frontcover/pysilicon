@@ -194,8 +194,8 @@ class HwStmtExtractor:
         # a, b = self.hook(var1, var2)   — direct call, no yield from
         if isinstance(node.value, ast.Call):
             method = self._resolve_method(node.value.func)
-            self._require_synthesizable(method, node)
             self._check_not_pipelined(method, node)
+            self._require_synthesizable(method, node)
             assert method is not None
             inputs = self._resolve_call_args(node.value)
             outputs = self._make_output_vars(node.targets)
@@ -235,8 +235,8 @@ class HwStmtExtractor:
             method = self._resolve_method(val.func)
             if getattr(method, '_is_sim_only', False):
                 return None  # @sim_only — skip during synthesis
-            self._require_synthesizable(method, node)
             self._check_not_pipelined(method, node)
+            self._require_synthesizable(method, node)
             assert method is not None
             inputs = self._resolve_call_args(val)
             return self._make_call_stmt(method, inputs, [])
@@ -321,8 +321,8 @@ class HwStmtExtractor:
         if not isinstance(call_node, ast.Call):
             raise SynthesisError("'yield from' must be followed by a call expression")
         method = self._resolve_method(call_node.func)
-        self._require_synthesizable(method, call_node)
         self._check_not_pipelined(method, call_node)
+        self._require_synthesizable(method, call_node)
         assert method is not None
         inputs = self._resolve_call_args(call_node)
         outputs = self._make_output_vars(targets)
@@ -341,8 +341,8 @@ class HwStmtExtractor:
                 f"(line {getattr(parent, 'lineno', '?')})"
             )
         method = self._resolve_method(call_node.func)
-        self._require_synthesizable(method, parent)
         self._check_not_pipelined(method, parent)
+        self._require_synthesizable(method, parent)
         assert method is not None
         inputs = self._resolve_call_args(call_node)
         return self._make_call_stmt(method, inputs, [])

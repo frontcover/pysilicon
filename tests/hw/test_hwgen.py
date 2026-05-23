@@ -473,15 +473,6 @@ def test_cpp_type_dataschema_subclass_uses_cpp_class_name():
     assert cpp_type(MyMsg) == "MyMsg"
 
 
-def test_cpp_type_schemaarray_placeholder():
-    from pysilicon.build.hwgen import cpp_type
-    from pysilicon.hw.dataschema import FloatField
-    Float32 = FloatField.specialize(bitwidth=32)
-    out = cpp_type(('SchemaArray', Float32))
-    assert "float[MAX_N]" in out
-    assert "TODO" in out
-
-
 def test_cpp_type_none_raises():
     from pysilicon.build.hwgen import cpp_type
     with pytest.raises(RuntimeError):

@@ -87,15 +87,11 @@ def _populate_output_types(stmt, comp):
     as ``None`` and are refined by later phases.
     """
     from pysilicon.hw.hwstmt import FunctionStmt
-    from pysilicon.hw.interface import StreamGetPipelinedStmt, StreamGetStmt
+    from pysilicon.hw.interface import StreamGetStmt
     from pysilicon.hw.regmap import RegMapGetStmt
 
     if isinstance(stmt, StreamGetStmt) and stmt.outputs:
         stmt.outputs[0].typ = stmt.inputs[0]
-        return
-    if isinstance(stmt, StreamGetPipelinedStmt) and stmt.outputs:
-        # 2-tuple placeholder until SchemaArray[T] typing exists.
-        stmt.outputs[0].typ = ('SchemaArray', stmt.inputs[0])
         return
     if isinstance(stmt, RegMapGetStmt) and stmt.outputs:
         field_name = stmt.inputs[0]

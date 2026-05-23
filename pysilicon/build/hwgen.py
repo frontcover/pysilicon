@@ -261,14 +261,10 @@ def cpp_type(typ) -> str:
     - ``EnumField`` (and bare ``IntEnum`` subclasses) → ``ap_uint<8>`` (v1)
     - ``FloatField`` (bitwidth 32) → ``float``; (bitwidth 64) → ``double``
     - Other ``DataSchema`` subclasses → ``cls.cpp_class_name()``
-    - The 2-tuple ``('SchemaArray', elem_type)`` → ``<elem>[MAX_N] /* TODO ... */``
     - ``None`` → ``RuntimeError`` (unresolved type leaked through)
     """
     if typ is None:
         raise RuntimeError("cpp_type called with None — unresolved HwVar leaked")
-    if isinstance(typ, tuple) and len(typ) == 2 and typ[0] == 'SchemaArray':
-        inner = cpp_type(typ[1])
-        return f"{inner}[MAX_N] /* TODO: real SchemaArray typing */"
     if isinstance(typ, type) and issubclass(typ, DataSchema):
         if issubclass(typ, IntField):
             bw = typ.get_bitwidth()

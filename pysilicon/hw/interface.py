@@ -410,16 +410,6 @@ class StreamDrainStmt(SynthCallStmt):
         return "StreamDrainStmt()"
 
 
-@dataclass
-class StreamGetPipelinedStmt(SynthCallStmt):
-    """IR node for StreamIFSlave.get_pipelined() — returns (data, tstart)."""
-
-
-@dataclass
-class StreamWritePipelinedStmt(SynthCallStmt):
-    """IR node for StreamIFMaster.write_pipelined(data, t_out_start, ii)."""
-
-
 # ---------------------------------------------------------------------------
 # Stream interface
 # ---------------------------------------------------------------------------
@@ -550,7 +540,6 @@ class StreamIFSlave(QueuedTransferIFSlave):
 
         return schema_type().deserialize(raw_words, word_bw=self.bitwidth)
 
-    @synthesizable(synth_fn=_not_implemented_synth, stmt_class=StreamGetPipelinedStmt)
     def get_pipelined(self, schema_type=None, count=None):
         """Pull the next burst and return ``(data, tstart)`` where ``tstart``
         is the SimPy time when the first word of the burst arrived.
@@ -623,7 +612,6 @@ class StreamIFMaster(QueuedTransferIFMaster):
             )
         yield self.process(self._make_write_call(raw_words))
 
-    @synthesizable(synth_fn=_not_implemented_synth, stmt_class=StreamWritePipelinedStmt)
     def write_pipelined(self, data, t_out_start: float):
         """Write a burst modelling pipeline overlap via ``t_out_start``.
 
