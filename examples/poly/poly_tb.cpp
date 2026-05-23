@@ -3,9 +3,16 @@
 #include <string>
 #include <stdexcept>
 
-#include "poly.hpp"
+#include "gen/poly.hpp"
 #include "include/float32_array_utils_tb.h"
 #include "include/streamutils_tb.h"
+
+// The generated `gen/poly.hpp` is templated and does not provide the
+// helper aliases the previous hand-written header exposed.  Reintroduce
+// them locally for the testbench.
+static const int WORD_BW = 32;
+static const int MAX_NSAMP = 128;
+using axis_word_t = streamutils::axi4s_word<WORD_BW>;
 
 int main(int argc, char** argv) {
     const std::string data_dir = (argc > 1) ? argv[1] : "data";
@@ -38,31 +45,33 @@ int main(int argc, char** argv) {
     // kernel as a synchronous function call, so the input stream must be
     // fully populated before invocation.
     // -----------------------------------------------------------------------
-    hls::stream<axis_word_t> in_stream;
-    hls::stream<axis_word_t> out_stream;
+    hls::stream<axis_word_t> s_in;
+    hls::stream<axis_word_t> m_out;
 
-    data_hdr.write_axi4_stream<WORD_BW>(in_stream, true);
+    data_hdr.write_axi4_stream<WORD_BW>(s_in, true);
 
     static const int pf = float32_array_utils::pf<WORD_BW>();
     for (int i = 0; i < nsamp; i += pf) {
         const int nrem = nsamp - i;
         const bool tlast = (nrem <= pf);
         float32_array_utils::write_axi4_stream_elem<WORD_BW>(
-            in_stream, samp_in + i, tlast, nrem);
+            s_in, samp_in + i, tlast, nrem);
     }
 
-    end_hdr.write_axi4_stream<WORD_BW>(in_stream, true);
+    end_hdr.write_axi4_stream<WORD_BW>(s_in, true);
 
     // -----------------------------------------------------------------------
     // AXI-Lite output scalars.  Vitis HLS emits each s_axilite-bound scalar
     // at the ABI level as a reference argument; C-sim passes them by
     // reference and reads them back after the kernel returns.
     // -----------------------------------------------------------------------
-    ap_uint<1>  halted       = 0;
-    ap_uint<8>  error_code   = 0;
-    ap_uint<16> tx_id_status = 0;
+    ap_uint<1>  halted = 0;
+    ap_uint<8>  error  = 0;
+    ap_uint<16> tx_id  = 0;
 
-    poly(in_stream, out_stream, coeffs, halted, error_code, tx_id_status);
+    // Generated kernel signature: poly(s_in, m_out, halted, error, tx_id, coeffs).
+    // Rely on C++ template deduction from axis_word_t to fix in_bw=out_bw=32.
+    poly(s_in, m_out, halted, error, tx_id, coeffs);
 
     // -----------------------------------------------------------------------
     // Drain the response stream.  For the single-DATA-transaction shape we
@@ -71,11 +80,11 @@ int main(int argc, char** argv) {
     // -----------------------------------------------------------------------
     PolyRespHdr resp_hdr;
     streamutils::tlast_status resp_hdr_tlast = streamutils::tlast_status::no_tlast;
-    resp_hdr.read_axi4_stream<WORD_BW>(out_stream, resp_hdr_tlast);
+    resp_hdr.read_axi4_stream<WORD_BW>(m_out, resp_hdr_tlast);
 
     streamutils::tlast_status samp_out_tlast = streamutils::tlast_status::no_tlast;
     float32_array_utils::read_axi4_stream<WORD_BW>(
-        out_stream, samp_out, samp_out_tlast, nsamp);
+        m_out, samp_out, samp_out_tlast, nsamp);
 
     streamutils::write_uint32_file(resp_hdr, (data_dir + "/resp_hdr_data.bin").c_str());
     float32_array_utils::write_uint32_file_array(
@@ -92,8 +101,8 @@ int main(int argc, char** argv) {
     status_ofs
         << "{\n"
         << "  \"halted\": " << (int)halted << ",\n"
-        << "  \"error\": "  << (int)error_code << ",\n"
-        << "  \"tx_id\": "  << (int)tx_id_status << "\n"
+        << "  \"error\": "  << (int)error << ",\n"
+        << "  \"tx_id\": "  << (int)tx_id << "\n"
         << "}\n";
 
     return 0;
