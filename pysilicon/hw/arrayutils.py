@@ -36,7 +36,6 @@ T = TypeVar('T', bound=DataSchema)
 def array(elem_type: type[T], data, static: bool = False) -> DataArray:
     """Construct a :class:`~pysilicon.hw.dataschema.DataArray` instance wrapping *data*.
 
-    Replaces the common ``SchemaArray(data=..., elem_type=...)`` pattern.
     Internally specializes :class:`~pysilicon.hw.dataschema.DataArray` with the
     runtime shape derived from *data* and returns an instance whose ``.val``
     holds the underlying NumPy array.

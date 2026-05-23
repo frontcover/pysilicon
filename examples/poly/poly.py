@@ -59,6 +59,7 @@ class CoeffArray(DataArray):
     element_type = Float32
     static = True
     max_shape = (ncoeff,)
+    cpp_storage = "raw"
 
 
 class PolyCmdHdr(DataList):
