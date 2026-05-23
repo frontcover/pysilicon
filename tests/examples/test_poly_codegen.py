@@ -12,7 +12,7 @@ def test_poly_cpp_kernel_name_is_poly():
 
 
 def test_poly_codegen_step_extracts_and_writes(tmp_path: Path):
-    """The gen_kernel step writes three files into <root>/gen/."""
+    """gen_kernel writes .hpp/.cpp into <root>/gen/ and the sticky .tpp at <root>/."""
     from examples.poly.poly_build import build_poly_dag
     from pysilicon.build.build import BuildConfig
 
@@ -22,7 +22,9 @@ def test_poly_codegen_step_extracts_and_writes(tmp_path: Path):
     gen_dir = tmp_path / "gen"
     assert (gen_dir / "poly.hpp").exists()
     assert (gen_dir / "poly.cpp").exists()
-    assert (gen_dir / "poly_evaluate_impl.tpp").exists()
+    # impl_dir="." → .tpp lands at the source-tree root, not under gen/.
+    assert (tmp_path / "poly_evaluate_impl.tpp").exists()
+    assert not (gen_dir / "poly_evaluate_impl.tpp").exists()
 
 
 def test_poly_kernel_signature_has_raw_coeffs_array():

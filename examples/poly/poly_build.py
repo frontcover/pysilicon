@@ -196,7 +196,7 @@ class ValidateTimingStep(BuildStep):
 class CSimStep(BuildStep):
     description = "Invoke Vitis HLS C-simulation."
     consumes    = [
-        "handwritten_poly_cpp", "handwritten_poly_hpp", "handwritten_poly_tb",
+        "poly_cpp", "poly_hpp", "poly_evaluate_impl", "poly_tb",
         "include_dir", "data_dir",
     ]
     produces    = {"csim_data_dir": "data_dir"}
@@ -285,7 +285,7 @@ class ValidateCSimStep(BuildStep):
 class CSynthStep(BuildStep):
     description = "Run Vitis HLS C-synthesis and RTL co-simulation."
     consumes    = [
-        "handwritten_poly_cpp", "handwritten_poly_hpp",
+        "poly_cpp", "poly_hpp", "poly_evaluate_impl",
         "include_dir", "csim_data_dir",
     ]
     produces    = {"report_dir": Path("pysilicon_poly_proj/solution1")}
@@ -377,27 +377,21 @@ def build_poly_dag() -> BuildDag:
         description="Python source for schemas, accelerator, and testbench.",
     ))
     dag.add(SourceStep(
-        artifact="handwritten_poly_cpp", path=_SOURCE_DIR / "poly.cpp",
-        description="Vitis HLS C++ top-level kernel implementation.",
-    ))
-    dag.add(SourceStep(
-        artifact="handwritten_poly_hpp", path=_SOURCE_DIR / "poly.hpp",
-        description="C++ header declaring the kernel interface.",
-    ))
-    dag.add(SourceStep(
-        artifact="handwritten_poly_tb", path=_SOURCE_DIR / "poly_tb.cpp",
+        artifact="poly_tb", path=_SOURCE_DIR / "poly_tb.cpp",
         description="C++ testbench driving the Vitis kernel.",
     ))
     # Build steps — instance names (snake_case) for nicer CLI output
     dag.add(BuildInputsStep(name="build_inputs"))
     dag.add(GenCppStep(name="gen_cpp"))
-    # HLS codegen for inspection — writes into gen/ alongside the hand-written
-    # poly.cpp/poly.hpp.  Not consumed by csim/csynth in this phase.
+    # HLS codegen — writes generated .hpp/.cpp into gen/ and the sticky
+    # poly_evaluate_impl.tpp into the source-tree root (impl_dir=".").
+    # The hand-written .tpp body is committed; gen/ is .gitignored.
     dag.add(HlsCodegenStep(
         name="gen_kernel",
         comp_class=PolyAccelComponent,
         source_artifact="poly_source",
         output_dir="gen",
+        impl_dir=".",
     ))
     dag.add(PySimStep(name="py_sim"))
     dag.add(ValidateTimingStep(name="validate_timing"))
