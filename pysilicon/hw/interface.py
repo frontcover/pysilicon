@@ -505,14 +505,14 @@ class StreamIFSlave(QueuedTransferIFSlave):
 
         New synthesizable calling convention::
 
-            cmd_hdr: PolyCmdHdr           = yield from self.s_in.get(PolyCmdHdr)
-            samp_in: SchemaArray[Float32] = yield from self.s_in.get(Float32, count=N)
+            cmd_hdr: PolyCmdHdr = yield from self.s_in.get(PolyCmdHdr)
+            samp_in: DataArray  = yield from self.s_in.get(Float32, count=N)
 
         When *schema_type* is ``None`` the raw ``Words`` array is returned
         (backward-compatible path).  When *schema_type* is provided, the word
         count is derived from ``schema_type.nwords_per_inst(bitwidth)`` and the
         result is deserialized before returning.  Supplying *count* returns a
-        :class:`~pysilicon.hw.arrayutils.SchemaArray` wrapping a NumPy array of
+        :class:`~pysilicon.hw.dataschema.DataArray` wrapping a NumPy array of
         *count* elements.
         """
         if schema_type is None:
@@ -585,23 +585,21 @@ class StreamIFMaster(QueuedTransferIFMaster):
     def write(self, data) -> ProcessGen[None]:
         """Write a burst to the bound interface, serializing typed data.
 
-        Accepts three forms:
+        Accepts two forms:
 
         * **Raw words** (``numpy.ndarray`` of uint32/uint64) — unchanged
           behaviour, forwarded directly to the interface.  Used by non-
           HwComponent callers such as PolyTB.
         * **DataSchema instance** — serialized via
           ``instance.serialize(word_bw=self.bitwidth)`` before writing.
-        * **SchemaArray instance** — serialized via
-          :func:`~pysilicon.hw.arrayutils.write_array` before writing.
+          :class:`~pysilicon.hw.dataschema.DataArray` instances are handled
+          this way (they are a :class:`~pysilicon.hw.dataschema.DataSchema`
+          subclass).
         """
         from pysilicon.hw.dataschema import DataSchema
-        from pysilicon.hw.arrayutils import SchemaArray, write_array
 
         if isinstance(data, DataSchema):
             raw_words = data.serialize(word_bw=self.bitwidth)
-        elif isinstance(data, SchemaArray):
-            raw_words = write_array(data, word_bw=self.bitwidth)
         else:
             raw_words = data  # already raw Words
 
@@ -626,12 +624,9 @@ class StreamIFMaster(QueuedTransferIFMaster):
         architecturally distinct from the compute ``proc_ii``.
         """
         from pysilicon.hw.dataschema import DataSchema
-        from pysilicon.hw.arrayutils import SchemaArray, write_array
 
         if isinstance(data, DataSchema):
             raw_words = data.serialize(word_bw=self.bitwidth)
-        elif isinstance(data, SchemaArray):
-            raw_words = write_array(data, word_bw=self.bitwidth)
         else:
             raw_words = data
 

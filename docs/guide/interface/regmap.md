@@ -166,7 +166,7 @@ self.regmap.set("error",  PolyError.TLAST_EARLY_CMD_HDR)
 self.regmap.set("tx_id",  cmd_hdr.tx_id)
 self.regmap.set("halted", 1)
 
-current_coeffs = self.regmap.get("coeffs")     # SchemaArray of Float32
+current_coeffs = self.regmap.get("coeffs")     # DataArray of Float32
 ```
 
 Internally each field's backing store is a numpy array of `nwords_per_inst(bus_bw)` words. `get()` calls `schema().deserialize(buffer)`; `set()` calls `value.serialize()` (or wraps a raw value via `schema(value)` first) and stores. Host bus reads/writes touch the same underlying word buffer at the appropriate sub-word offset.
@@ -222,7 +222,7 @@ regmap = RegMap({
 
 # Owner: writes/reads the whole array as one schema instance
 self.regmap.set("coeffs", CoeffArray([1.0, 0.0, 0.5, 0.25]))
-arr = self.regmap.get("coeffs")           # SchemaArray of Float32, length 4
+arr = self.regmap.get("coeffs")           # DataArray of Float32, length 4
 
 # Host: reads element 2 (one LITE transaction at offset 0x08)
 word2 = yield from master.read_schema(Float32, addr=regmap.offset_of("coeffs") + 0x08)

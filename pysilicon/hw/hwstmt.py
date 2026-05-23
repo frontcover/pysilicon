@@ -40,7 +40,7 @@ class HwVar:
     Created by ``HwStmtExtractor`` for each binding in ``run_proc``.
     """
     name: str
-    typ: object  # type[DataSchema] | SchemaArray | None (unresolved)
+    typ: object  # type[DataSchema] | None (unresolved)
     producer: HwStmt | None = field(default=None, repr=False)
 
 

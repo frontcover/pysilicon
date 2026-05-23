@@ -70,7 +70,7 @@ def evaluate(self, cmd_hdr, s_in, m_out):
 
     t_out_start = tstart + self.proc_latency * self.clk.period
     yield from m_out.write_pipelined(
-        SchemaArray(data=y, elem_type=Float32), t_out_start, ii=self.proc_ii
+        array(Float32, y), t_out_start, ii=self.proc_ii
     )
     if len(samp_in) != cmd_hdr.nsamp:
         return PolyError.WRONG_NSAMP
