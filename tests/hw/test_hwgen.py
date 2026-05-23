@@ -17,6 +17,8 @@ from pysilicon.hw.hwstmt import (
     SeqStmt,
     WhileStmt,
 )
+from pysilicon.hw.dataschema import DataList as _DataList
+from pysilicon.hw.dataschema import IntField as _IntField
 from pysilicon.hw.interface import StreamIFMaster as _StreamIFMaster
 from pysilicon.hw.interface import StreamIFSlave as _StreamIFSlave
 from pysilicon.hw.regmap import (
@@ -1272,10 +1274,6 @@ def test_kernel_signature_raw_array_regmap_field():
 # Phase-12a Phase 2: _collect_schemas walks hook signatures
 # ---------------------------------------------------------------------------
 
-from pysilicon.hw.dataschema import DataList as _DataList
-from pysilicon.hw.dataschema import IntField as _IntField
-
-
 _TxIdField = _IntField.specialize(bitwidth=16, signed=False)
 
 
@@ -1373,7 +1371,6 @@ def test_header_data_array_field_emits_utility_include():
     from pysilicon.hw.regmap import (
         Bit, RegAccess, RegField, VitisRegMap, VitisRegMapMMIFSlave,
     )
-    from pysilicon.hw.synth import synthesizable
     from pysilicon.simulation.simobj import ProcessGen
 
     Float32 = FloatField.specialize(bitwidth=32, include_dir="include")

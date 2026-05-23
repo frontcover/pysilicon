@@ -48,3 +48,25 @@ def test_poly_codegen_step_kernel_contains_raw_coeffs(tmp_path: Path):
     hpp = (tmp_path / "gen" / "poly.hpp").read_text()
     assert "float coeffs[4]" in hpp
     assert "CoeffArray& coeffs" not in hpp
+
+
+def test_poly_gen_hpp_includes_hook_schemas_and_utility_headers(tmp_path: Path):
+    """Phase 12a verification: hook-referenced schemas and utility headers appear.
+
+    - Blocker 1 fix: ``poly_cmd_hdr.h`` lands because ``evaluate`` takes
+      ``cmd_hdr: PolyCmdHdr``.  (It also happens to appear as a kernel
+      stmt output type, but this test asserts the include unconditionally.)
+    - Blocker 2 fix: ``float32_array_utils.h`` lands because ``CoeffArray``
+      (regmap field) is a ``DataArray[Float32]``, whose
+      ``get_utility_includes`` returns the array-utils header path.
+    """
+    from examples.poly.poly_build import build_poly_dag
+    from pysilicon.build.build import BuildConfig
+
+    dag = build_poly_dag()
+    results = dag.run(BuildConfig(root_dir=tmp_path), through="gen_kernel")
+    assert results["gen_kernel"].success, results["gen_kernel"].message
+    hpp = (tmp_path / "gen" / "poly.hpp").read_text()
+
+    assert '#include "include/poly_cmd_hdr.h"' in hpp
+    assert '#include "include/float32_array_utils.h"' in hpp
