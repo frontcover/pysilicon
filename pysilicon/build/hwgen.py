@@ -6,7 +6,7 @@ from dataclasses import dataclass, field
 from enum import IntEnum
 from typing import TYPE_CHECKING
 
-from pysilicon.hw.dataschema import DataSchema, EnumField, FloatField, IntField
+from pysilicon.hw.dataschema import DataArray, DataSchema, EnumField, FloatField, IntField
 from pysilicon.hw.hwstmt import (
     CaseStmt,
     ContinueStmt,
@@ -260,6 +260,7 @@ def cpp_type(typ) -> str:
     - ``IntField`` (``signed=True``)  → ``ap_int<bw>``
     - ``EnumField`` (and bare ``IntEnum`` subclasses) → ``ap_uint<8>`` (v1)
     - ``FloatField`` (bitwidth 32) → ``float``; (bitwidth 64) → ``double``
+    - ``DataArray`` (``cpp_storage='raw'``) → ``<elem>[<count>]``
     - Other ``DataSchema`` subclasses → ``cls.cpp_class_name()``
     - ``None`` → ``RuntimeError`` (unresolved type leaked through)
     """
@@ -281,6 +282,9 @@ def cpp_type(typ) -> str:
             )
         if issubclass(typ, EnumField):
             return "ap_uint<8>"  # v1 simplification; widen later if needed
+        if issubclass(typ, DataArray) and getattr(typ, 'cpp_storage', 'struct') == 'raw':
+            elem_cpp = cpp_type(typ.element_type)
+            return f"{elem_cpp}[{typ._declared_count()}]"
         return typ.cpp_class_name()
     # Bare IntEnum subclasses (e.g. resolved FunctionStmt return types) map the
     # same as EnumField. The plan explicitly bounds enums at 8 bits for v1.
@@ -404,7 +408,14 @@ def kernel_signature(comp) -> str:
         for fname, fld in regmap_slave.regmap._fields.items():
             if fld.is_vitis_auto:
                 continue
-            arg_lines.append(f"    {cpp_type(fld.schema)}& {fname}")
+            schema = fld.schema
+            if (isinstance(schema, type) and issubclass(schema, DataArray)
+                    and getattr(schema, 'cpp_storage', 'struct') == 'raw'):
+                elem_cpp = cpp_type(schema.element_type)
+                count = schema._declared_count()
+                arg_lines.append(f"    {elem_cpp} {fname}[{count}]")
+            else:
+                arg_lines.append(f"    {cpp_type(schema)}& {fname}")
             pragma_lines.append(
                 f"#pragma HLS INTERFACE s_axilite port={fname:<12} bundle=control"
             )
@@ -451,6 +462,12 @@ def hook_signature(
             args.append(
                 (name, f"hls::stream<streamutils::axi4s_word<{tmpl}>>& {name}")
             )
+            continue
+        if (isinstance(annot, type) and issubclass(annot, DataArray)
+                and getattr(annot, 'cpp_storage', 'struct') == 'raw'):
+            elem_cpp = cpp_type(annot.element_type)
+            count = annot._declared_count()
+            args.append((name, f"{elem_cpp} {name}[{count}]"))
             continue
         args.append((name, f"{cpp_type(annot)} {name}"))
     ret = hints.get('return')

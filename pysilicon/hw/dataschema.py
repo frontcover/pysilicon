@@ -2501,9 +2501,11 @@ class DataArray(DataSchema):
     max_shape: ClassVar[tuple[int, ...]] = (1,)
     static: ClassVar[bool] = True
     member_name: ClassVar[str] = "data"
+    cpp_storage: ClassVar[str] = "struct"
     can_gen_include: ClassVar[bool] = False
     allowed_specialize_kwargs: ClassVar[set[str]] = DataSchema.allowed_specialize_kwargs | {
         "member_name",
+        "cpp_storage",
     }
     _specializations: ClassVar[dict[tuple[Any, ...], type[DataArray]]] = {}
 
@@ -2511,6 +2513,25 @@ class DataArray(DataSchema):
         super().__init_subclass__(**kwargs)
         if cls is not DataArray and "can_gen_include" not in cls.__dict__:
             cls.can_gen_include = True
+        # Validate cpp_storage whenever a subclass sets it.
+        if "cpp_storage" in cls.__dict__:
+            val = cls.__dict__["cpp_storage"]
+            if val not in ("struct", "raw"):
+                raise ValueError(
+                    f"{cls.__name__}.cpp_storage={val!r} is invalid; "
+                    f"must be 'struct' or 'raw'."
+                )
+            if val == "raw":
+                if not getattr(cls, "static", True):
+                    raise ValueError(
+                        f"{cls.__name__}: cpp_storage='raw' requires static=True."
+                    )
+                shape = getattr(cls, "max_shape", ())
+                if len(shape) != 1:
+                    raise ValueError(
+                        f"{cls.__name__}: cpp_storage='raw' requires len(max_shape)==1, "
+                        f"got max_shape={shape!r}."
+                    )
 
     def __init__(self, value: Any = None):
         self._val = self.__class__.init_value()
@@ -2523,6 +2544,19 @@ class DataArray(DataSchema):
         if any(dim < 0 for dim in shape):
             raise ValueError("max_shape dimensions must be non-negative.")
         return shape
+
+    @classmethod
+    def _declared_count(cls) -> int:
+        """Return the static declared element count (product of max_shape).
+
+        Only valid for ``cpp_storage='raw'`` arrays (requires len(max_shape)==1).
+        """
+        if not cls.max_shape:
+            raise ValueError(f"{cls.__name__} has no max_shape; cannot lower as raw array.")
+        n = 1
+        for dim in cls.max_shape:
+            n *= int(dim)
+        return n
 
     @classmethod
     def _element_type(cls) -> type[DataSchema]:
@@ -2572,6 +2606,7 @@ class DataArray(DataSchema):
         max_shape: tuple[int, ...] | list[int] = (1,),
         static: bool = True,
         member_name: str = "data",
+        cpp_storage: str = "struct",
         **kwargs: Any,
     ) -> type[DataArray]:
         if not isinstance(element_type, type) or not issubclass(element_type, DataSchema):
@@ -2581,10 +2616,21 @@ class DataArray(DataSchema):
             raise ValueError("max_shape dimensions must be non-negative.")
         if not member_name or not isinstance(member_name, str):
             raise TypeError("member_name must be a non-empty string.")
+        if cpp_storage not in ("struct", "raw"):
+            raise ValueError(
+                f"cpp_storage={cpp_storage!r} is invalid; must be 'struct' or 'raw'."
+            )
+        if cpp_storage == "raw":
+            if not static:
+                raise ValueError("cpp_storage='raw' requires static=True.")
+            if len(shape) != 1:
+                raise ValueError(
+                    f"cpp_storage='raw' requires len(max_shape)==1, got max_shape={shape!r}."
+                )
 
         overrides = cls.validate_specialize_kwargs({**kwargs, "member_name": member_name})
         override_items = tuple(sorted(overrides.items()))
-        key = (cls, element_type, shape, bool(static), override_items)
+        key = (cls, element_type, shape, bool(static), cpp_storage, override_items)
         cached = cls._specializations.get(key)
         if cached is not None:
             return cached
@@ -2596,6 +2642,7 @@ class DataArray(DataSchema):
                 "max_shape": shape,
                 "static": bool(static),
                 "member_name": member_name,
+                "cpp_storage": cpp_storage,
                 "can_gen_include": True,
                 "__module__": cls.__module__,
                 "__doc__": (
