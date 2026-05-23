@@ -1,6 +1,7 @@
 from pathlib import Path
 
 import numpy as np
+import pytest
 
 from pysilicon.build.build import BuildConfig
 from pysilicon.hw.arrayutils import gen_array_utils, get_nwords, read_uint32_file, write_array, write_uint32_file
@@ -160,3 +161,39 @@ def test_gen_array_utils_tb_header_uses_local_streamutils_path(tmp_path: Path):
     assert '#include "streamutils_hls.h"' in content
     assert '#include "streamutils_tb.h"' in tb_content
     assert '#include "float32_array_utils.h"' in tb_content
+
+# ---------------------------------------------------------------------------
+# Phase 4: array() factory
+# ---------------------------------------------------------------------------
+
+def test_array_factory_returns_dataarray_instance():
+    from pysilicon.hw.arrayutils import array
+    from pysilicon.hw.dataschema import DataArray
+    inst = array(F32, [1.0, 2.0, 3.0])
+    assert isinstance(inst, DataArray)
+    assert type(inst).element_type is F32
+
+
+def test_array_factory_round_trip():
+    from pysilicon.hw.arrayutils import array, read_array, write_array
+    data = [1.0, 2.0, 3.0, 4.0]
+    inst = array(F32, data)
+    packed = write_array(inst, word_bw=32)
+    result = read_array(packed, elem_type=F32, word_bw=32, shape=4)
+    np.testing.assert_array_almost_equal(result.val, np.array(data, dtype=np.float32))
+
+
+def test_write_array_accepts_dataarray_instance():
+    from pysilicon.hw.arrayutils import array, write_array
+    inst = array(F32, [1.0, 2.0])
+    packed = write_array(inst, word_bw=32)
+    assert len(packed) > 0
+
+
+def test_write_array_dataarray_elem_type_mismatch_raises():
+    from pysilicon.hw.arrayutils import array, write_array
+    inst = array(F32, [1.0, 2.0])
+    from pysilicon.hw.dataschema import IntField
+    S16 = IntField.specialize(bitwidth=16, signed=True)
+    with pytest.raises(TypeError, match="elem_type mismatch"):
+        write_array(inst, elem_type=S16, word_bw=32)

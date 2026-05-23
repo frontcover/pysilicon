@@ -967,3 +967,53 @@ def test_invalid_specialize_kwargs_are_rejected():
 def test_primitive_field_gen_include_raises(field_type):
     with pytest.raises(ValueError, match="does not support standalone include generation"):
         field_type.as_buildable()
+
+# ---------------------------------------------------------------------------
+# Phase 3: DataArray cpp_storage
+# ---------------------------------------------------------------------------
+
+def test_dataarray_cpp_storage_default_is_struct():
+    from pysilicon.hw.dataschema import DataArray, FloatField
+    Float32 = FloatField.specialize(bitwidth=32)
+    cls = DataArray.specialize(element_type=Float32, max_shape=(4,), static=True)
+    assert cls.cpp_storage == "struct"
+
+
+def test_dataarray_specialize_raw_storage():
+    from pysilicon.hw.dataschema import DataArray, FloatField
+    Float32 = FloatField.specialize(bitwidth=32)
+    cls = DataArray.specialize(element_type=Float32, max_shape=(4,), static=True, cpp_storage="raw")
+    assert cls.cpp_storage == "raw"
+    assert cls._declared_count() == 4
+
+
+def test_dataarray_specialize_invalid_cpp_storage_raises():
+    from pysilicon.hw.dataschema import DataArray, FloatField
+    Float32 = FloatField.specialize(bitwidth=32)
+    with pytest.raises(ValueError, match="invalid"):
+        DataArray.specialize(element_type=Float32, max_shape=(4,), static=True, cpp_storage="hybrid")
+
+
+def test_dataarray_specialize_raw_nonstatic_raises():
+    from pysilicon.hw.dataschema import DataArray, FloatField
+    Float32 = FloatField.specialize(bitwidth=32)
+    with pytest.raises(ValueError, match="static=True"):
+        DataArray.specialize(element_type=Float32, max_shape=(4,), static=False, cpp_storage="raw")
+
+
+def test_dataarray_specialize_raw_multidim_raises():
+    from pysilicon.hw.dataschema import DataArray, FloatField
+    Float32 = FloatField.specialize(bitwidth=32)
+    with pytest.raises(ValueError, match="max_shape"):
+        DataArray.specialize(element_type=Float32, max_shape=(4, 4), static=True, cpp_storage="raw")
+
+
+def test_dataarray_subclass_invalid_cpp_storage_raises():
+    from pysilicon.hw.dataschema import DataArray, FloatField
+    Float32 = FloatField.specialize(bitwidth=32)
+    with pytest.raises(ValueError, match="invalid"):
+        class BadArray(DataArray):
+            element_type = Float32
+            max_shape = (4,)
+            static = True
+            cpp_storage = "hybrid"

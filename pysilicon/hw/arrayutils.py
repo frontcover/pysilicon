@@ -22,7 +22,7 @@ import os
 from pathlib import Path, PurePosixPath
 import posixpath
 import re
-from typing import Any, Generic, TypeVar
+from typing import Any, TypeVar
 
 import numpy as np
 
@@ -33,47 +33,39 @@ from pysilicon.hw.dataschema import DataArray, DataList, DataSchema, Words
 T = TypeVar('T', bound=DataSchema)
 
 
-class SchemaArray(Generic[T]):
-    """Homogeneous array of a single DataSchema element type.
+def array(elem_type: type[T], data, static: bool = False) -> DataArray:
+    """Construct a :class:`~pysilicon.hw.dataschema.DataArray` instance wrapping *data*.
 
-    Used as a type annotation at synthesis boundaries::
+    Internally specializes :class:`~pysilicon.hw.dataschema.DataArray` with the
+    runtime shape derived from *data* and returns an instance whose ``.val``
+    holds the underlying NumPy array.
 
-        samp_in: SchemaArray[Float32] = yield from self.s_in.get(Float32, count=n)
+    Parameters
+    ----------
+    elem_type : type[DataSchema]
+        Element schema class for each entry in the array.
+    data : array-like
+        The array data, converted to :class:`numpy.ndarray` via
+        :func:`numpy.asarray`.
+    static : bool
+        If ``True`` the resulting specialization has ``static=True`` (fixed
+        maximum shape equal to the runtime shape).  Default ``False``.
 
-    And as a runtime container passed to :func:`write_array` / returned by
-    :func:`read_array`::
-
-        arr = SchemaArray(data=np.array([1.0, 2.0]), elem_type=Float32)
-
-    In Python the underlying storage is a :class:`numpy.ndarray` for scalar
-    element types or a plain :class:`list` for complex ones.  In HLS codegen
-    ``SchemaArray[T]`` maps to ``T arr[N]`` — a C array of the element's
-    ``cpp_repr()``.
+    Returns
+    -------
+    DataArray
+        A specialized :class:`~pysilicon.hw.dataschema.DataArray` instance.
     """
-
-    def __init__(self, data: np.ndarray | list, elem_type: type[T]) -> None:
-        if not isinstance(elem_type, type) or not issubclass(elem_type, DataSchema):
-            raise TypeError("elem_type must be a DataSchema subclass.")
-        self.data: np.ndarray = np.asarray(data)
-        self.elem_type: type[T] = elem_type
-
-    def __len__(self) -> int:
-        return len(self.data)
-
-    def __getitem__(self, key):
-        return self.data[key]
-
-    def __array__(self, dtype=None) -> np.ndarray:
-        return np.asarray(self.data, dtype=dtype)
-
-    def __getattr__(self, name: str):
-        # Delegate numpy ndarray attributes (shape, dtype, flatten, …) to self.data.
-        # __getattr__ is only called when normal lookup fails, so 'data' and
-        # 'elem_type' are never forwarded here.
-        return getattr(self.data, name)
-
-    def __repr__(self) -> str:
-        return f"SchemaArray(elem_type={self.elem_type.__name__}, shape={self.data.shape})"
+    arr = np.asarray(data)
+    shape = arr.shape if arr.ndim > 0 else (1,)
+    cls = DataArray.specialize(
+        element_type=elem_type,
+        max_shape=shape,
+        static=static,
+    )
+    inst = cls()
+    inst.val = arr
+    return inst
 
 
 def _normalize_array_shape(shape: int | tuple[int, ...] | list[int]) -> tuple[int, ...]:
@@ -88,18 +80,19 @@ def _normalize_array_shape(shape: int | tuple[int, ...] | list[int]) -> tuple[in
     return norm_shape
 
 
-def write_array(arr: SchemaArray[T] | Any, elem_type: type[T] | None = None, *, word_bw: int) -> Words:
+def write_array(arr: DataArray | Any, elem_type: type[T] | None = None, *, word_bw: int) -> Words:
     """Pack a Python array of schema elements into hardware words.
 
     Parameters
     ----------
-    arr : SchemaArray[T] or array-like
-        Input data.  Pass a :class:`SchemaArray` to supply ``elem_type``
-        implicitly, or pass a plain array-like together with an explicit
-        ``elem_type``.
+    arr : DataArray or array-like
+        Input data.  Pass a :class:`~pysilicon.hw.dataschema.DataArray` to
+        supply ``elem_type`` implicitly, or pass a plain array-like together
+        with an explicit ``elem_type``.
     elem_type : type[DataSchema] or None
         Element schema class.  Required when *arr* is not a
-        :class:`SchemaArray`; ignored (with a consistency check) when it is.
+        :class:`~pysilicon.hw.dataschema.DataArray`;
+        ignored (with a consistency check) when it is.
     word_bw : int
         Packed output word width in bits.  Must be passed as a keyword argument.
 
@@ -108,17 +101,18 @@ def write_array(arr: SchemaArray[T] | Any, elem_type: type[T] | None = None, *, 
     numpy.ndarray
         Packed hardware words as returned by ``DataSchema.serialize()``.
     """
-    if isinstance(arr, SchemaArray):
-        if elem_type is not None and elem_type is not arr.elem_type:
+    if isinstance(arr, DataArray):
+        inferred_elem = type(arr).element_type
+        if elem_type is not None and elem_type is not inferred_elem:
             raise TypeError(
-                f"elem_type mismatch: SchemaArray carries {arr.elem_type.__name__!r} "
+                f"elem_type mismatch: DataArray carries {inferred_elem.__name__!r} "
                 f"but elem_type={elem_type.__name__!r} was also supplied."
             )
-        elem_type = arr.elem_type
-        np_arr = arr.data
+        elem_type = inferred_elem
+        np_arr = arr.val
     else:
         if elem_type is None:
-            raise TypeError("elem_type must be provided when arr is not a SchemaArray.")
+            raise TypeError("elem_type must be provided when arr is not a DataArray.")
         if not isinstance(elem_type, type) or not issubclass(elem_type, DataSchema):
             raise TypeError("elem_type must be a DataSchema subclass.")
         np_arr = np.asarray(arr)
@@ -135,7 +129,7 @@ def write_array(arr: SchemaArray[T] | Any, elem_type: type[T] | None = None, *, 
         static=True,
     )
     array_obj = array_cls()
-    array_obj.val = arr
+    array_obj.val = np_arr
     return array_obj.serialize(word_bw=word_bw)
 
 
@@ -200,8 +194,8 @@ def read_array(
     elem_type: type[T],
     word_bw: int,
     shape: int | tuple[int, ...] | list[int],
-) -> SchemaArray[T]:
-    """Unpack hardware words into a :class:`SchemaArray` of schema elements.
+) -> DataArray:
+    """Unpack hardware words into a :class:`~pysilicon.hw.dataschema.DataArray` instance.
 
     Parameters
     ----------
@@ -216,8 +210,9 @@ def read_array(
 
     Returns
     -------
-    SchemaArray[T]
-        Unpacked array with ``elem_type`` encoded in the container.
+    DataArray
+        Unpacked :class:`~pysilicon.hw.dataschema.DataArray` instance with
+        ``element_type`` set to *elem_type*.
     """
     if not isinstance(elem_type, type) or not issubclass(elem_type, DataSchema):
         raise TypeError("elem_type must be a DataSchema subclass.")
@@ -233,7 +228,7 @@ def read_array(
     )
     array_obj = array_cls()
     array_obj.deserialize(np.asarray(packed), word_bw=word_bw)
-    return SchemaArray(data=array_obj.val, elem_type=elem_type)
+    return array_obj
 
 
 def get_nwords(

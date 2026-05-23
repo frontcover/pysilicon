@@ -43,10 +43,6 @@ from .memory import (
     Memory,
     MemComponent,
 )
-from .interface import (
-    StreamGetPipelinedStmt,
-    StreamWritePipelinedStmt,
-)
 from .regmap import (
     Bit,
     RegAccess,
@@ -92,8 +88,6 @@ __all__ = [
     "AddrUnit",
     "Memory",
     "MemComponent",
-    "StreamGetPipelinedStmt",
-    "StreamWritePipelinedStmt",
     "Bit",
     "RegAccess",
     "RegField",

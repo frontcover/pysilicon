@@ -473,15 +473,6 @@ def test_cpp_type_dataschema_subclass_uses_cpp_class_name():
     assert cpp_type(MyMsg) == "MyMsg"
 
 
-def test_cpp_type_schemaarray_placeholder():
-    from pysilicon.build.hwgen import cpp_type
-    from pysilicon.hw.dataschema import FloatField
-    Float32 = FloatField.specialize(bitwidth=32)
-    out = cpp_type(('SchemaArray', Float32))
-    assert "float[MAX_N]" in out
-    assert "TODO" in out
-
-
 def test_cpp_type_none_raises():
     from pysilicon.build.hwgen import cpp_type
     with pytest.raises(RuntimeError):
@@ -1217,3 +1208,61 @@ def test_kernel_files_to_str_uses_cpp_for_non_templated_hook():
     assert "demo_process_impl.cpp" in files
     assert "demo_process_impl.tpp" not in files
 
+
+
+# ---------------------------------------------------------------------------
+# Phase 3: cpp_type with cpp_storage and kernel_signature for raw arrays
+# ---------------------------------------------------------------------------
+
+def test_cpp_type_dataarray_struct_storage_returns_class_name():
+    from pysilicon.build.hwgen import cpp_type
+    from pysilicon.hw.dataschema import DataArray, FloatField
+    Float32 = FloatField.specialize(bitwidth=32)
+    cls = DataArray.specialize(element_type=Float32, max_shape=(4,), static=True, cpp_storage="struct")
+    result = cpp_type(cls)
+    assert result == cls.cpp_class_name()
+    assert "float" not in result  # should use struct name, not raw
+
+
+def test_cpp_type_dataarray_raw_storage_returns_c_array():
+    from pysilicon.build.hwgen import cpp_type
+    from pysilicon.hw.dataschema import DataArray, FloatField
+    Float32 = FloatField.specialize(bitwidth=32)
+    cls = DataArray.specialize(element_type=Float32, max_shape=(4,), static=True, cpp_storage="raw")
+    result = cpp_type(cls)
+    assert result == "float[4]"
+
+
+def test_kernel_signature_raw_array_regmap_field():
+    """A regmap field with cpp_storage='raw' emits '<elem> <name>[<count>]' in signature."""
+    from pysilicon.build.hwgen import kernel_signature
+    from pysilicon.hw.dataschema import DataArray, FloatField
+    from pysilicon.hw.hw_component import HwComponent
+    from pysilicon.hw.regmap import Bit, RegAccess, RegField, VitisRegMap, VitisRegMapMMIFSlave
+    from pysilicon.simulation.simulation import Simulation
+
+    Float32 = FloatField.specialize(bitwidth=32)
+    CoeffArrayRaw = DataArray.specialize(
+        element_type=Float32, max_shape=(4,), static=True, cpp_storage="raw"
+    )
+
+    class _RawArrayComp(HwComponent):
+        def __post_init__(self):
+            super().__post_init__()
+            self.regmap = VitisRegMap({
+                "coeffs": RegField(CoeffArrayRaw, RegAccess.RW, description="Coefficients"),
+            })
+            self.s_lite = VitisRegMapMMIFSlave(
+                name=f'{self.name}_s_lite', sim=self.sim, bitwidth=32,
+                regmap=self.regmap, on_start=self.on_start,
+            )
+            self.add_endpoint(self.s_lite)
+
+        def on_start(self):
+            return
+
+    sim = Simulation()
+    comp = _RawArrayComp(name="raw_comp", sim=sim)
+    sig = kernel_signature(comp)
+    assert "float coeffs[4]" in sig
+    assert "CoeffArray& coeffs" not in sig

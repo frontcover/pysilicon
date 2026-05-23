@@ -348,8 +348,9 @@ class _DirectBackedMMIFMaster:
         return schema_type().deserialize(words, word_bw=word_bw)
 
     def write_array(self, elements: Any, element_type: type, addr: int, word_bw: int = 32) -> Any:
-        from pysilicon.hw.arrayutils import write_array, SchemaArray
-        if isinstance(elements, SchemaArray):
+        from pysilicon.hw.arrayutils import write_array
+        from pysilicon.hw.dataschema import DataArray
+        if isinstance(elements, DataArray):
             packed = write_array(elements, word_bw=word_bw)
         else:
             packed = write_array(elements, elem_type=element_type, word_bw=word_bw)
@@ -373,7 +374,7 @@ class _DirectBackedMMIFMaster:
         return self._mem.segments[self._base_addr]
 
     def as_array(self, elem_type: type) -> Any:
-        """Return a SchemaArray[elem_type] view of the inline block."""
+        """Return a :class:`~pysilicon.hw.dataschema.DataArray` view of the inline block."""
         from pysilicon.hw.arrayutils import read_array
         words = self.as_words()
         nwpe = elem_type.nwords_per_inst(self.bitwidth)

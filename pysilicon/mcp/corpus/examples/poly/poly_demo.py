@@ -12,7 +12,7 @@ import numpy.typing as npt
 
 from pysilicon.build.build import BuildConfig, BuildDag, BuildResult, BuildStep, FileArtifact, ObjectArtifact
 from pysilicon.build.streamutils import StreamUtilsStep
-from pysilicon.hw.arrayutils import ArrayUtilsStep, SchemaArray, read_array, read_uint32_file, write_array, write_uint32_file
+from pysilicon.hw.arrayutils import ArrayUtilsStep, array, read_array, read_uint32_file, write_array, write_uint32_file
 from pysilicon.hw.clock import Clock
 from pysilicon.hw.dataschema import DataArray, DataList, DataSchemaStep, EnumField, FloatField, IntField
 from pysilicon.hw.hw_component import HwComponent, HwParam
@@ -208,7 +208,7 @@ class PolyAccelComponent(HwComponent):
         yield self.timeout(proc_time)
 
         yield from m_out.write_pipelined(
-            SchemaArray(data=y, elem_type=Float32), t_out_start
+            array(Float32, y), t_out_start
         )
         self.logger.log(event='samp_out_write_end', job=self._job)
 

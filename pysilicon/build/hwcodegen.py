@@ -34,6 +34,9 @@ class SynthesisError(Exception):
     """Raised when ``run_proc`` contains a non-synthesizable pattern."""
 
 
+_PIPELINED_OP_NAMES = frozenset({'get_pipelined', 'write_pipelined'})
+
+
 class HwStmtExtractor:
     """Parse ``run_proc`` of an ``HwComponent`` into an ``HwStmt`` tree.
 
@@ -191,6 +194,7 @@ class HwStmtExtractor:
         # a, b = self.hook(var1, var2)   — direct call, no yield from
         if isinstance(node.value, ast.Call):
             method = self._resolve_method(node.value.func)
+            self._check_not_pipelined(method, node)
             self._require_synthesizable(method, node)
             assert method is not None
             inputs = self._resolve_call_args(node.value)
@@ -231,6 +235,7 @@ class HwStmtExtractor:
             method = self._resolve_method(val.func)
             if getattr(method, '_is_sim_only', False):
                 return None  # @sim_only — skip during synthesis
+            self._check_not_pipelined(method, node)
             self._require_synthesizable(method, node)
             assert method is not None
             inputs = self._resolve_call_args(val)
@@ -316,6 +321,7 @@ class HwStmtExtractor:
         if not isinstance(call_node, ast.Call):
             raise SynthesisError("'yield from' must be followed by a call expression")
         method = self._resolve_method(call_node.func)
+        self._check_not_pipelined(method, call_node)
         self._require_synthesizable(method, call_node)
         assert method is not None
         inputs = self._resolve_call_args(call_node)
@@ -335,6 +341,7 @@ class HwStmtExtractor:
                 f"(line {getattr(parent, 'lineno', '?')})"
             )
         method = self._resolve_method(call_node.func)
+        self._check_not_pipelined(method, parent)
         self._require_synthesizable(method, parent)
         assert method is not None
         inputs = self._resolve_call_args(call_node)
@@ -437,6 +444,22 @@ class HwStmtExtractor:
             raise SynthesisError(
                 f"Call to non-synthesizable method '{name}' at line {lineno}. "
                 f"Mark it @synthesizable or @sim_only."
+            )
+
+    @staticmethod
+    def _check_not_pipelined(method: object | None, node: ast.AST) -> None:
+        if method is None:
+            return
+        method_name = getattr(method, '__name__', None)
+        if method_name in _PIPELINED_OP_NAMES:
+            lineno = getattr(node, 'lineno', '?')
+            raise SynthesisError(
+                f"Pipelined stream operation '{method_name}' at line {lineno} of "
+                f"the extracted body. Pipelined ops are only legal inside "
+                f"@synthesizable hook bodies (their C++ lowering requires "
+                f"hand-written pipelined loops with #pragma HLS PIPELINE). "
+                f"Refactor to call a hook that takes the stream as an argument "
+                f"and does the pipelined I/O internally."
             )
 
 

@@ -163,13 +163,13 @@ class _FailingPolyAccelComponent(PolyAccelComponent):
     """
 
     def evaluate(self, cmd_hdr, s_in, m_out):  # type: ignore[override]
-        from pysilicon.hw.arrayutils import SchemaArray
+        from pysilicon.hw.arrayutils import array
         resp_hdr = PolyRespHdr()
         resp_hdr.tx_id = cmd_hdr.tx_id
         yield from m_out.write(resp_hdr)
         _samp_in, _tstart = yield from s_in.get_pipelined(Float32, count=cmd_hdr.nsamp)
         zero_out = np.zeros(int(cmd_hdr.nsamp), dtype=np.float32)
-        yield from m_out.write(SchemaArray(data=zero_out, elem_type=Float32))
+        yield from m_out.write(array(Float32, zero_out))
         return PolyError.WRONG_NSAMP
 
 
