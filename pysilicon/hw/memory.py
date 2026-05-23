@@ -349,7 +349,8 @@ class _DirectBackedMMIFMaster:
 
     def write_array(self, elements: Any, element_type: type, addr: int, word_bw: int = 32) -> Any:
         from pysilicon.hw.arrayutils import write_array, SchemaArray
-        if isinstance(elements, SchemaArray):
+        from pysilicon.hw.dataschema import DataArray
+        if isinstance(elements, (SchemaArray, DataArray)):
             packed = write_array(elements, word_bw=word_bw)
         else:
             packed = write_array(elements, elem_type=element_type, word_bw=word_bw)

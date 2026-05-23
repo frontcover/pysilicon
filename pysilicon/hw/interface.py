@@ -531,12 +531,12 @@ class StreamIFSlave(QueuedTransferIFSlave):
         raw_words = yield from super().get(nwords_max=nwords)
 
         if count is not None:
-            from pysilicon.hw.arrayutils import SchemaArray, read_array
+            from pysilicon.hw.arrayutils import array, read_array
             data = read_array(
                 raw_words, elem_type=schema_type,
                 word_bw=self.bitwidth, shape=int(count),
             )
-            return SchemaArray(data=data, elem_type=schema_type)
+            return data
 
         return schema_type().deserialize(raw_words, word_bw=self.bitwidth)
 
@@ -555,10 +555,10 @@ class StreamIFSlave(QueuedTransferIFSlave):
         raw_words = yield from super().get(nwords_max=nwords)
         tstart = self.env.now - (raw_words.shape[0] - 1) * self.interface.clk.period
         if count is not None:
-            from pysilicon.hw.arrayutils import SchemaArray, read_array
+            from pysilicon.hw.arrayutils import read_array
             data = read_array(raw_words, elem_type=schema_type,
                               word_bw=self.bitwidth, shape=int(count))
-            return SchemaArray(data=data, elem_type=schema_type), tstart
+            return data, tstart
         return schema_type().deserialize(raw_words, word_bw=self.bitwidth), tstart
 
     @synthesizable(synth_fn=_not_implemented_synth, stmt_class=StreamDrainStmt)

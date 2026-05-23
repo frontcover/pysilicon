@@ -2538,6 +2538,28 @@ class DataArray(DataSchema):
         if value is not None:
             self.val = value
 
+    def __len__(self) -> int:
+        return len(self.val)
+
+    def __getitem__(self, key):
+        return self.val[key]
+
+    def __array__(self, dtype=None) -> np.ndarray:
+        return np.asarray(self.val, dtype=dtype)
+
+    def __getattr__(self, name: str):
+        # Delegate numpy ndarray attributes (shape, size, dtype, flatten, …) to self.val.
+        # __getattr__ is only called when normal lookup fails, so instance attributes
+        # like '_val' are never forwarded here.
+        return getattr(self.val, name)
+
+    def __repr__(self) -> str:
+        elem = type(self).element_type
+        elem_name = elem.__name__ if elem is not None else "?"
+        return (
+            f"{type(self).__name__}(element_type={elem_name}, shape={np.asarray(self.val).shape})"
+        )
+
     @classmethod
     def _normalized_shape(cls) -> tuple[int, ...]:
         shape = tuple(int(dim) for dim in cls.max_shape)
