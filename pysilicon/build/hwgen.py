@@ -740,6 +740,33 @@ def _collect_hooks_with_params(tree: HwStmt) -> list[tuple[object, list[str]]]:
     return list(seen.values())
 
 
+def _collect_utility_includes(schemas: list[type]) -> list[str]:
+    """Union of ``DataSchema.get_utility_includes()`` across ``schemas``.
+
+    Recurses through each schema's ``get_dependencies()`` to pick up
+    utility includes carried by transitive deps that didn't appear directly
+    in the collected list.  Order-preserving dedup.
+    """
+    paths: list[str] = []
+    seen: set[str] = set()
+    visited: set[type] = set()
+
+    def add(schema) -> None:
+        if schema in visited:
+            return
+        visited.add(schema)
+        for path in schema.get_utility_includes():
+            if path not in seen:
+                seen.add(path)
+                paths.append(path)
+        for dep in schema.get_dependencies():
+            add(dep)
+
+    for s in schemas:
+        add(s)
+    return paths
+
+
 def _kernel_signature_decl(comp) -> str:
     """Same as :func:`kernel_signature` but without pragmas; trailing ``;``."""
     full = kernel_signature(comp)
@@ -768,6 +795,8 @@ def header_to_cpp(comp) -> str:
     lines.append('#include "include/streamutils_hls.h"')
     for s in schemas:
         lines.append(f'#include "include/{_snake_case(s.cpp_class_name())}.h"')  # type: ignore[attr-defined]
+    for path in _collect_utility_includes(schemas):
+        lines.append(f'#include "{path}"')
     lines.append('')
     lines.append(_kernel_signature_decl(comp))
 

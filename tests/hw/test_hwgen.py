@@ -1349,3 +1349,83 @@ def test_collect_schemas_mixed_hook_args():
     assert _DemoCmdHdr in schemas
     assert _ExtraHdr in schemas
 
+
+# ---------------------------------------------------------------------------
+# Phase-12a Phase 3: header_to_cpp emits utility includes
+# ---------------------------------------------------------------------------
+
+def test_header_no_array_schemas_emits_no_utility_includes():
+    from pysilicon.build.hwgen import header_to_cpp
+    from tests.hw.test_resolve import DemoComponent
+
+    comp = DemoComponent(name="demo", sim=Simulation())
+    hpp = header_to_cpp(comp)
+    # DemoComponent has no DataArray fields → no array_utils include line.
+    assert "_array_utils.h" not in hpp
+
+
+def test_header_data_array_field_emits_utility_include():
+    """A component with a DataArray[Float32] regmap field gets the include line."""
+    from dataclasses import dataclass
+
+    from pysilicon.build.hwgen import header_to_cpp
+    from pysilicon.hw.dataschema import DataArray, FloatField
+    from pysilicon.hw.regmap import (
+        Bit, RegAccess, RegField, VitisRegMap, VitisRegMapMMIFSlave,
+    )
+    from pysilicon.hw.synth import synthesizable
+    from pysilicon.simulation.simobj import ProcessGen
+
+    Float32 = FloatField.specialize(bitwidth=32, include_dir="include")
+
+    class CoeffsArr(DataArray):
+        element_type = Float32
+        static = True
+        max_shape = (4,)
+
+    @dataclass
+    class _ArrComp(HwComponent):
+        cpp_kernel_name: ClassVar[str | None] = "arrk"
+        in_bw: HwParam[int] = 32
+
+        def __post_init__(self):
+            super().__post_init__()
+            self.s_in = _StreamIFSlave(
+                name=f'{self.name}_s_in', sim=self.sim, bitwidth=self.in_bw,
+            )
+            self.regmap = VitisRegMap({
+                "halted": RegField(Bit, RegAccess.R),
+                "coeffs": RegField(CoeffsArr, RegAccess.RW),
+            })
+            self.s_lite = VitisRegMapMMIFSlave(
+                name=f'{self.name}_s_lite', sim=self.sim, bitwidth=32,
+                regmap=self.regmap, on_start=self.on_start,
+            )
+            for ep in (self.s_in, self.s_lite):
+                self.add_endpoint(ep)
+
+        def on_start(self) -> ProcessGen[None]:
+            while True:
+                return
+
+    comp = _ArrComp(name="arr", sim=Simulation())
+    hpp = header_to_cpp(comp)
+    assert '#include "include/float32_array_utils.h"' in hpp
+
+
+def test_header_utility_include_deduped():
+    """Same array referenced from regmap and a hook arg: include appears once."""
+    from pysilicon.build.hwgen import _collect_utility_includes
+    from pysilicon.hw.dataschema import DataArray, FloatField
+
+    Float32 = FloatField.specialize(bitwidth=32, include_dir="include")
+
+    class Float32A(DataArray):
+        element_type = Float32
+        static = True
+        max_shape = (4,)
+
+    # Pass the same schema twice; expect a single include path back.
+    paths = _collect_utility_includes([Float32A, Float32A])
+    assert paths == ["include/float32_array_utils.h"]
+
