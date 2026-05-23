@@ -294,3 +294,110 @@ def test_run_stale_tpp_when_hook_now_non_templated_raises(tmp_path: Path):
 
     with pytest.raises(RuntimeError, match="Stale impl file"):
         step.run(BuildConfig(root_dir=tmp_path))
+
+
+# ---------------------------------------------------------------------------
+# Phase 12b Phase 1: impl_dir parameter + relative include path
+# ---------------------------------------------------------------------------
+
+def test_produces_splits_paths_when_impl_dir_differs():
+    from tests.hw.test_hwgen import _TmplComp
+    step = HlsCodegenStep(
+        comp_class=_TmplComp,
+        source_artifact="src",
+        output_dir="gen",
+        impl_dir=".",
+    )
+    produces = step.produces
+    assert produces["tcomp_hpp"] == Path("gen/tcomp.hpp")
+    assert produces["tcomp_cpp"] == Path("gen/tcomp.cpp")
+    assert produces["tcomp_process_impl"] == Path("tcomp_process_impl.tpp")
+
+
+def test_impl_dir_none_defaults_to_output_dir():
+    """Backward compat: omitting impl_dir keeps impl files under output_dir."""
+    from tests.hw.test_hwgen import _TmplComp
+    step = HlsCodegenStep(
+        comp_class=_TmplComp,
+        source_artifact="src",
+        output_dir="gen",
+    )
+    produces = step.produces
+    assert produces["tcomp_process_impl"] == Path("gen/tcomp_process_impl.tpp")
+
+
+def test_run_writes_hpp_to_output_and_tpp_to_impl_dir(tmp_path: Path):
+    from tests.hw.test_hwgen import _TmplComp
+    step = HlsCodegenStep(
+        comp_class=_TmplComp,
+        source_artifact="src",
+        output_dir="gen",
+        impl_dir=".",
+    )
+    step.run(BuildConfig(root_dir=tmp_path))
+    hpp = tmp_path / "gen" / "tcomp.hpp"
+    tpp = tmp_path / "tcomp_process_impl.tpp"
+    assert hpp.exists()
+    assert tpp.exists()
+    assert not (tmp_path / "gen" / "tcomp_process_impl.tpp").exists()
+
+
+def test_header_emits_relative_include_path_when_impl_dir_differs(tmp_path: Path):
+    from tests.hw.test_hwgen import _TmplComp
+    step = HlsCodegenStep(
+        comp_class=_TmplComp,
+        source_artifact="src",
+        output_dir="gen",
+        impl_dir=".",
+    )
+    step.run(BuildConfig(root_dir=tmp_path))
+    hpp_content = (tmp_path / "gen" / "tcomp.hpp").read_text()
+    assert '#include "../tcomp_process_impl.tpp"' in hpp_content
+    # The bare-filename form must NOT appear when impl_dir differs.
+    assert '#include "tcomp_process_impl.tpp"' not in hpp_content
+
+
+def test_stale_check_looks_at_impl_dir_not_output_dir(tmp_path: Path):
+    """A stale .cpp lingering in impl_dir is detected; one in output_dir is not."""
+    from tests.hw.test_hwgen import _TmplComp
+    step = HlsCodegenStep(
+        comp_class=_TmplComp,
+        source_artifact="src",
+        output_dir="gen",
+        impl_dir=".",
+    )
+    # Place a stale .cpp where impl_dir is — should trigger the stale check.
+    stale = tmp_path / "tcomp_process_impl.cpp"
+    stale.write_text("// stale", encoding="utf-8")
+    with pytest.raises(RuntimeError, match="Stale impl file"):
+        step.run(BuildConfig(root_dir=tmp_path))
+
+
+def test_stale_in_output_dir_ignored_when_impl_dir_differs(tmp_path: Path):
+    """A leftover file in output_dir is not the impl file's location and is ignored."""
+    from tests.hw.test_hwgen import _TmplComp
+    step = HlsCodegenStep(
+        comp_class=_TmplComp,
+        source_artifact="src",
+        output_dir="gen",
+        impl_dir=".",
+    )
+    out_dir = tmp_path / "gen"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    # Place a stale .cpp in output_dir — should be ignored.
+    decoy = out_dir / "tcomp_process_impl.cpp"
+    decoy.write_text("// decoy", encoding="utf-8")
+    step.run(BuildConfig(root_dir=tmp_path))  # no raise expected
+    # The impl file landed in impl_dir.
+    assert (tmp_path / "tcomp_process_impl.tpp").exists()
+
+
+def test_kernel_files_to_str_emits_relative_include():
+    """The header emission helper directly returns a header with the relpath include."""
+    from pysilicon.build.hwgen import kernel_files_to_str
+    from tests.hw.test_hwgen import _TmplComp
+    from pysilicon.simulation.simulation import Simulation
+
+    comp = _TmplComp(name="tcomp", sim=Simulation())
+    files = kernel_files_to_str(comp, output_dir="gen", impl_dir=".")
+    assert '#include "../tcomp_process_impl.tpp"' in files["tcomp.hpp"]

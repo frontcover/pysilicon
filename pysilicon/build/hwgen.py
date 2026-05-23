@@ -774,7 +774,26 @@ def _kernel_signature_decl(comp) -> str:
     return head + '\n);'
 
 
-def header_to_cpp(comp) -> str:
+def _impl_include_path(filename: str, output_dir: str, impl_dir: str | None) -> str:
+    """Relative include path from ``output_dir`` (where the .hpp lives) to the
+    impl file (in ``impl_dir`` or ``output_dir`` when ``impl_dir`` is None).
+
+    Always returns forward slashes for cross-platform HLS toolchain portability.
+    """
+    import os.path
+    impl_root = impl_dir if impl_dir is not None else output_dir
+    if impl_root == output_dir:
+        return filename
+    rel_dir = os.path.relpath(impl_root, start=output_dir)
+    rel = os.path.join(rel_dir, filename) if rel_dir != "." else filename
+    return rel.replace("\\", "/")
+
+
+def header_to_cpp(
+    comp,
+    output_dir: str = ".",
+    impl_dir: str | None = None,
+) -> str:
     """Build the content of ``<component>.hpp``.
 
     Kernel forward declaration stays in the global namespace.  Hook
@@ -785,7 +804,11 @@ def header_to_cpp(comp) -> str:
     Each templated hook (one whose call site passes ``HwParam``-driven
     stream endpoints) gets its decl prefixed with ``template <int ...>``
     and triggers an ``#include "<component>_<hook>_impl.tpp"`` line at
-    the bottom of the header.
+    the bottom of the header.  The path on that ``#include`` line is
+    relative: from ``output_dir`` (where the ``.hpp`` lives) to
+    ``impl_dir`` (where the sticky ``.tpp`` is written).  When
+    ``impl_dir`` is ``None`` or equal to ``output_dir`` the path is
+    just the filename, preserving the original behavior.
     """
     from pysilicon.build.hwcodegen import extract_kernel
 
@@ -822,7 +845,10 @@ def header_to_cpp(comp) -> str:
         kn = cpp_kernel_name(type(comp))
         for hook, _ in templated:
             hname = hook.__name__  # type: ignore[attr-defined]
-            lines.append(f'#include "{kn}_{hname}_impl.tpp"')
+            include_path = _impl_include_path(
+                f"{kn}_{hname}_impl.tpp", output_dir, impl_dir,
+            )
+            lines.append(f'#include "{include_path}"')
 
     return "\n".join(lines) + "\n"
 
@@ -932,17 +958,26 @@ def impl_stub_to_tpp(comp, hook_method, template_params: list[str]) -> str:
     return header_comment + func_def + "\n"
 
 
-def kernel_files_to_str(comp) -> dict[str, str]:
+def kernel_files_to_str(
+    comp,
+    output_dir: str = ".",
+    impl_dir: str | None = None,
+) -> dict[str, str]:
     """Top-level driver. Returns ``{filename: contents}`` for all generated files.
 
     Per-hook routing: a hook with a non-empty ``hook_template_params`` list
     is emitted as a templated ``.tpp`` stub; otherwise a plain ``.cpp`` stub.
+
+    ``output_dir`` and ``impl_dir`` only influence the ``#include`` line
+    that ``<component>.hpp`` emits for each templated impl file — the
+    returned dict keys are still bare filenames.  Callers (e.g.
+    ``HlsCodegenStep``) decide which directory each filename lands in.
     """
     from pysilicon.build.hwcodegen import extract_kernel
 
     name = cpp_kernel_name(type(comp))
     files: dict[str, str] = {
-        f"{name}.hpp": header_to_cpp(comp),
+        f"{name}.hpp": header_to_cpp(comp, output_dir=output_dir, impl_dir=impl_dir),
         f"{name}.cpp": kernel_to_cpp(comp),
     }
     tree = extract_kernel(comp)
