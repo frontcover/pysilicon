@@ -10,7 +10,6 @@ import pytest
 from pysilicon.build.build import BuildConfig
 from pysilicon.build.hwcodegen_steps import HlsCodegenStep
 from pysilicon.build.hwgen import kernel_files_to_str
-from pysilicon.simulation.simulation import Simulation
 from tests.hw.test_resolve import DemoComponent
 
 
