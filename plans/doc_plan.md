@@ -20,8 +20,12 @@ Reorganize `docs/` so it reflects the codebase as it actually exists today, with
 
 ## Already done (do NOT redo)
 
-- `docs/guide/installation/`, `schema/`, `interface/`, `memory/`, `build/`, `timing/`, `developer/` — current and accurate. Leave alone.
+- `docs/guide/installation/`, `interface/`, `memory/`, `build/`, `timing/`, `developer/` — current and accurate. Leave alone.
 - `docs/examples/poly/` — current. Will need expansion in a follow-up once the full synthesis pipeline ships, but not part of this plan.
+
+## Stale sections caught later (must be rewritten in this plan)
+
+- `docs/guide/schema/` — stale due to the dataschema unification (Phase 9 of the synthesis work). Specifically `dataarrays.md` references the deleted `SchemaArray` framing, an obsolete `gen_array_utils` function (current API: `ArrayUtilsStep`), and an old `CodeGenConfig`/`util_dir` configuration style (current: `BuildConfig`). Plus several new concepts are completely undocumented: the `array()` factory in [pysilicon/hw/arrayutils.py](../pysilicon/hw/arrayutils.py), `DataArray.cpp_storage` (struct vs raw lowering), and the rule that pipelined stream operations are only legal inside `@synthesizable` hook bodies. Phase 4 of this plan addresses these.
 
 ## Design decisions (already settled — do NOT re-litigate)
 
@@ -130,6 +134,7 @@ Match the doc style of [docs/guide/interface/](../docs/guide/interface/) — fro
 - `docs/guide/components/index.md` — concept: `Component` vs `HwComponent`, the three variable categories (`HwConst` / `HwParam` / plain), endpoint declaration patterns.
 - `docs/guide/components/hwparam.md` — `HwParam[T]`, `HwParamValue` wrapper, immutability semantics, how the auto-wrap in `__post_init__` works.
 - `docs/guide/components/hwconst.md` — `HwConst[T]`, intent vs enforcement, when to use vs plain class attribute.
+- `docs/guide/components/variants.md` (new) — `param_supports` declaration: when and why to declare variants, naming convention (`<cpp_kernel_name>_<key>`), the default-always-emitted rule, validation rules (valid C identifier, non-empty override dict, known HwParam fields, duplicate-resolved-config warning), and what the generated code looks like (one concrete top-level function per variant, no top-level templates).
 - `docs/guide/components/lifecycle.md` — `pre_sim` / `run_proc` / `on_start` / `post_sim`. When each fires. When to use `on_start` (regmap-driven launch) vs `run_proc` (free-running SimPy process).
 
 Existing content in `docs/guide/components/index.md` (if any) gets absorbed or replaced. Read first; harvest worth-preserving prose.
@@ -138,7 +143,41 @@ Existing content in `docs/guide/components/index.md` (if any) gets absorbed or r
 
 ---
 
-## Phase 4: Slim `docs/overview/`
+## Phase 4: Refresh `docs/guide/schema/`
+
+**Goal:** Update the schema docs to reflect the post-dataschema-unification reality. Delete references to the deleted `SchemaArray`, replace obsolete API names, and document new concepts (`array()` factory, `DataArray.cpp_storage`, the pipelined-ops rule).
+
+**Pages to touch:**
+
+- `docs/guide/schema/dataarrays.md` — biggest rewrite. The current opening framing ("This section does NOT discuss the `DataArray` schema class itself") is wrong; `DataArray` *is* the unified array concept now. Restructure as: (1) `DataArray` declaration and `element_type`/`max_shape` basics, (2) the `array(elem_type, data)` factory for runtime construction, (3) `cpp_storage="struct"` (default) vs `"raw"` lowering modes with examples, (4) generated array utilities via `ArrayUtilsStep`. Drop the section that says it's only about "array utilities" — that's one piece of a larger story.
+- `docs/guide/schema/dataarrays.md` — fix specific API references:
+  - `gen_array_utils` → `ArrayUtilsStep` (BuildStep, registered in a BuildDag; not a free function).
+  - `CodeGenConfig(root_dir=..., util_dir=...)` → `BuildConfig(root_dir=...)`.
+  - Fix the typo `WORD_BWword_bw_supported` → `word_bw_supported` (whatever it should have been).
+- `docs/guide/schema/datalists.md` — verify the `CoeffArray(DataArray)` example still reads correctly post-unification. The example shape (a class inheriting `DataArray` with `element_type` and `max_shape`) is still valid; just confirm the surrounding prose doesn't reference `SchemaArray` or obsolete APIs.
+- `docs/guide/schema/codegen.md` — verify the generated-codegen story still matches the current `DataSchemaStep` + `ArrayUtilsStep` flow.
+- `docs/guide/schema/index.md` — verify the table of contents and any overview prose still reflect current structure.
+- `docs/guide/schema/dataunion.md` — verify (probably unaffected, but check).
+
+**New sections to add to `dataarrays.md`** (or a new sibling page `array_lowering.md`):
+
+- **`cpp_storage` modes.** Worked example: declaring a `DataArray` with `cpp_storage="raw"` and what the generated C++ looks like (`float arr[N]` vs `MyArray& arr`). When to use each. Reference the poly `CoeffArray` usage as an example.
+- **The `array()` factory.** For converting `(elem_type, runtime_data)` to a `DataArray` instance without manual specialization. Useful for testbench-side array construction.
+- **Pipelined ops rule.** Brief callout that `s_in.get_pipelined(...)` and `m_out.write_pipelined(...)` are only legal inside `@synthesizable` hook bodies, not in `on_start` / `run_proc`. Probably better placed in `docs/guide/components/` or `docs/guide/synthesis/`, but worth cross-referencing from the schema docs.
+
+**Sweep for `SchemaArray` references** across all of `docs/guide/schema/`:
+
+```bash
+grep -rn "SchemaArray" docs/
+```
+
+For each hit, replace with a `DataArray`-based equivalent or delete the surrounding sentence if it was specifically describing `SchemaArray`-only behavior.
+
+**Commit:** `docs: refresh guide/schema/ for DataArray unification (drop SchemaArray, add cpp_storage + array())`
+
+---
+
+## Phase 5: Slim `docs/overview/`
 
 **Goal:** Cut the overview down to the elevator pitch + one worked example pointer + motivation. Drop aspirational positioning.
 
@@ -153,9 +192,9 @@ Existing content in `docs/guide/components/index.md` (if any) gets absorbed or r
 
 ---
 
-## Phase 5: Delete `docs/architecture/`
+## Phase 6: Delete `docs/architecture/`
 
-**Goal:** Final cut — after Phases 2–4 have absorbed any prose worth preserving.
+**Goal:** Final cut — after Phases 2–5 have absorbed any prose worth preserving.
 
 **Changes:**
 
@@ -167,7 +206,7 @@ Existing content in `docs/guide/components/index.md` (if any) gets absorbed or r
 
 ---
 
-## Phase 6: Renumber + cross-link audit
+## Phase 7: Renumber + cross-link audit
 
 **Goal:** Make sure the sidebar order makes sense and internal links all resolve.
 
@@ -195,7 +234,7 @@ Existing content in `docs/guide/components/index.md` (if any) gets absorbed or r
 - `docs/guide/components/` is fleshed out with real content (not the current stub).
 - `docs/future/` exists with at least 4 stub pages.
 - No broken internal links across `docs/`.
-- 6 commits on `main`, one per phase, pushed in order.
+- 7 commits on `main`, one per phase, pushed in order.
 
 ## Out of scope (do NOT do)
 
@@ -217,3 +256,5 @@ Execute this plan when **all** of the following are true:
 3. The `experiment/` sandbox scripts (`extract_demo.py`, `codegen_demo.py`, `buildstep_demo.py`) all produce sensible output for the current state — they're informal validation that the docs will accurately reflect what users see.
 
 Until these hold, leave `docs/architecture/` in place (stale but harmless). Phase 1 (the `docs/future/` placeholder) is the only piece safe to execute before the trigger.
+
+Note: as the synthesis pipeline has evolved, sections originally marked "current and accurate" can fall out of sync (this happened to `docs/guide/schema/` after the dataschema unification — addressed by Phase 4). Before executing this plan, re-grep the "current and accurate" sections for references to deleted classes / renamed APIs / superseded patterns. If new staleness is found, add or expand a phase rather than executing the plan as-written against incomplete inventory.
