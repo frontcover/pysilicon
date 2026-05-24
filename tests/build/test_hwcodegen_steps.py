@@ -1,7 +1,9 @@
 """Tests for HlsCodegenStep — BuildStep wrapper around HLS codegen."""
 from __future__ import annotations
 
+from dataclasses import dataclass
 from pathlib import Path
+from typing import Any, ClassVar
 
 import pytest
 
@@ -10,6 +12,20 @@ from pysilicon.build.hwcodegen_steps import HlsCodegenStep
 from pysilicon.build.hwgen import kernel_files_to_str
 from pysilicon.simulation.simulation import Simulation
 from tests.hw.test_resolve import DemoComponent
+
+
+@dataclass
+class _MultiVariantDemo(DemoComponent):
+    """A DemoComponent subclass with a second param_supports variant.
+
+    Defined at module scope so dataclass can resolve the ``ClassVar``
+    annotation under ``from __future__ import annotations`` — function-local
+    classes fail that resolution and treat ``param_supports`` as a field.
+    """
+    cpp_kernel_name: ClassVar[str | None] = "mvd"
+    param_supports: ClassVar[dict[str, dict[str, Any]] | None] = {
+        "bw64": {"in_bw": 64, "out_bw": 64},
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -399,3 +415,40 @@ def test_kernel_files_to_str_emits_relative_include():
 
     files = kernel_files_to_str(_TmplComp, output_dir="gen", impl_dir=".")
     assert '#include "../tcomp_process_impl.tpp"' in files["tcomp.hpp"]
+
+
+# ---------------------------------------------------------------------------
+# Phase 13 Phase 3: HlsCodegenStep with multi-variant param_supports
+# ---------------------------------------------------------------------------
+
+def test_single_variant_demo_writes_one_concrete_kernel(tmp_path: Path):
+    """Single-variant case (no param_supports): one concrete void demo(...)."""
+    step = HlsCodegenStep(
+        comp_class=DemoComponent,
+        source_artifact="demo_src",
+        output_dir="gen",
+    )
+    step.run(BuildConfig(root_dir=tmp_path))
+    cpp = (tmp_path / "gen" / "demo.cpp").read_text(encoding="utf-8")
+    assert cpp.count("void demo(") == 1
+    assert "template" not in cpp
+
+
+def test_multi_variant_emits_one_concrete_kernel_per_variant(tmp_path: Path):
+    """A component with param_supports yields default + variant in one .cpp."""
+    step = HlsCodegenStep(
+        comp_class=_MultiVariantDemo,
+        source_artifact="demo_src",
+        output_dir="gen",
+    )
+    step.run(BuildConfig(root_dir=tmp_path))
+    cpp = (tmp_path / "gen" / "mvd.cpp").read_text(encoding="utf-8")
+    assert "void mvd(" in cpp
+    assert "void mvd_bw64(" in cpp
+    assert "axi4s_word<32>" in cpp
+    assert "axi4s_word<64>" in cpp
+    assert "template" not in cpp
+
+    hpp = (tmp_path / "gen" / "mvd.hpp").read_text(encoding="utf-8")
+    assert "void mvd(" in hpp
+    assert "void mvd_bw64(" in hpp
