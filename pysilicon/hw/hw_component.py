@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import re
 import sys
+import warnings
 from dataclasses import dataclass
 from enum import Enum, auto
 from typing import Any, ClassVar, Generic, TypeVar
@@ -60,6 +62,88 @@ def discover_hw_const(cls) -> dict[str, Any]:
                 if hasattr(klass, name):
                     result[name] = getattr(klass, name)
     return result
+
+
+_VARIANT_KEY_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+
+
+def _hw_param_names(comp_class) -> set[str]:
+    """Return the set of ``HwParam``-annotated field names on ``comp_class``."""
+    names: set[str] = set()
+    for klass in comp_class.__mro__:
+        for n, hint in getattr(klass, '__annotations__', {}).items():
+            if isinstance(hint, str):
+                mod = sys.modules.get(klass.__module__)
+                globs: dict = vars(mod) if mod is not None else {}
+                try:
+                    hint = eval(hint, globs)  # noqa: S307
+                except Exception:
+                    continue
+            if typing.get_origin(hint) is HwParam:
+                names.add(n)
+    return names
+
+
+def _resolve_variant_values(comp_class, overrides: dict[str, Any]) -> dict[str, Any]:
+    """Return the fully-resolved param values for a variant: defaults + overrides."""
+    values: dict[str, Any] = {}
+    for n in _hw_param_names(comp_class):
+        values[n] = getattr(comp_class, n)
+    values.update(overrides)
+    return values
+
+
+def validate_param_supports(comp_class) -> None:
+    """Validate ``comp_class.param_supports``; raise ``SynthesisError`` on any violation.
+
+    Rules:
+    - Must be a ``dict`` (or ``None``).
+    - Each key must match ``[A-Za-z_][A-Za-z0-9_]*`` (valid C identifier).
+    - Each entry must be a non-empty dict.
+    - Each override key must be a declared ``HwParam`` field on the component.
+    - Two variants that resolve to the same param configuration emit a
+      ``warnings.warn``, but do not raise.
+    """
+    from pysilicon.build.hwcodegen import SynthesisError
+
+    ps = getattr(comp_class, 'param_supports', None)
+    if ps is None:
+        return
+    if not isinstance(ps, dict):
+        raise SynthesisError(
+            f"{comp_class.__name__}.param_supports must be a dict "
+            f"(got {type(ps).__name__})"
+        )
+    hw_param_names = _hw_param_names(comp_class)
+    seen_resolved: dict[tuple, str] = {}
+    for key, overrides in ps.items():
+        if not isinstance(key, str) or not _VARIANT_KEY_RE.match(key):
+            raise SynthesisError(
+                f"{comp_class.__name__}.param_supports key {key!r} is not a "
+                f"valid C identifier (must match [A-Za-z_][A-Za-z0-9_]*)"
+            )
+        if not isinstance(overrides, dict) or not overrides:
+            raise SynthesisError(
+                f"{comp_class.__name__}.param_supports[{key!r}] must be a "
+                f"non-empty dict of param overrides; got {overrides!r}"
+            )
+        for name in overrides:
+            if name not in hw_param_names:
+                raise SynthesisError(
+                    f"{comp_class.__name__}.param_supports[{key!r}] overrides "
+                    f"unknown parameter {name!r}; declared HwParam fields are "
+                    f"{sorted(hw_param_names)}"
+                )
+        resolved = _resolve_variant_values(comp_class, overrides)
+        dup_key = tuple(sorted(resolved.items()))
+        if dup_key in seen_resolved:
+            warnings.warn(
+                f"{comp_class.__name__}.param_supports[{key!r}] resolves to "
+                f"the same configuration as {seen_resolved[dup_key]!r}",
+                stacklevel=2,
+            )
+        else:
+            seen_resolved[dup_key] = key
 
 
 class ControlMode(Enum):
@@ -164,6 +248,21 @@ class HwComponent(Component):
 
     The kernel function itself is always emitted in the global namespace
     (Vitis HLS requires this).
+    """
+
+    param_supports: ClassVar[dict[str, dict[str, Any]] | None] = None
+    """Map of variant-suffix-name → param-override-dict.
+
+    Each entry causes the framework to generate an additional concrete kernel
+    function named ``<cpp_kernel_name>_<key>`` with the listed ``HwParam``
+    overrides applied. Unspecified params use their ``HwParam``-declared
+    default.
+
+    A default kernel named ``<cpp_kernel_name>`` (no suffix) is **always**
+    generated using ``HwParam`` defaults, regardless of ``param_supports``.
+
+    ``None`` (default) = no additional variants; only the default kernel is
+    emitted.
     """
 
     def __post_init__(self) -> None:
