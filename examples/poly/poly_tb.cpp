@@ -5,6 +5,7 @@
 
 #include "gen/poly.hpp"
 #include "include/float32_array_utils_tb.h"
+#include "include/poly_resp_hdr.h"
 #include "include/streamutils_tb.h"
 
 // The generated `gen/poly.hpp` is templated and does not provide the
@@ -70,7 +71,7 @@ int main(int argc, char** argv) {
     ap_uint<16> tx_id  = 0;
 
     // Generated kernel signature: poly(s_in, m_out, halted, error, tx_id, coeffs).
-    // Rely on C++ template deduction from axis_word_t to fix in_bw=out_bw=32.
+    // Template deduction from axis_word_t fixes in_bw=out_bw=32.
     poly(s_in, m_out, halted, error, tx_id, coeffs);
 
     // -----------------------------------------------------------------------

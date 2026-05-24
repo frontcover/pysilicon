@@ -96,6 +96,15 @@ def _emit_return(stmt: ReturnStmt, ctx: CodegenCtx) -> str:
 def _emit_case(stmt: CaseStmt, ctx: CodegenCtx) -> str:
     lhs = stmt.var.name if stmt.field is None else f"{stmt.var.name}.{stmt.field}"
     rhs = _emit_literal(stmt.value)
+    # When the bare variable is itself an IntEnum (e.g. evaluate's PolyError
+    # return), the local var is declared as ap_uint<8> (matching the hook's
+    # actual C++ return type).  Cast the enum literal so the comparison
+    # compiles against the ap_uint<8> LHS.
+    if (stmt.field is None
+            and isinstance(stmt.var.typ, type)
+            and issubclass(stmt.var.typ, IntEnum)
+            and isinstance(stmt.value, IntEnum)):
+        rhs = f"(ap_uint<8>)static_cast<unsigned int>({rhs})"
     cond = f"{lhs} {stmt.op} {rhs}"
     lines = [f"{ctx.pad()}if ({cond}) {{"]
     lines.append(to_cpp(stmt.if_true, ctx.child()))
@@ -168,12 +177,19 @@ def _emit_regmap_get(stmt: RegMapGetStmt, ctx: CodegenCtx) -> str:
     # stmt.inputs = [field_name str]; stmt.outputs = [HwVar]
     field_name = stmt.inputs[0]
     out = stmt.outputs[0]
-    cpp_type = (
+    # When the bound HwVar name equals the field name, the kernel-signature
+    # parameter (s_axilite scalar/array) is already in scope under that
+    # exact name, so no copy/binding is needed (and emitting one trips
+    # self-init for raw-array fields).  Emit a comment so the generated
+    # source still records the read intent.
+    if out.name == field_name:
+        return f"{ctx.pad()}// {out.name} is already in scope via the kernel signature."
+    cpp_t = (
         out.typ.cpp_class_name()
         if hasattr(out.typ, 'cpp_class_name')
         else 'auto'
     )
-    return f"{ctx.pad()}{cpp_type} {out.name} = {field_name};"
+    return f"{ctx.pad()}{cpp_t} {out.name} = {field_name};"
 
 
 def _emit_regmap_set(stmt: RegMapSetStmt, ctx: CodegenCtx) -> str:
@@ -215,10 +231,18 @@ def _emit_function_call(stmt: FunctionStmt, ctx: CodegenCtx) -> str:
 
 
 def _cpp_type_for(typ) -> str:
-    """Fallback C++ type for ``HwVar.typ`` values without ``cpp_class_name``."""
+    """Fallback C++ type for ``HwVar.typ`` values without ``cpp_class_name``.
+
+    ``IntEnum`` subclasses map to ``ap_uint<8>`` to match what the codegen
+    uses everywhere else for enum return/arg types (see ``cpp_type``).  Using
+    the enum class name here would mismatch the auto-generated hook forward
+    declaration, which returns ``ap_uint<8>`` for ``ProcessGen[<IntEnum>]``
+    annotations.
+    """
     if typ is None:
         return 'auto'
-    # IntEnum subclasses lack cpp_class_name but render as themselves in C++.
+    if isinstance(typ, type) and issubclass(typ, IntEnum):
+        return 'ap_uint<8>'
     name = getattr(typ, '__name__', None)
     if name:
         return name
@@ -871,16 +895,77 @@ def kernel_body_to_cpp(comp: HwComponent) -> str:
 
 
 def kernel_to_cpp(comp) -> str:
-    """Build the content of ``<component>.cpp`` — kernel function with body."""
+    """Build the content of ``<component>.cpp`` — kernel function with body.
+
+    When the kernel signature is templated (``HwParam``-driven endpoint
+    bitwidths produced a ``template <int ...>`` block), the kernel
+    definition is emitted in the ``.cpp`` for synthesis, but C++ then
+    needs an explicit instantiation so the testbench's call site
+    (compiled in a separate TU) can link.  The instantiation uses the
+    component's current ``HwParamValue`` defaults — typically the same
+    bitwidths the testbench instantiates with.
+    """
     header_name = f"{cpp_kernel_name(type(comp))}.hpp"
     sig_with_pragmas = kernel_signature(comp)
     body = kernel_body_to_cpp(comp)
     body_inner = body.removeprefix("{\n").removesuffix("\n}")
-    return (
+    out = (
         f'#include "{header_name}"\n\n'
         f"{sig_with_pragmas}\n"
         f"{body_inner}\n"
         f"}}\n"
+    )
+    inst = _kernel_explicit_instantiation(comp)
+    if inst:
+        out += f"\n{inst}\n"
+    return out
+
+
+def _kernel_explicit_instantiation(comp) -> str:
+    """Return an explicit-instantiation block for the kernel, or ``''`` if
+    the kernel is not templated.
+
+    Uses the component's ``HwParamValue`` defaults as the instantiation
+    arguments — same source the template-param block is derived from.
+    """
+    template_params = _collect_template_params(comp)
+    if not template_params:
+        return ""
+    values: list[str] = []
+    for pname in template_params:
+        bw = getattr(comp, pname, None)
+        if bw is None:
+            return ""  # No usable value; skip rather than emit broken code.
+        values.append(str(int(bw)))
+    kn = cpp_kernel_name(type(comp))
+    # Reproduce the argument-type list from kernel_signature, but with the
+    # template-param substitutions baked in so we emit a concrete
+    # specialization.
+    arg_lines: list[str] = []
+    for attr, ep in _discover_stream_endpoints(comp):
+        bw = ep.bitwidth
+        bw_val = int(bw)
+        arg_lines.append(
+            f"    hls::stream<streamutils::axi4s_word<{bw_val}>>& {attr}"
+        )
+    regmap_slave = _discover_regmap(comp)
+    if regmap_slave is not None:
+        for fname, fld in regmap_slave.regmap._fields.items():
+            if fld.is_vitis_auto:
+                continue
+            schema = fld.schema
+            if (isinstance(schema, type) and issubclass(schema, DataArray)
+                    and getattr(schema, 'cpp_storage', 'struct') == 'raw'):
+                elem_cpp = cpp_type(schema.element_type)
+                count = schema._declared_count()
+                arg_lines.append(f"    {elem_cpp} {fname}[{count}]")
+            else:
+                arg_lines.append(f"    {cpp_type(schema)}& {fname}")
+    arg_block = ",\n".join(arg_lines)
+    inst_args = ", ".join(values)
+    return (
+        f"// Explicit instantiation for the configured bitwidths.\n"
+        f"template void {kn}<{inst_args}>(\n{arg_block}\n);"
     )
 
 

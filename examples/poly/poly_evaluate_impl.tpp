@@ -10,7 +10,12 @@
 // the generated kernel reads cmd_hdr with the one-arg `read_axi4_stream`
 // which discards TLAST status.  See plan §"Known semantic regression".
 
-namespace poly {
+// PolyRespHdr is used inside the hook body but is not visible through the
+// generated kernel signature, so gen/poly.hpp doesn't auto-include it.
+// Pull it in here — the schema header has its own include guard.
+#include "include/poly_resp_hdr.h"
+
+namespace poly_impl {
 
 // Horner-form polynomial evaluator; pulled from the previous hand-written
 // poly.cpp lines 4-11.  Kept as a `static inline` helper so multiple TUs
@@ -83,4 +88,4 @@ ap_uint<8> evaluate(PolyCmdHdr cmd_hdr,
     return (ap_uint<8>)static_cast<unsigned int>(PolyError::NO_ERROR);
 }
 
-} // namespace poly
+} // namespace poly_impl

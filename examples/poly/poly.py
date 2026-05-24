@@ -160,6 +160,10 @@ class PolyAccelComponent(HwComponent):
     """
 
     cpp_kernel_name: ClassVar[str | None] = "poly"
+    # The hook-wrapping namespace must differ from the kernel function name —
+    # otherwise `::poly(...)` at the TB call site is ambiguous between the
+    # free function and the namespace.
+    cpp_namespace:   ClassVar[str | None] = "poly_impl"
 
     in_bw:        HwParam[int] = 32
     out_bw:       HwParam[int] = 32

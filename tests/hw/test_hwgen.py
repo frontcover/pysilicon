@@ -305,12 +305,13 @@ def test_regmap_get_with_typed_output():
         def cpp_class_name(cls):
             return "CoeffArray"
 
+    # Renamed binding (out.name != field_name): a copy/binding is emitted.
     stmt = RegMapGetStmt(
         method=None,
         inputs=['coeffs'],
-        outputs=[HwVar(name='coeffs', typ=_CoeffArray)],
+        outputs=[HwVar(name='local_coeffs', typ=_CoeffArray)],
     )
-    assert to_cpp(stmt, _ctx()) == "    CoeffArray coeffs = coeffs;"
+    assert to_cpp(stmt, _ctx()) == "    CoeffArray local_coeffs = coeffs;"
 
 
 def test_regmap_get_with_untyped_output_falls_back_to_auto():
@@ -318,9 +319,24 @@ def test_regmap_get_with_untyped_output_falls_back_to_auto():
     stmt = RegMapGetStmt(
         method=None,
         inputs=['coeffs'],
+        outputs=[HwVar(name='local_coeffs', typ=None)],
+    )
+    assert to_cpp(stmt, _ctx()) == "    auto local_coeffs = coeffs;"
+
+
+def test_regmap_get_same_name_as_field_emits_noop_comment():
+    """When the bound HwVar name equals the field name, the kernel signature
+    parameter is already in scope — no redundant copy/self-init."""
+    from pysilicon.hw.regmap import RegMapGetStmt
+    stmt = RegMapGetStmt(
+        method=None,
+        inputs=['coeffs'],
         outputs=[HwVar(name='coeffs', typ=None)],
     )
-    assert to_cpp(stmt, _ctx()) == "    auto coeffs = coeffs;"
+    out = to_cpp(stmt, _ctx())
+    assert "coeffs is already in scope" in out
+    assert "auto coeffs = coeffs" not in out
+    assert "= coeffs;" not in out
 
 
 # ---------------------------------------------------------------------------
@@ -340,7 +356,9 @@ def test_function_stmt_with_typed_output():
         outputs=[HwVar(name='err', typ=DemoError)],
     )
     # _ctx() uses bare HwComponent → resolved_namespace == "hw".
-    assert to_cpp(stmt, _ctx()) == "    DemoError err = hw::process(cmd);"
+    # IntEnum return types render as ap_uint<8> to match what the hook
+    # forward decl actually returns (cpp_type maps IntEnum → ap_uint<8>).
+    assert to_cpp(stmt, _ctx()) == "    ap_uint<8> err = hw::process(cmd);"
 
 
 def test_function_stmt_no_outputs():
@@ -809,10 +827,13 @@ def test_kernel_to_cpp_substrings():
         "void demo(",
         "#pragma HLS INTERFACE axis port=s_in",
         "while (true)",
+        # Templated kernel → explicit instantiation block at the bottom.
+        "template void demo<32, 32>(",
     ]:
         assert sub in cpp, f"Missing substring: {sub!r}\n--- cpp ---\n{cpp}"
-    # Closing brace at end of file.
-    assert cpp.rstrip().endswith("}")
+    # Last non-whitespace char is `;` (the closing of the explicit
+    # instantiation), since the template kernel adds it after the function.
+    assert cpp.rstrip().endswith(";")
 
 
 def test_impl_stub_to_cpp_substrings():
@@ -936,8 +957,9 @@ def test_kernel_body_to_cpp_demo_component_contains_expected_substrings():
         "cmd.read_axi4_stream<in_bw>(s_in);",
         "if (cmd.cmd_type == DemoCmdType::END)",
         "return;",
-        "DemoError err = demo::process(cmd",
-        "if (err != DemoError::OK)",
+        "ap_uint<8> err = demo::process(cmd",
+        # err is ap_uint<8>; cast the enum literal so the != comparison compiles.
+        "if (err != (ap_uint<8>)static_cast<unsigned int>(DemoError::OK))",
         "error = err;",
         "tx_id = cmd.tx_id;",
         "halted = 1;",
