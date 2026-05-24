@@ -49,10 +49,20 @@ class HwStmtExtractor:
     free-running components or a ``SeqStmt`` for per-invocation ones).
     """
 
-    def __init__(self, comp: HwComponent, method_name: str = 'run_proc') -> None:
+    def __init__(
+        self,
+        comp,
+        method_name: str = 'run_proc',
+        is_testbench: bool = False,
+    ) -> None:
         self._comp = comp
         self._method_name = method_name
+        self._is_testbench = is_testbench
         self._scope: dict[str, HwVar] = {}
+        # Testbench-mode side tables — empty in kernel mode, populated by
+        # the extractor as it walks the body in Phase 3/4.
+        self._duts: dict[str, object] = {}      # local_name -> HwComponent instance
+        self._tb_locals: dict[str, object] = {} # local_name -> object (binding)
 
     # ------------------------------------------------------------------
     # Public entry point
@@ -468,14 +478,20 @@ class HwStmtExtractor:
 # ---------------------------------------------------------------------------
 
 
-def extract_kernel(comp: HwComponent) -> HwStmt:
+def extract_kernel(comp) -> HwStmt:
     """Extract the kernel body and return a fully-resolved ``HwStmt`` tree.
 
     Picks ``on_start`` if the component has a ``VitisRegMapMMIFSlave``
     endpoint, otherwise ``run_proc``.  The returned tree has every ``ast.*``
     node replaced with the real Python value and every output ``HwVar``
     typed where possible.
+
+    For ``HwTestbench`` subclasses this routes to :func:`extract_testbench`
+    instead — the testbench-mode entry point is ``main()`` with a different
+    rule profile.
     """
+    if getattr(type(comp), '_is_testbench', False):
+        return extract_testbench(comp)
     from pysilicon.build.hwresolve import resolve_kernel  # local: avoid cycle
     from pysilicon.hw.regmap import VitisRegMapMMIFSlave
     for ep in getattr(comp, 'endpoints', {}).values():
@@ -484,3 +500,18 @@ def extract_kernel(comp: HwComponent) -> HwStmt:
             return resolve_kernel(tree, comp)
     tree = HwStmtExtractor(comp, method_name='run_proc').extract()
     return resolve_kernel(tree, comp)
+
+
+def extract_testbench(comp) -> HwStmt:
+    """Extract the testbench ``main()`` body and return a resolved ``HwStmt`` tree.
+
+    Companion to :func:`extract_kernel`, but for the testbench-source
+    pathway introduced by Phase 14: the component is a ``HwTestbench``
+    subclass whose ``main()`` method is the codegen root.  Rule profile
+    differs from the kernel side — blocking stream ops, file I/O, and
+    DUT construction are legal, while pipelined ops stay forbidden.
+    """
+    from pysilicon.build.hwresolve import resolve_testbench
+    extractor = HwStmtExtractor(comp, method_name='main', is_testbench=True)
+    tree = extractor.extract()
+    return resolve_testbench(tree, comp)

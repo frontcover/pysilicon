@@ -44,6 +44,23 @@ def resolve_kernel(tree: HwStmt, comp: HwComponent) -> HwStmt:
     return tree
 
 
+def resolve_testbench(tree: HwStmt, comp) -> HwStmt:
+    """Resolve a testbench-extractor tree (entry point ``main``).
+
+    For v1 the resolution rules are a superset of the kernel ones: every
+    name + attribute chain that ``resolve_kernel`` already handles is
+    handled the same way.  Future phases extend the resolver to also
+    resolve DUT-attribute chains (``dut.s_in`` → bound endpoint object)
+    once the extractor produces those bindings.
+    """
+    scope: dict[str, HwVar] = {}
+    method = getattr(comp, 'main')
+    module = sys.modules.get(method.__module__)
+    globs = getattr(method, '__globals__', {})
+    _walk(tree, scope, comp, module, globs)
+    return tree
+
+
 def _kernel_method(comp):
     """Mirror extract_kernel's selection: on_start if regmap-bearing, else run_proc."""
     from pysilicon.hw.regmap import VitisRegMapMMIFSlave
