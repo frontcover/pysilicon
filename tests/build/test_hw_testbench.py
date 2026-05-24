@@ -90,3 +90,97 @@ def test_extractor_carries_is_testbench_flag():
     # Default is False — preserves backwards compat for kernel-mode callers.
     kernel_ext = HwStmtExtractor(tb, method_name='main')
     assert kernel_ext._is_testbench is False
+
+
+# ---------------------------------------------------------------------------
+# Phase 2 — HlsCodegenStep testbench mode
+# ---------------------------------------------------------------------------
+
+from typing import ClassVar
+
+
+@dataclass
+class _PolyTbStub(HwTestbench):
+    """Minimal testbench class with ``cpp_kernel_name = "poly"`` so the
+    Phase-2 emitter writes ``gen/poly_tb.cpp`` (matching what Phase 6
+    will plug into ``poly_build.py``).  The body stays a docstring
+    placeholder — real extraction lands in Phase 3+."""
+
+    cpp_kernel_name: ClassVar[str | None] = "poly"
+
+    def main(self) -> None:
+        """Phase-2 placeholder body."""
+
+
+@pytest.mark.phase2
+def test_hls_codegen_step_auto_detects_testbench_mode():
+    from pysilicon.build.hwcodegen_steps import HlsCodegenStep
+    step = HlsCodegenStep(
+        comp_class=_PolyTbStub,
+        source_artifact="poly_source",
+        output_dir="gen",
+    )
+    assert step._is_testbench is True
+    # Kernel-mode component stays in kernel mode.
+    from tests.hw.test_resolve import DemoComponent
+    kernel_step = HlsCodegenStep(
+        comp_class=DemoComponent,
+        source_artifact="demo_src",
+        output_dir="gen",
+    )
+    assert kernel_step._is_testbench is False
+
+
+@pytest.mark.phase2
+def test_hls_codegen_step_explicit_is_testbench_override():
+    """``is_testbench=True`` forces TB mode even on a non-marker class."""
+    from pysilicon.build.hwcodegen_steps import HlsCodegenStep
+    from tests.hw.test_resolve import DemoComponent
+    step = HlsCodegenStep(
+        comp_class=DemoComponent,
+        source_artifact="x",
+        output_dir="gen",
+        is_testbench=True,
+    )
+    assert step._is_testbench is True
+
+
+@pytest.mark.phase2
+def test_hls_codegen_step_testbench_produces_single_tb_file():
+    """In TB mode, ``produces`` is just ``{<kernel>_tb: <kernel>_tb.cpp}``."""
+    from pathlib import Path
+    from pysilicon.build.hwcodegen_steps import HlsCodegenStep
+    step = HlsCodegenStep(
+        comp_class=_PolyTbStub,
+        source_artifact="poly_source",
+        output_dir="gen",
+    )
+    assert step.produces == {"poly_tb": Path("gen/poly_tb.cpp")}
+
+
+@pytest.mark.phase2
+def test_hls_codegen_step_run_emits_skeleton_tb_cpp(tmp_path):
+    """``run()`` writes a compilable skeleton file in TB mode."""
+    from pysilicon.build.build import BuildConfig
+    from pysilicon.build.hwcodegen_steps import HlsCodegenStep
+    step = HlsCodegenStep(
+        comp_class=_PolyTbStub,
+        source_artifact="poly_source",
+        output_dir="gen",
+    )
+    artifacts = step.run(BuildConfig(root_dir=tmp_path))
+    tb_path = tmp_path / "gen" / "poly_tb.cpp"
+    assert artifacts == {"poly_tb": tb_path}
+    body = tb_path.read_text(encoding="utf-8")
+    # Skeleton must compile and reference the kernel header.
+    assert '#include "poly.hpp"' in body
+    assert "int main(int argc, char** argv)" in body
+    assert "return 0;" in body
+
+
+@pytest.mark.phase2
+def test_tb_files_to_str_returns_single_file():
+    from pysilicon.build.hwgen import tb_files_to_str
+    files = tb_files_to_str(_PolyTbStub, output_dir="gen")
+    assert set(files) == {"poly_tb.cpp"}
+    assert "int main(" in files["poly_tb.cpp"]

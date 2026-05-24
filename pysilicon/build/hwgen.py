@@ -1001,6 +1001,55 @@ def impl_stub_to_tpp(comp, hook_method, template_params: list[str]) -> str:
     return header_comment + func_def + "\n"
 
 
+def tb_files_to_str(
+    tb_class,
+    output_dir: str = ".",
+) -> dict[str, str]:
+    """Build the file set for a ``HwTestbench`` subclass.
+
+    Returns ``{filename: contents}`` for the single ``<kernel>_tb.cpp``
+    file emitted in testbench mode.  ``cpp_kernel_name`` controls the
+    filename: testbench classes are expected to set it to match the DUT
+    they test (e.g. ``cpp_kernel_name = "poly"`` on a ``PolyTBHls``
+    yields ``gen/poly_tb.cpp``).
+
+    Phase 14 / Phase 2: the body is a Phase-2 skeleton — Phase 3 + 4
+    wire in DUT binding, stream push/pop, file I/O, and the kernel
+    call.  For now this confirms the file shape and the mode routing.
+    """
+    name = cpp_kernel_name(tb_class)
+    return {f"{name}_tb.cpp": _tb_skeleton(tb_class)}
+
+
+def _tb_skeleton(tb_class) -> str:
+    """Phase-2 placeholder: minimal compilable ``int main()`` skeleton.
+
+    Includes the standard library headers the hand-written ``poly_tb.cpp``
+    pulls in, parses the data-dir argv, and returns 0.  No DUT
+    instantiation, no stream I/O — those land in Phase 3 + 4.
+
+    The ``<kernel>.hpp`` include is intentionally added even though the
+    skeleton doesn't yet call the kernel — downstream phases need the
+    DUT's signature visible, and including the empty header costs
+    nothing.
+    """
+    kn = cpp_kernel_name(tb_class)
+    return (
+        f'#include "{kn}.hpp"\n'
+        "#include <fstream>\n"
+        "#include <cstdint>\n"
+        "#include <string>\n"
+        "#include <stdexcept>\n"
+        "\n"
+        "int main(int argc, char** argv) {\n"
+        '    const std::string data_dir = (argc > 1) ? argv[1] : "data";\n'
+        "    (void)data_dir;\n"
+        "    // Phase-2 skeleton; Phase 3+ emits the real testbench body.\n"
+        "    return 0;\n"
+        "}\n"
+    )
+
+
 def kernel_files_to_str(
     comp_class,
     output_dir: str = ".",
