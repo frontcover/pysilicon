@@ -252,11 +252,15 @@ class FunctionalVerifyStep(BuildStep):
             out_dir = root_dir / self.output_dir
             out_dir.mkdir(parents=True, exist_ok=True)
             # Copy each actual file the manifest references, so downstream
-            # tooling can find the verified outputs in one place.
+            # tooling can find the verified outputs in one place.  The
+            # mirror uses ``golden_filename`` when present so the output
+            # directory uses the canonical names (matching the layout the
+            # golden producer writes); downstream consumers can then read
+            # both directories with a single set of filenames.
             for spec in (*self.schemas, *self.arrays, *self.jsons):
                 src = actual_dir / spec["filename"]
                 if src.exists():
-                    dst = out_dir / spec["filename"]
+                    dst = out_dir / spec.get("golden_filename", spec["filename"])
                     dst.write_bytes(src.read_bytes())
             result_artifacts[self.output_artifact] = out_dir
 

@@ -204,7 +204,15 @@ def test_functional_verify_status_nonzero_fails(tmp_path):
 
 def test_functional_verify_copies_actual_to_output_dir(tmp_path):
     """With ``output_dir`` set, the actual outputs are mirrored into that
-    directory so downstream tooling can find them in one place."""
+    directory under their ``golden_filename`` so downstream tooling can
+    read the mirror and the golden directory with one set of filenames.
+
+    Regression: an earlier revision mirrored using ``filename`` (the
+    actual name), which broke ``PolySimResult.from_paths`` and the
+    ``test_poly_vitis_cosim_matches_python_model`` regression test —
+    both expected the canonical ``resp_hdr.bin`` / ``samp_out.bin``
+    layout in the mirror directory.
+    """
     golden = tmp_path / "g"
     actual = tmp_path / "a"
     golden.mkdir()
@@ -249,6 +257,40 @@ def test_functional_verify_copies_actual_to_output_dir(tmp_path):
     )
     out_dir = result["vitis_dir"]
     assert out_dir == tmp_path / "results" / "vitis"
-    assert (out_dir / "resp_hdr_data.bin").exists()
-    assert (out_dir / "samp_out_data.bin").exists()
+    # Mirror uses ``golden_filename`` where the manifest set it...
+    assert (out_dir / "resp_hdr.bin").exists()
+    assert (out_dir / "samp_out.bin").exists()
+    # ...and the actual filenames must NOT leak into the mirror.
+    assert not (out_dir / "resp_hdr_data.bin").exists()
+    assert not (out_dir / "samp_out_data.bin").exists()
+    # The JSON entry has no golden_filename override; keeps its name.
     assert (out_dir / "regmap_status.json").exists()
+
+
+def test_functional_verify_mirror_without_golden_filename_keeps_actual_name(tmp_path):
+    """When a manifest entry omits ``golden_filename``, the mirror uses
+    the entry's ``filename`` verbatim (the no-rename case)."""
+    golden = tmp_path / "g"
+    actual = tmp_path / "a"
+    golden.mkdir()
+    actual.mkdir()
+    # Same name on both sides — no rename needed.
+    _write_resp_hdr(golden / "resp_hdr.bin")
+    _write_resp_hdr(actual / "resp_hdr.bin")
+
+    step = FunctionalVerifyStep(
+        name="verify_no_rename",
+        golden_dir_artifact="sim_dir",
+        actual_dir_artifact="csim_dir",
+        schemas=[
+            {"filename": "resp_hdr.bin", "schema": PolyRespHdr},
+        ],
+        output_dir="mirror",
+        output_artifact="mirror_dir",
+        report_path="report.json",
+    )
+    result = step.run(
+        BuildConfig(root_dir=tmp_path), sim_dir=golden, csim_dir=actual,
+    )
+    out_dir = result["mirror_dir"]
+    assert (out_dir / "resp_hdr.bin").exists()
