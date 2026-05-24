@@ -52,7 +52,7 @@ def test_run_writes_hpp_and_cpp(tmp_path: Path):
     assert hpp.exists()
     assert cpp.exists()
 
-    expected = kernel_files_to_str(DemoComponent(name="_codegen", sim=Simulation()))
+    expected = kernel_files_to_str(DemoComponent)
     assert hpp.read_text(encoding="utf-8") == expected["demo.hpp"]
     assert cpp.read_text(encoding="utf-8") == expected["demo.cpp"]
 
@@ -396,8 +396,6 @@ def test_kernel_files_to_str_emits_relative_include():
     """The header emission helper directly returns a header with the relpath include."""
     from pysilicon.build.hwgen import kernel_files_to_str
     from tests.hw.test_hwgen import _TmplComp
-    from pysilicon.simulation.simulation import Simulation
 
-    comp = _TmplComp(name="tcomp", sim=Simulation())
-    files = kernel_files_to_str(comp, output_dir="gen", impl_dir=".")
+    files = kernel_files_to_str(_TmplComp, output_dir="gen", impl_dir=".")
     assert '#include "../tcomp_process_impl.tpp"' in files["tcomp.hpp"]

@@ -85,9 +85,10 @@ class HlsCodegenStep(BuildStep):
         return d
 
     def run(self, config: BuildConfig, **_) -> dict[str, Any]:
-        comp = self.comp_class(name="_codegen", sim=Simulation())
         files = kernel_files_to_str(
-            comp, output_dir=self.output_dir, impl_dir=self._impl_dir,
+            self.comp_class,
+            output_dir=self.output_dir,
+            impl_dir=self._impl_dir,
         )
         # BuildConfig.__post_init__ normalises root_dir to a Path, but the type
         # annotation is broader; narrow it here.

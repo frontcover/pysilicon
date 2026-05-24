@@ -358,29 +358,14 @@ def _validate_no_name_collisions(comp) -> None:
         )
 
 
-def _collect_template_params(comp) -> list[str]:
-    """Return ordered, deduplicated ``HwParam`` names used by endpoint bitwidths."""
-    from pysilicon.hw.hw_component import HwParamValue
-    params: list[str] = []
-    seen: set[str] = set()
-    for _attr, ep in _discover_stream_endpoints(comp):
-        bw = ep.bitwidth  # type: ignore[attr-defined]
-        if isinstance(bw, HwParamValue) and bw.param_name not in seen:
-            params.append(bw.param_name)
-            seen.add(bw.param_name)
-    return params
-
-
 def _stream_template_arg(ep) -> str:
     """Return the template argument string for an endpoint's bitwidth.
 
-    ``HwParamValue`` → the param name. Plain ``int`` → the literal value.
+    Always emits the literal integer value.  Top-level kernels are now
+    concrete (no ``template <int ...>`` block); stream-type expressions
+    use the concrete bitwidth from the variant's ``HwParamValue``.
     """
-    from pysilicon.hw.hw_component import HwParamValue
-    bw = ep.bitwidth
-    if isinstance(bw, HwParamValue):
-        return bw.param_name
-    return str(int(bw))
+    return str(int(ep.bitwidth))
 
 
 def _discover_stream_endpoints(comp) -> list[tuple[str, object]]:
@@ -402,22 +387,25 @@ def _discover_regmap(comp):
     return None
 
 
-def kernel_signature(comp) -> str:
-    """Build the kernel function signature and ``#pragma HLS INTERFACE`` lines.
+def kernel_signature(comp, variant_suffix: str = "") -> str:
+    """Build the concrete kernel function signature + ``#pragma HLS INTERFACE`` lines.
 
     Returns a multi-line string ending with the opening ``{`` of the function
-    body and the pragmas. The caller appends the body and the closing ``}``.
+    body and the pragmas.  The caller appends the body and the closing ``}``.
 
-    When ``HwParam``-driven endpoint bitwidths exist, a ``template <int p1,
-    int p2>`` block is emitted preceding ``void <name>(``.
+    Top-level kernels are emitted as **concrete** (non-templated) functions so
+    Vitis HLS RTL generation can attach the AXI interfaces — see the kernel
+    variants plan.  Stream-type expressions in the signature use the literal
+    integer bitwidths from ``ep.bitwidth`` (which for a variant-specific
+    component instance carry the concrete ``HwParamValue`` for that variant).
+
+    ``variant_suffix`` is appended to the function name as ``_{suffix}`` when
+    non-empty, so additional ``param_supports`` variants get unique top-level
+    names like ``poly_bw64``.
     """
     _validate_no_name_collisions(comp)
-    name = cpp_kernel_name(type(comp))
-    template_params = _collect_template_params(comp)
-    template_decl = ""
-    if template_params:
-        decl_block = ", ".join(f"int {p}" for p in template_params)
-        template_decl = f"template <{decl_block}>\n"
+    base_name = cpp_kernel_name(type(comp))
+    name = f"{base_name}_{variant_suffix}" if variant_suffix else base_name
 
     arg_lines: list[str] = []
     pragma_lines: list[str] = []
@@ -448,7 +436,7 @@ def kernel_signature(comp) -> str:
     )
     arg_block = ",\n".join(arg_lines)
     pragma_block = "\n".join(pragma_lines)
-    return f"{template_decl}void {name}(\n{arg_block}\n) {{\n{pragma_block}"
+    return f"void {name}(\n{arg_block}\n) {{\n{pragma_block}"
 
 
 def hook_signature(
@@ -791,9 +779,9 @@ def _collect_utility_includes(schemas: list[type]) -> list[str]:
     return paths
 
 
-def _kernel_signature_decl(comp) -> str:
+def _kernel_signature_decl(comp, variant_suffix: str = "") -> str:
     """Same as :func:`kernel_signature` but without pragmas; trailing ``;``."""
-    full = kernel_signature(comp)
+    full = kernel_signature(comp, variant_suffix=variant_suffix)
     head, _sep, _tail = full.partition('\n) {')
     return head + '\n);'
 
@@ -813,43 +801,63 @@ def _impl_include_path(filename: str, output_dir: str, impl_dir: str | None) -> 
     return rel.replace("\\", "/")
 
 
+def _iter_variants(comp_class):
+    """Yield ``(variant_suffix, comp_instance)`` for each variant to emit.
+
+    Always yields the default first (suffix ``""``).  Then yields each entry
+    from ``comp_class.param_supports`` (if any) with the variant overrides
+    applied via the normal ``__init__`` path — no immutability bypass.
+    """
+    from pysilicon.hw.hw_component import validate_param_supports
+    from pysilicon.simulation.simulation import Simulation
+
+    validate_param_supports(comp_class)
+    yield "", comp_class(name="_codegen", sim=Simulation())
+    ps = getattr(comp_class, 'param_supports', None) or {}
+    for suffix, overrides in ps.items():
+        yield suffix, comp_class(name="_codegen", sim=Simulation(), **overrides)
+
+
 def header_to_cpp(
-    comp,
+    comp_class,
     output_dir: str = ".",
     impl_dir: str | None = None,
 ) -> str:
     """Build the content of ``<component>.hpp``.
 
-    Kernel forward declaration stays in the global namespace.  Hook
-    forward declarations are grouped inside a single
-    ``namespace <ns> { ... }`` block when one is resolved; an opt-out
-    component (``cpp_namespace = ""``) leaves them in global.
+    Emits one concrete forward declaration per kernel variant (default
+    ``<cpp_kernel_name>``, plus any entries from ``param_supports``).
+    No ``template <int ...>`` block at the top level — kernels are
+    concrete so Vitis HLS RTL generation can attach interfaces.
 
-    Each templated hook (one whose call site passes ``HwParam``-driven
-    stream endpoints) gets its decl prefixed with ``template <int ...>``
-    and triggers an ``#include "<component>_<hook>_impl.tpp"`` line at
-    the bottom of the header.  The path on that ``#include`` line is
-    relative: from ``output_dir`` (where the ``.hpp`` lives) to
-    ``impl_dir`` (where the sticky ``.tpp`` is written).  When
-    ``impl_dir`` is ``None`` or equal to ``output_dir`` the path is
-    just the filename, preserving the original behavior.
+    Hooks remain templated; their forward decls are grouped inside a
+    single ``namespace <ns> { ... }`` block when one is resolved.  The
+    hook decls and ``#include`` lines for any ``.tpp`` files are derived
+    from the *default* variant (hook signatures don't vary per variant).
+    The path on each ``#include`` line is relative from ``output_dir`` to
+    ``impl_dir``.
     """
     from pysilicon.build.hwcodegen import extract_kernel
 
-    tree = extract_kernel(comp)
-    schemas = _collect_schemas(tree, comp)
+    variants = list(_iter_variants(comp_class))
+    default_comp = variants[0][1]
+
+    tree = extract_kernel(default_comp)
+    schemas = _collect_schemas(tree, default_comp)
     lines = ['#pragma once', '']
     lines.append('#include "include/streamutils_hls.h"')
     for s in schemas:
         lines.append(f'#include "include/{_snake_case(s.cpp_class_name())}.h"')  # type: ignore[attr-defined]
     for path in _collect_utility_includes(schemas):
         lines.append(f'#include "{path}"')
-    lines.append('')
-    lines.append(_kernel_signature_decl(comp))
+
+    for suffix, variant_comp in variants:
+        lines.append('')
+        lines.append(_kernel_signature_decl(variant_comp, variant_suffix=suffix))
 
     hooks = _collect_hooks_with_params(tree)
     if hooks:
-        ns = resolved_namespace(type(comp))
+        ns = resolved_namespace(comp_class)
         lines.append('')
         indent = "    " if ns is not None else ""
         if ns is not None:
@@ -866,7 +874,7 @@ def header_to_cpp(
     templated = [(h, p) for h, p in hooks if p]
     if templated:
         lines.append("")
-        kn = cpp_kernel_name(type(comp))
+        kn = cpp_kernel_name(comp_class)
         for hook, _ in templated:
             hname = hook.__name__  # type: ignore[attr-defined]
             include_path = _impl_include_path(
@@ -894,79 +902,29 @@ def kernel_body_to_cpp(comp: HwComponent) -> str:
     return f"{{\n{body}\n}}"
 
 
-def kernel_to_cpp(comp) -> str:
-    """Build the content of ``<component>.cpp`` — kernel function with body.
+def kernel_to_cpp(comp_class) -> str:
+    """Build the content of ``<component>.cpp``.
 
-    When the kernel signature is templated (``HwParam``-driven endpoint
-    bitwidths produced a ``template <int ...>`` block), the kernel
-    definition is emitted in the ``.cpp`` for synthesis, but C++ then
-    needs an explicit instantiation so the testbench's call site
-    (compiled in a separate TU) can link.  The instantiation uses the
-    component's current ``HwParamValue`` defaults — typically the same
-    bitwidths the testbench instantiates with.
+    Emits one concrete kernel function per variant — the default uses
+    ``HwParam`` defaults; any entries in ``param_supports`` add named
+    variants ``<cpp_kernel_name>_<key>``.  No template instantiation
+    machinery: each variant is a fully concretized top-level function so
+    Vitis HLS can attach AXI interfaces during RTL generation.
+
+    Takes a component **class**, not an instance — the function creates
+    a fresh instance per variant internally.
     """
-    header_name = f"{cpp_kernel_name(type(comp))}.hpp"
-    sig_with_pragmas = kernel_signature(comp)
-    body = kernel_body_to_cpp(comp)
-    body_inner = body.removeprefix("{\n").removesuffix("\n}")
-    out = (
-        f'#include "{header_name}"\n\n'
-        f"{sig_with_pragmas}\n"
-        f"{body_inner}\n"
-        f"}}\n"
-    )
-    inst = _kernel_explicit_instantiation(comp)
-    if inst:
-        out += f"\n{inst}\n"
-    return out
-
-
-def _kernel_explicit_instantiation(comp) -> str:
-    """Return an explicit-instantiation block for the kernel, or ``''`` if
-    the kernel is not templated.
-
-    Uses the component's ``HwParamValue`` defaults as the instantiation
-    arguments — same source the template-param block is derived from.
-    """
-    template_params = _collect_template_params(comp)
-    if not template_params:
-        return ""
-    values: list[str] = []
-    for pname in template_params:
-        bw = getattr(comp, pname, None)
-        if bw is None:
-            return ""  # No usable value; skip rather than emit broken code.
-        values.append(str(int(bw)))
-    kn = cpp_kernel_name(type(comp))
-    # Reproduce the argument-type list from kernel_signature, but with the
-    # template-param substitutions baked in so we emit a concrete
-    # specialization.
-    arg_lines: list[str] = []
-    for attr, ep in _discover_stream_endpoints(comp):
-        bw = ep.bitwidth
-        bw_val = int(bw)
-        arg_lines.append(
-            f"    hls::stream<streamutils::axi4s_word<{bw_val}>>& {attr}"
+    header_name = f"{cpp_kernel_name(comp_class)}.hpp"
+    parts: list[str] = [f'#include "{header_name}"', ""]
+    for variant_suffix, variant_comp in _iter_variants(comp_class):
+        sig_with_pragmas = kernel_signature(
+            variant_comp, variant_suffix=variant_suffix,
         )
-    regmap_slave = _discover_regmap(comp)
-    if regmap_slave is not None:
-        for fname, fld in regmap_slave.regmap._fields.items():
-            if fld.is_vitis_auto:
-                continue
-            schema = fld.schema
-            if (isinstance(schema, type) and issubclass(schema, DataArray)
-                    and getattr(schema, 'cpp_storage', 'struct') == 'raw'):
-                elem_cpp = cpp_type(schema.element_type)
-                count = schema._declared_count()
-                arg_lines.append(f"    {elem_cpp} {fname}[{count}]")
-            else:
-                arg_lines.append(f"    {cpp_type(schema)}& {fname}")
-    arg_block = ",\n".join(arg_lines)
-    inst_args = ", ".join(values)
-    return (
-        f"// Explicit instantiation for the configured bitwidths.\n"
-        f"template void {kn}<{inst_args}>(\n{arg_block}\n);"
-    )
+        body = kernel_body_to_cpp(variant_comp)
+        body_inner = body.removeprefix("{\n").removesuffix("\n}")
+        parts.append(f"{sig_with_pragmas}\n{body_inner}\n}}")
+        parts.append("")
+    return "\n".join(parts) + "\n"
 
 
 def _stub_default_return(ret_cpp: str) -> str:
@@ -1044,7 +1002,7 @@ def impl_stub_to_tpp(comp, hook_method, template_params: list[str]) -> str:
 
 
 def kernel_files_to_str(
-    comp,
+    comp_class,
     output_dir: str = ".",
     impl_dir: str | None = None,
 ) -> dict[str, str]:
@@ -1057,21 +1015,28 @@ def kernel_files_to_str(
     that ``<component>.hpp`` emits for each templated impl file — the
     returned dict keys are still bare filenames.  Callers (e.g.
     ``HlsCodegenStep``) decide which directory each filename lands in.
+
+    Takes a component **class** rather than an instance.  The class is
+    used to drive the variant iteration (default + ``param_supports``
+    entries); each variant gets its own instance internally.  Hook
+    discovery uses the default variant since hook signatures don't vary
+    per variant.
     """
     from pysilicon.build.hwcodegen import extract_kernel
 
-    name = cpp_kernel_name(type(comp))
+    name = cpp_kernel_name(comp_class)
     files: dict[str, str] = {
-        f"{name}.hpp": header_to_cpp(comp, output_dir=output_dir, impl_dir=impl_dir),
-        f"{name}.cpp": kernel_to_cpp(comp),
+        f"{name}.hpp": header_to_cpp(comp_class, output_dir=output_dir, impl_dir=impl_dir),
+        f"{name}.cpp": kernel_to_cpp(comp_class),
     }
-    tree = extract_kernel(comp)
+    default_comp = next(iter(_iter_variants(comp_class)))[1]
+    tree = extract_kernel(default_comp)
     for hook, tparams in _collect_hooks_with_params(tree):
         hname = hook.__name__  # type: ignore[attr-defined]
         if tparams:
             files[f"{name}_{hname}_impl.tpp"] = impl_stub_to_tpp(
-                comp, hook, tparams,
+                default_comp, hook, tparams,
             )
         else:
-            files[f"{name}_{hname}_impl.cpp"] = impl_stub_to_cpp(comp, hook)
+            files[f"{name}_{hname}_impl.cpp"] = impl_stub_to_cpp(default_comp, hook)
     return files
