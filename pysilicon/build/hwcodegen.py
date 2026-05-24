@@ -26,11 +26,24 @@ from pysilicon.hw.hwstmt import (
     KernelCallStmt,
     Ref,
     ReturnStmt,
+    SchemaBindStmt,
     SeqStmt,
     SynthCallStmt,
     TbCallStmt,
+    TbFileIOStmt,
+    TbRegmapFileReadStmt,
+    TbStatusJsonStmt,
+    TbStreamIOStmt,
     WhileStmt,
 )
+
+
+_TB_FILE_IO_METHODS = frozenset({
+    'read_uint32_file', 'write_uint32_file',
+    'read_uint32_file_array', 'write_uint32_file_array',
+})
+_TB_STREAM_PUSH_METHODS = frozenset({'push', 'push_array'})
+_TB_STREAM_POP_METHODS = frozenset({'pop', 'pop_array'})
 
 
 class SynthesisError(Exception):
@@ -207,7 +220,7 @@ class HwStmtExtractor:
         the kernel-mode handler (for stmts that have identical semantics in
         both modes, e.g. ``return``, ``if``, bare docstring constants).
         """
-        # `dut = <HwComponentSubclass>(**kwargs)` — DUT binding.
+        # `name = <ClassRef>(**kwargs)` — DUT or schema binding.
         if (
             isinstance(stmt, ast.Assign)
             and len(stmt.targets) == 1
@@ -218,21 +231,270 @@ class HwStmtExtractor:
             bind = self._try_dut_bind(local_name, stmt.value, stmt)
             if bind is not None:
                 return bind
-        # `dut.run()` — kernel-call lowering.
+            schema_bind = self._try_schema_bind(local_name, stmt.value, stmt)
+            if schema_bind is not None:
+                return schema_bind
+        # Expression-statement calls (no return assignment): the bulk of TB
+        # mode lives here — push/pop, file IO, regmap helpers, dut.run().
         if isinstance(stmt, ast.Expr) and isinstance(stmt.value, ast.Call):
-            call = stmt.value
-            if (
-                isinstance(call.func, ast.Attribute)
-                and isinstance(call.func.value, ast.Name)
-                and call.func.value.id in self._duts
-                and call.func.attr == 'run'
-            ):
-                if call.args or call.keywords:
-                    raise SynthesisError(
-                        f"dut.run() takes no arguments (line {stmt.lineno})"
-                    )
-                return KernelCallStmt(local_name=call.func.value.id)
+            result = self._visit_tb_call(stmt.value, stmt)
+            if result is not None:
+                return result
         return None
+
+    # ------------------------------------------------------------------
+    # TB-mode call dispatch
+    # ------------------------------------------------------------------
+
+    def _visit_tb_call(
+        self, call: ast.Call, parent: ast.stmt,
+    ) -> HwStmt | None:
+        """Lower a bare ``<chain>(...)`` expression statement to TB IR."""
+        if not isinstance(call.func, ast.Attribute):
+            return None
+        attr = call.func.attr
+        receiver_chain = call.func.value
+
+        # `dut.run()` — kernel call.
+        if (
+            attr == 'run'
+            and isinstance(receiver_chain, ast.Name)
+            and receiver_chain.id in self._duts
+        ):
+            if call.args or call.keywords:
+                raise SynthesisError(
+                    f"dut.run() takes no arguments (line {parent.lineno})"
+                )
+            return KernelCallStmt(local_name=receiver_chain.id)
+
+        # `<schema_local>.read_uint32_file*(...)` / `.write_uint32_file*(...)`
+        if (
+            attr in _TB_FILE_IO_METHODS
+            and isinstance(receiver_chain, ast.Name)
+            and receiver_chain.id in self._tb_locals
+        ):
+            return self._make_file_io_stmt(
+                receiver_chain.id, attr, call, parent,
+            )
+
+        # `dut.<ep>.push(...)`, `.push_array(...)`, `.pop(...)`, `.pop_array(...)`
+        if (
+            (attr in _TB_STREAM_PUSH_METHODS or attr in _TB_STREAM_POP_METHODS)
+            and isinstance(receiver_chain, ast.Attribute)
+            and isinstance(receiver_chain.value, ast.Name)
+            and receiver_chain.value.id in self._duts
+        ):
+            return self._make_stream_io_stmt(
+                dut_local=receiver_chain.value.id,
+                endpoint_attr=receiver_chain.attr,
+                method_attr=attr,
+                call=call,
+                parent=parent,
+            )
+
+        # `dut.regmap.read_uint32_file_array(field, path, count=...)`
+        # `dut.regmap.write_status_json(path, fields=[...])`
+        if (
+            isinstance(receiver_chain, ast.Attribute)
+            and receiver_chain.attr == 'regmap'
+            and isinstance(receiver_chain.value, ast.Name)
+            and receiver_chain.value.id in self._duts
+        ):
+            return self._make_regmap_call_stmt(
+                dut_local=receiver_chain.value.id,
+                method_attr=attr,
+                call=call,
+                parent=parent,
+            )
+
+        return None
+
+    # ------------------------------------------------------------------
+    # TB-mode helpers
+    # ------------------------------------------------------------------
+
+    def _try_schema_bind(
+        self,
+        local_name: str,
+        call_node: ast.Call,
+        parent_stmt: ast.stmt,
+    ) -> SchemaBindStmt | None:
+        """If ``call_node`` constructs a ``DataSchema`` subclass with no
+        arguments, return a ``SchemaBindStmt`` and record the binding."""
+        from pysilicon.hw.dataschema import DataSchema
+
+        cls = self._resolve_tb_class(call_node.func)
+        if not (isinstance(cls, type) and issubclass(cls, DataSchema)):
+            return None
+        if call_node.args or call_node.keywords:
+            raise SynthesisError(
+                f"DataSchema construction in TB mode takes no arguments "
+                f"(line {parent_stmt.lineno})"
+            )
+        self._tb_locals[local_name] = cls
+        return SchemaBindStmt(local_name=local_name, schema_class=cls)
+
+    def _make_file_io_stmt(
+        self,
+        target_local: str,
+        method: str,
+        call: ast.Call,
+        parent: ast.stmt,
+    ) -> TbFileIOStmt:
+        """Build a :class:`TbFileIOStmt` from a ``<local>.<method>(...)`` call."""
+        is_array = method.endswith('_array')
+        is_write = method.startswith('write_')
+        if not call.args:
+            raise SynthesisError(
+                f"{method}() requires a path argument (line {parent.lineno})"
+            )
+        path = call.args[0]
+        count: object | None = None
+        if is_array:
+            count = self._extract_count_kwarg(call, method, parent)
+            if len(call.args) > 1:
+                raise SynthesisError(
+                    f"{method}() takes path + count=...; extra positional "
+                    f"args at line {parent.lineno}"
+                )
+        else:
+            if len(call.args) > 1 or call.keywords:
+                raise SynthesisError(
+                    f"{method}() takes only a path argument "
+                    f"(line {parent.lineno})"
+                )
+        return TbFileIOStmt(
+            target_local=target_local,
+            path=path,
+            is_write=is_write,
+            is_array=is_array,
+            count=count,
+        )
+
+    def _make_stream_io_stmt(
+        self,
+        dut_local: str,
+        endpoint_attr: str,
+        method_attr: str,
+        call: ast.Call,
+        parent: ast.stmt,
+    ) -> TbStreamIOStmt:
+        """Build a :class:`TbStreamIOStmt` from a ``dut.<ep>.<method>(...)`` call."""
+        is_pop = method_attr in _TB_STREAM_POP_METHODS
+        is_array = method_attr.endswith('_array')
+        if not call.args:
+            raise SynthesisError(
+                f"{method_attr}() requires a value argument "
+                f"(line {parent.lineno})"
+            )
+        value_node = call.args[0]
+        if not isinstance(value_node, ast.Name):
+            raise SynthesisError(
+                f"{method_attr}() value must be a local-name reference "
+                f"(line {parent.lineno})"
+            )
+        value_local = value_node.id
+        if value_local not in self._tb_locals:
+            raise SynthesisError(
+                f"{method_attr}({value_local}, ...) — '{value_local}' is "
+                f"not a bound schema local (line {parent.lineno})"
+            )
+        count: object | None = None
+        if is_array:
+            count = self._extract_count_kwarg(call, method_attr, parent)
+            if len(call.args) > 1:
+                raise SynthesisError(
+                    f"{method_attr}() takes value + count=...; extra "
+                    f"positional args at line {parent.lineno}"
+                )
+        else:
+            if len(call.args) > 1 or call.keywords:
+                raise SynthesisError(
+                    f"{method_attr}() takes only a value argument "
+                    f"(line {parent.lineno})"
+                )
+        return TbStreamIOStmt(
+            dut_local=dut_local,
+            endpoint_attr=endpoint_attr,
+            value_local=value_local,
+            is_pop=is_pop,
+            is_array=is_array,
+            count=count,
+        )
+
+    def _make_regmap_call_stmt(
+        self,
+        dut_local: str,
+        method_attr: str,
+        call: ast.Call,
+        parent: ast.stmt,
+    ) -> HwStmt | None:
+        """Handle ``dut.regmap.<method>(...)`` calls in TB mode."""
+        if method_attr == 'read_uint32_file_array':
+            if len(call.args) != 2:
+                raise SynthesisError(
+                    f"dut.regmap.read_uint32_file_array(field, path, count=...) "
+                    f"requires exactly two positional args "
+                    f"(line {parent.lineno})"
+                )
+            field_node = call.args[0]
+            if not (isinstance(field_node, ast.Constant)
+                    and isinstance(field_node.value, str)):
+                raise SynthesisError(
+                    f"dut.regmap.read_uint32_file_array(field, ...): "
+                    f"'field' must be a string literal (line {parent.lineno})"
+                )
+            count = self._extract_count_kwarg(call, method_attr, parent)
+            return TbRegmapFileReadStmt(
+                dut_local=dut_local,
+                field_name=field_node.value,
+                path=call.args[1],
+                count=count,
+            )
+        if method_attr == 'write_status_json':
+            if len(call.args) != 1:
+                raise SynthesisError(
+                    f"dut.regmap.write_status_json(path, fields=[...]) "
+                    f"requires exactly one positional arg "
+                    f"(line {parent.lineno})"
+                )
+            fields_kw = next(
+                (kw for kw in call.keywords if kw.arg == 'fields'), None,
+            )
+            if fields_kw is None or not isinstance(fields_kw.value, ast.List):
+                raise SynthesisError(
+                    f"dut.regmap.write_status_json(...) requires fields=[...]"
+                    f" as a list literal (line {parent.lineno})"
+                )
+            names: list[str] = []
+            for elt in fields_kw.value.elts:
+                if not (isinstance(elt, ast.Constant)
+                        and isinstance(elt.value, str)):
+                    raise SynthesisError(
+                        f"write_status_json fields must be string literals "
+                        f"(line {parent.lineno})"
+                    )
+                names.append(elt.value)
+            return TbStatusJsonStmt(
+                dut_local=dut_local,
+                path=call.args[0],
+                field_names=names,
+            )
+        return None
+
+    def _extract_count_kwarg(
+        self,
+        call: ast.Call,
+        method_name: str,
+        parent: ast.stmt,
+    ) -> object:
+        """Pull the required ``count=<expr>`` keyword from an array-mode call."""
+        for kw in call.keywords:
+            if kw.arg == 'count':
+                return kw.value
+        raise SynthesisError(
+            f"{method_name}() requires count=<int> (line {parent.lineno})"
+        )
 
     def _try_dut_bind(
         self,

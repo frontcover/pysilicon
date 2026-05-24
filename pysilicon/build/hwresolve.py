@@ -20,9 +20,14 @@ from pysilicon.hw.hwstmt import (
     HwVar,
     KernelCallStmt,
     ReturnStmt,
+    SchemaBindStmt,
     SeqStmt,
     SynthCallStmt,
     TbCallStmt,
+    TbFileIOStmt,
+    TbRegmapFileReadStmt,
+    TbStatusJsonStmt,
+    TbStreamIOStmt,
     WhileStmt,
 )
 
@@ -90,14 +95,17 @@ def _walk(stmt, scope, comp, module, globs):
         return
     if isinstance(stmt, ReturnStmt):
         return
-    if isinstance(stmt, (DutBindStmt, KernelCallStmt)):
-        # Phase 3: nothing to resolve — values are already concrete classes /
-        # literals captured by the extractor.
+    if isinstance(stmt, (
+        DutBindStmt, KernelCallStmt, SchemaBindStmt,
+        TbFileIOStmt, TbStreamIOStmt, TbRegmapFileReadStmt, TbStatusJsonStmt,
+    )):
+        # TB-mode IR nodes carry plain Python data (classes, ast subtrees
+        # for path/count exprs, literal field names) — no name resolution
+        # against the extractor's HwVar scope is needed.  The emitter
+        # walks AST sub-trees directly via _emit_str_expr / _emit_int_expr.
         return
     if isinstance(stmt, TbCallStmt):
-        # Phase 4 will lower TbCallStmt.inputs against ``scope`` / ``globs``
-        # the same way SynthCallStmt does.  Nothing to do for now beyond
-        # tracking outputs as scope bindings.
+        # Reserved IR carrier (not produced by the current extractor).
         for v in stmt.outputs:
             scope[v.name] = v
         return

@@ -286,3 +286,172 @@ def test_phase3_dut_run_with_args_is_rejected():
     tb = _BadRunArgsTB(name='tb', sim=Simulation())
     with pytest.raises(SynthesisError, match="dut.run\\(\\) takes no arguments"):
         extract_testbench(tb)
+
+
+# ---------------------------------------------------------------------------
+# Phase 4 — push/pop + file IO + status JSON
+# ---------------------------------------------------------------------------
+
+from examples.poly.poly import CoeffArray, PolyCmdHdr, PolyRespHdr, Float32
+from pysilicon.hw.dataschema import DataArray
+
+
+class SampArray(DataArray):
+    """Buffer of up to 128 Float32 samples — used by the Phase-4 fixture
+    to hold ``samp_in`` / ``samp_out`` arrays at compile-time size 128."""
+    element_type = Float32
+    static = True
+    max_shape = (128,)
+    cpp_storage = "raw"
+
+
+@dataclass
+class _PolyTBPhase4(HwTestbench):
+    """End-to-end Phase-4 fixture mirroring the hand-written poly_tb.cpp."""
+
+    cpp_kernel_name: ClassVar[str | None] = "poly"
+
+    def main(self) -> None:
+        dut = PolyAccelComponent()
+
+        dut.regmap.read_uint32_file_array(
+            "coeffs", self.data_dir + "/coeffs.bin", count=4)
+
+        data_hdr = PolyCmdHdr()
+        data_hdr.read_uint32_file(self.data_dir + "/data_cmd_hdr.bin")
+
+        samp_in = SampArray()
+        samp_in.read_uint32_file_array(
+            self.data_dir + "/samp_in_data.bin", count=data_hdr.nsamp)
+
+        end_hdr = PolyCmdHdr()
+        end_hdr.read_uint32_file(self.data_dir + "/end_cmd_hdr.bin")
+
+        dut.s_in.push(data_hdr)
+        dut.s_in.push_array(samp_in, count=data_hdr.nsamp)
+        dut.s_in.push(end_hdr)
+
+        dut.run()
+
+        resp_hdr = PolyRespHdr()
+        dut.m_out.pop(resp_hdr)
+
+        samp_out = SampArray()
+        dut.m_out.pop_array(samp_out, count=data_hdr.nsamp)
+
+        resp_hdr.write_uint32_file(self.data_dir + "/resp_hdr_data.bin")
+        samp_out.write_uint32_file_array(
+            self.data_dir + "/samp_out_data.bin", count=data_hdr.nsamp)
+
+        dut.regmap.write_status_json(
+            self.data_dir + "/regmap_status.json",
+            fields=["halted", "error", "tx_id"])
+
+
+@pytest.mark.phase4
+def test_phase4_emits_full_poly_testbench_body():
+    """The Phase-4 emitter produces every pattern the hand-written
+    poly_tb.cpp uses: schema locals, file I/O, stream push/pop,
+    regmap file-read, kernel call, regmap status JSON."""
+    from pysilicon.build.hwgen import tb_files_to_str
+    files = tb_files_to_str(_PolyTBPhase4, output_dir="gen")
+    body = files["poly_tb.cpp"]
+
+    # Include block
+    assert '#include "poly.hpp"' in body
+    assert '#include "include/streamutils_tb.h"' in body
+    assert '#include "include/float32_array_utils_tb.h"' in body
+    assert '#include "include/poly_cmd_hdr.h"' in body
+    assert '#include "include/poly_resp_hdr.h"' in body
+
+    # Local decls from Phase 3 (DUT bind)
+    assert "hls::stream<streamutils::axi4s_word<32>> s_in;" in body
+    assert "hls::stream<streamutils::axi4s_word<32>> m_out;" in body
+    assert "float coeffs[4] = {};" in body
+
+    # Schema-bound TB locals (one each)
+    assert "PolyCmdHdr data_hdr;" in body
+    assert "PolyCmdHdr end_hdr;" in body
+    assert "PolyRespHdr resp_hdr;" in body
+    assert "float samp_in[128] = {};" in body
+    assert "float samp_out[128] = {};" in body
+
+    # File reads (coeffs into regmap, headers, samples)
+    assert ('float32_array_utils::read_uint32_file_array(coeffs, '
+            '(data_dir + std::string("/coeffs.bin")).c_str(), 4);') in body
+    assert ('streamutils::read_uint32_file(data_hdr, '
+            '(data_dir + std::string("/data_cmd_hdr.bin")).c_str());') in body
+    assert ('float32_array_utils::read_uint32_file_array(samp_in, '
+            '(data_dir + std::string("/samp_in_data.bin")).c_str(), '
+            'data_hdr.nsamp);') in body
+    assert ('streamutils::read_uint32_file(end_hdr, '
+            '(data_dir + std::string("/end_cmd_hdr.bin")).c_str());') in body
+
+    # Stream pushes
+    assert "data_hdr.write_axi4_stream<32>(s_in, true);" in body
+    assert ("float32_array_utils::write_axi4_stream<32>(s_in, samp_in, "
+            "true, data_hdr.nsamp);") in body
+    assert "end_hdr.write_axi4_stream<32>(s_in, true);" in body
+
+    # Kernel call
+    assert "poly(s_in, m_out, halted, error, tx_id, coeffs);" in body
+
+    # Stream pops
+    assert "streamutils::tlast_status _tlast_resp_hdr = " in body
+    assert "resp_hdr.read_axi4_stream<32>(m_out, _tlast_resp_hdr);" in body
+    assert "streamutils::tlast_status _tlast_samp_out = " in body
+    assert ("float32_array_utils::read_axi4_stream<32>(m_out, samp_out, "
+            "_tlast_samp_out, data_hdr.nsamp);") in body
+
+    # File writes
+    assert ('streamutils::write_uint32_file(resp_hdr, '
+            '(data_dir + std::string("/resp_hdr_data.bin")).c_str());') in body
+    assert ('float32_array_utils::write_uint32_file_array(samp_out, '
+            '(data_dir + std::string("/samp_out_data.bin")).c_str(), '
+            'data_hdr.nsamp);') in body
+
+    # Status JSON block
+    assert "std::ofstream _status_ofs" in body
+    assert r'\"halted\": " << (int)halted' in body
+    assert r'\"error\": " << (int)error' in body
+    assert r'\"tx_id\": " << (int)tx_id' in body
+
+
+@pytest.mark.phase4
+def test_phase4_extractor_unknown_method_raises():
+    """A TB method call that doesn't match any known pattern raises."""
+    from pysilicon.build.hwcodegen import SynthesisError, extract_testbench
+
+    @dataclass
+    class _UnknownMethodTB(HwTestbench):
+        cpp_kernel_name: ClassVar[str | None] = "poly"
+
+        def main(self) -> None:
+            dut = PolyAccelComponent()
+            data_hdr = PolyCmdHdr()
+            data_hdr.bogus_method("foo")
+            dut.run()
+
+    tb = _UnknownMethodTB(name='tb', sim=Simulation())
+    with pytest.raises(SynthesisError):
+        extract_testbench(tb)
+
+
+@pytest.mark.phase4
+def test_phase4_count_kwarg_required_for_array_ops():
+    """Array-mode TB calls require count=...; omitting it is a hard error."""
+    from pysilicon.build.hwcodegen import SynthesisError, extract_testbench
+
+    @dataclass
+    class _MissingCountTB(HwTestbench):
+        cpp_kernel_name: ClassVar[str | None] = "poly"
+
+        def main(self) -> None:
+            dut = PolyAccelComponent()
+            samp_in = SampArray()
+            samp_in.read_uint32_file_array(self.data_dir + "/x.bin")
+            dut.run()
+
+    tb = _MissingCountTB(name='tb', sim=Simulation())
+    with pytest.raises(SynthesisError, match="requires count"):
+        extract_testbench(tb)

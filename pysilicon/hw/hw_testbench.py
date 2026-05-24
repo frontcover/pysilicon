@@ -47,6 +47,11 @@ class HwTestbench(HwComponent):
     #: directly from ``HwTestbench`` itself.
     _is_testbench: ClassVar[bool] = True
 
+    #: Framework-provided handle on the testbench's data directory.  Reads
+    #: of ``self.data_dir`` inside ``main()`` lower to the C++ ``data_dir``
+    #: local that ``int main()`` populates from ``argv``.
+    data_dir: ClassVar[str] = "data"
+
     def main(self) -> None:
         """Sequential testbench body. Subclasses override this."""
         raise NotImplementedError(
