@@ -281,14 +281,10 @@ class PolyTB(SimObj):
 
     def run_proc(self) -> ProcessGen[None]:
         bw = self.word_bw
-        regmap = self._regmap()
+        rm = self._regmap().bind_master(self.m_lite, base_addr=self.base_addr)
 
-        yield from self.m_lite.write_schema(
-            CoeffArray(self.coeffs),
-            addr=self.base_addr + regmap.offset_of("coeffs"),
-        )
-
-        yield from regmap.start(self.m_lite, base_addr=self.base_addr)
+        yield from rm.set("coeffs", self.coeffs)
+        yield from rm.start()
 
         yield from self.m_in.write(self.cmd_hdr.serialize(word_bw=bw))
         yield from self.m_in.write(write_array(self.samp_in, elem_type=Float32, word_bw=bw))
@@ -306,15 +302,9 @@ class PolyTB(SimObj):
         yield from self.m_in.write(end_hdr.serialize(word_bw=bw))
 
         yield self.timeout(0)
-        halted_field = yield from self.m_lite.read_schema(
-            Bit, addr=self.base_addr + regmap.offset_of("halted"))
-        error_field = yield from self.m_lite.read_schema(
-            PolyErrorField, addr=self.base_addr + regmap.offset_of("error"))
-        tx_id_field = yield from self.m_lite.read_schema(
-            TxIdField, addr=self.base_addr + regmap.offset_of("tx_id"))
-        self.halted       = int(halted_field.val)
-        self.error        = PolyError(int(error_field.val))
-        self.tx_id_status = int(tx_id_field.val)
+        self.halted       = yield from rm.get("halted")
+        self.error        = yield from rm.get("error")
+        self.tx_id_status = yield from rm.get("tx_id")
 
     def _regmap(self) -> VitisRegMap:
         if self._regmap_ref is None:

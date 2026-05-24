@@ -363,6 +363,101 @@ class TestSlaveRoundTrip:
         assert rm_w1s.read_word("trig", 0) == 0  # auto-cleared
 
 
+class TestBoundRegMap:
+    """``regmap.bind_master(...)`` returns a host-side proxy whose
+    ``set`` / ``get`` mirror the in-process :meth:`RegMap.set` /
+    :meth:`RegMap.get` API but route through an MMIFMaster.  ``get``
+    returns a native Python value so callers don't have to recover ``.val``
+    or recast enums by hand at every call site.
+    """
+
+    def test_int_field_round_trip_returns_native_int(self) -> None:
+        rm = RegMap({"count": RegField(U32, RegAccess.RW)})
+        h = _SlaveHarness.build(rm)
+        seen: dict[str, Any] = {}
+
+        def proc() -> ProcessGen[None]:
+            rb = rm.bind_master(h.master)
+            yield from rb.set("count", 42)
+            seen["val"] = yield from rb.get("count")
+
+        h.run(proc)
+        assert seen["val"] == 42
+        assert isinstance(seen["val"], int)
+
+    def test_enum_field_returns_native_intenum(self) -> None:
+        rm = RegMap({"err": RegField(ErrField, RegAccess.RW)})
+        h = _SlaveHarness.build(rm)
+        seen: dict[str, Any] = {}
+
+        def proc() -> ProcessGen[None]:
+            rb = rm.bind_master(h.master)
+            yield from rb.set("err", ErrCode.OVERFLOW)
+            seen["val"] = yield from rb.get("err")
+
+        h.run(proc)
+        assert seen["val"] is ErrCode.OVERFLOW
+        assert isinstance(seen["val"], ErrCode)
+
+    def test_set_raw_value_auto_wraps_via_schema(self) -> None:
+        """Mirrors the kernel-side ``RegMap.set`` auto-wrap convention."""
+        rm = RegMap({"err": RegField(ErrField, RegAccess.RW)})
+        h = _SlaveHarness.build(rm)
+        seen: dict[str, Any] = {}
+
+        def proc() -> ProcessGen[None]:
+            rb = rm.bind_master(h.master)
+            yield from rb.set("err", 2)  # 2 == ErrCode.OVERFLOW
+            seen["val"] = yield from rb.get("err")
+
+        h.run(proc)
+        assert seen["val"] is ErrCode.OVERFLOW
+
+    def test_data_array_returns_schema_instance(self) -> None:
+        rm = RegMap({"coeffs": RegField(CoeffPair, RegAccess.RW)})
+        h = _SlaveHarness.build(rm)
+        seen: dict[str, Any] = {}
+
+        def proc() -> ProcessGen[None]:
+            rb = rm.bind_master(h.master)
+            yield from rb.set("coeffs", CoeffPair([10, 20]))
+            seen["val"] = yield from rb.get("coeffs")
+
+        h.run(proc)
+        assert isinstance(seen["val"], CoeffPair)
+        assert list(seen["val"].val.flat) == [10, 20]
+
+    def test_base_addr_offset_applied(self) -> None:
+        rm = RegMap({"x": RegField(U32, RegAccess.RW)})
+        h = _SlaveHarness.build(rm)
+
+        def proc_offset() -> ProcessGen[None]:
+            # base_addr=0x100 shifts everything; the slave's local space
+            # starts at 0, so a non-zero base_addr should fail to land.
+            rb = rm.bind_master(h.master, base_addr=0x100)
+            with pytest.raises(RegMapAccessError):
+                yield from rb.set("x", 1)
+
+        h.run(proc_offset)
+
+    def test_start_writes_ap_start_on_vitis_regmap(self) -> None:
+        rm = VitisRegMap({"x": RegField(U32, RegAccess.RW)})
+        on_start_fired: list[bool] = []
+
+        def on_start() -> ProcessGen[None]:
+            on_start_fired.append(True)
+            yield from ()  # generator marker
+
+        h = _SlaveHarness.build_vitis(rm, on_start=on_start)
+
+        def proc() -> ProcessGen[None]:
+            rb = rm.bind_master(h.master)
+            yield from rb.start()
+
+        h.run(proc)
+        assert on_start_fired == [True]
+
+
 # ---------------------------------------------------------------------------
 # Phase 2 — VitisRegMap tests
 # ---------------------------------------------------------------------------
