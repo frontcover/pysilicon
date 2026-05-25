@@ -14,12 +14,20 @@ from typing import TYPE_CHECKING
 
 from pysilicon.hw.hwstmt import (
     CaseStmt,
+    DutBindStmt,
     FieldRef,
     HwStmt,
     HwVar,
+    KernelCallStmt,
     ReturnStmt,
+    SchemaBindStmt,
     SeqStmt,
     SynthCallStmt,
+    TbCallStmt,
+    TbFileIOStmt,
+    TbRegmapFileReadStmt,
+    TbStatusJsonStmt,
+    TbStreamIOStmt,
     WhileStmt,
 )
 
@@ -38,6 +46,23 @@ def resolve_kernel(tree: HwStmt, comp: HwComponent) -> HwStmt:
     """
     scope: dict[str, HwVar] = {}
     method = _kernel_method(comp)
+    module = sys.modules.get(method.__module__)
+    globs = getattr(method, '__globals__', {})
+    _walk(tree, scope, comp, module, globs)
+    return tree
+
+
+def resolve_testbench(tree: HwStmt, comp) -> HwStmt:
+    """Resolve a testbench-extractor tree (entry point ``main``).
+
+    For v1 the resolution rules are a superset of the kernel ones: every
+    name + attribute chain that ``resolve_kernel`` already handles is
+    handled the same way.  Future phases extend the resolver to also
+    resolve DUT-attribute chains (``dut.s_in`` → bound endpoint object)
+    once the extractor produces those bindings.
+    """
+    scope: dict[str, HwVar] = {}
+    method = getattr(comp, 'main')
     module = sys.modules.get(method.__module__)
     globs = getattr(method, '__globals__', {})
     _walk(tree, scope, comp, module, globs)
@@ -69,6 +94,20 @@ def _walk(stmt, scope, comp, module, globs):
             _walk(stmt.if_false, scope, comp, module, globs)
         return
     if isinstance(stmt, ReturnStmt):
+        return
+    if isinstance(stmt, (
+        DutBindStmt, KernelCallStmt, SchemaBindStmt,
+        TbFileIOStmt, TbStreamIOStmt, TbRegmapFileReadStmt, TbStatusJsonStmt,
+    )):
+        # TB-mode IR nodes carry plain Python data (classes, ast subtrees
+        # for path/count exprs, literal field names) — no name resolution
+        # against the extractor's HwVar scope is needed.  The emitter
+        # walks AST sub-trees directly via _emit_str_expr / _emit_int_expr.
+        return
+    if isinstance(stmt, TbCallStmt):
+        # Reserved IR carrier (not produced by the current extractor).
+        for v in stmt.outputs:
+            scope[v.name] = v
         return
     if isinstance(stmt, SynthCallStmt):
         stmt.inputs = [

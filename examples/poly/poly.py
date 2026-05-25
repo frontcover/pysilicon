@@ -13,6 +13,7 @@ from pysilicon.hw.arrayutils import array, read_array, read_uint32_file, write_a
 from pysilicon.hw.clock import Clock
 from pysilicon.hw.dataschema import DataArray, DataList, EnumField, FloatField, IntField
 from pysilicon.hw.hw_component import HwComponent, HwConst, HwParam
+from pysilicon.hw.hw_testbench import HwTestbench
 from pysilicon.hw.interface import StreamIF, StreamIFMaster, StreamIFSlave
 from pysilicon.hw.memif import DirectMMIF, MMIFMaster
 from pysilicon.hw.regmap import (
@@ -280,14 +281,10 @@ class PolyTB(SimObj):
 
     def run_proc(self) -> ProcessGen[None]:
         bw = self.word_bw
-        regmap = self._regmap()
+        rm = self._regmap().bind_master(self.m_lite, base_addr=self.base_addr)
 
-        yield from self.m_lite.write_schema(
-            CoeffArray(self.coeffs),
-            addr=self.base_addr + regmap.offset_of("coeffs"),
-        )
-
-        yield from regmap.start(self.m_lite, base_addr=self.base_addr)
+        yield from rm.set("coeffs", self.coeffs)
+        yield from rm.start()
 
         yield from self.m_in.write(self.cmd_hdr.serialize(word_bw=bw))
         yield from self.m_in.write(write_array(self.samp_in, elem_type=Float32, word_bw=bw))
@@ -305,15 +302,9 @@ class PolyTB(SimObj):
         yield from self.m_in.write(end_hdr.serialize(word_bw=bw))
 
         yield self.timeout(0)
-        halted_field = yield from self.m_lite.read_schema(
-            Bit, addr=self.base_addr + regmap.offset_of("halted"))
-        error_field = yield from self.m_lite.read_schema(
-            PolyErrorField, addr=self.base_addr + regmap.offset_of("error"))
-        tx_id_field = yield from self.m_lite.read_schema(
-            TxIdField, addr=self.base_addr + regmap.offset_of("tx_id"))
-        self.halted       = int(halted_field.val)
-        self.error        = PolyError(int(error_field.val))
-        self.tx_id_status = int(tx_id_field.val)
+        self.halted       = yield from rm.get("halted")
+        self.error        = yield from rm.get("error")
+        self.tx_id_status = yield from rm.get("tx_id")
 
     def _regmap(self) -> VitisRegMap:
         if self._regmap_ref is None:
@@ -321,6 +312,75 @@ class PolyTB(SimObj):
                 "PolyTB._regmap_ref is unset; call connect() before run_sim()."
             )
         return self._regmap_ref
+
+
+class SampArray(DataArray):
+    """Float32 sample buffer for the codegen-source testbench.
+
+    Sized to ``max_shape=(128,)`` so the C++ testbench can allocate
+    ``float samp_in[128] = {};`` statically.  The runtime element count
+    is provided via ``count=data_hdr.nsamp`` per call.  Lives next to
+    ``CoeffArray`` (which sizes itself off ``ncoeff = 4``).
+    """
+    element_type = Float32
+    static = True
+    max_shape = (128,)
+    cpp_storage = "raw"
+
+
+@dataclass
+class PolyTBHls(HwTestbench):
+    """Codegen-source testbench for the polynomial accelerator kernel.
+
+    ``main()`` is a sequential Python program: instantiate the DUT,
+    preload coefficients and one DATA + END command-burst pair, run the
+    kernel, drain the response, and emit ``regmap_status.json``.  The
+    Phase-14 codegen pipeline lowers this directly to ``gen/poly_tb.cpp``
+    — the file that replaces the hand-written
+    ``examples/poly/poly_tb.cpp`` deleted by Phase 6.
+
+    Coexists with :class:`PolyTB` (the SimPy timing-accurate model used
+    by ``PySimStep``).  ``PolyTBHls`` is the codegen-only counterpart;
+    the SimPy testbench is preserved unchanged.
+    """
+
+    cpp_kernel_name: ClassVar[str | None] = "poly"
+
+    def main(self) -> None:
+        dut = PolyAccelComponent()
+
+        dut.regmap.read_uint32_file_array(
+            "coeffs", self.data_dir + "/coeffs.bin", count=4)
+
+        data_hdr = PolyCmdHdr()
+        data_hdr.read_uint32_file(self.data_dir + "/data_cmd_hdr.bin")
+
+        samp_in = SampArray()
+        samp_in.read_uint32_file_array(
+            self.data_dir + "/samp_in_data.bin", count=data_hdr.nsamp)
+
+        end_hdr = PolyCmdHdr()
+        end_hdr.read_uint32_file(self.data_dir + "/end_cmd_hdr.bin")
+
+        dut.s_in.push(data_hdr)
+        dut.s_in.push_array(samp_in, count=data_hdr.nsamp)
+        dut.s_in.push(end_hdr)
+
+        dut.run()
+
+        resp_hdr = PolyRespHdr()
+        dut.m_out.pop(resp_hdr)
+
+        samp_out = SampArray()
+        dut.m_out.pop_array(samp_out, count=data_hdr.nsamp)
+
+        resp_hdr.write_uint32_file(self.data_dir + "/resp_hdr_data.bin")
+        samp_out.write_uint32_file_array(
+            self.data_dir + "/samp_out_data.bin", count=data_hdr.nsamp)
+
+        dut.regmap.write_status_json(
+            self.data_dir + "/regmap_status.json",
+            fields=["halted", "error", "tx_id"])
 
 
 def connect(sim: Simulation, tb: PolyTB, accel: PolyAccelComponent, clk: Clock) -> None:

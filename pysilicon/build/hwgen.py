@@ -10,13 +10,20 @@ from pysilicon.hw.dataschema import DataArray, DataSchema, EnumField, FloatField
 from pysilicon.hw.hwstmt import (
     CaseStmt,
     ContinueStmt,
+    DutBindStmt,
     FieldRef,
     FunctionStmt,
     HwStmt,
     HwVar,
+    KernelCallStmt,
     Ref,
     ReturnStmt,
+    SchemaBindStmt,
     SeqStmt,
+    TbFileIOStmt,
+    TbRegmapFileReadStmt,
+    TbStatusJsonStmt,
+    TbStreamIOStmt,
     WhileStmt,
 )
 from pysilicon.hw.interface import (
@@ -999,6 +1006,501 @@ def impl_stub_to_tpp(comp, hook_method, template_params: list[str]) -> str:
         "// except via the .hpp.\n\n"
     )
     return header_comment + func_def + "\n"
+
+
+def tb_files_to_str(
+    tb_class,
+    output_dir: str = ".",
+) -> dict[str, str]:
+    """Build the file set for a ``HwTestbench`` subclass.
+
+    Returns ``{filename: contents}`` for the single ``<kernel>_tb.cpp``
+    file emitted in testbench mode.  ``cpp_kernel_name`` controls the
+    filename: testbench classes are expected to set it to match the DUT
+    they test (e.g. ``cpp_kernel_name = "poly"`` on a ``PolyTBHls``
+    yields ``gen/poly_tb.cpp``).
+    """
+    name = cpp_kernel_name(tb_class)
+    return {f"{name}_tb.cpp": _testbench_cpp(tb_class)}
+
+
+@dataclass
+class TbCodegenCtx:
+    """Codegen context for the testbench-mode emitter.
+
+    Mirrors :class:`CodegenCtx` but with side tables for bound TB locals:
+
+    - ``duts``: ``local_name -> instantiated HwComponent`` produced by
+      :class:`DutBindStmt`.
+    - ``schemas``: ``local_name -> DataSchema subclass`` produced by
+      :class:`SchemaBindStmt`.
+    - ``stream_bitwidth``: ``(dut_local, endpoint_attr) -> int`` cached
+      bitwidth used for ``write_axi4_stream<BW>`` template args.
+
+    The TB body is sequential, so a single shared context (no scoping)
+    is sufficient.
+    """
+    comp: object   # the HwTestbench instance
+    indent: int = 1
+    duts: dict[str, object] = field(default_factory=dict)
+    schemas: dict[str, type] = field(default_factory=dict)
+
+    def pad(self) -> str:
+        return "    " * self.indent
+
+    def child(self) -> TbCodegenCtx:
+        return TbCodegenCtx(
+            comp=self.comp,
+            indent=self.indent + 1,
+            duts=self.duts,
+            schemas=self.schemas,
+        )
+
+
+def tb_to_cpp(stmt: HwStmt, ctx: TbCodegenCtx) -> str:
+    """Emit C++ source for a testbench-mode statement."""
+    if isinstance(stmt, SeqStmt):
+        return "\n".join(tb_to_cpp(c, ctx) for c in stmt.stmts)
+    if isinstance(stmt, DutBindStmt):
+        return _emit_dut_bind(stmt, ctx)
+    if isinstance(stmt, KernelCallStmt):
+        return _emit_kernel_call(stmt, ctx)
+    if isinstance(stmt, SchemaBindStmt):
+        return _emit_schema_bind(stmt, ctx)
+    if isinstance(stmt, TbFileIOStmt):
+        return _emit_tb_file_io(stmt, ctx)
+    if isinstance(stmt, TbStreamIOStmt):
+        return _emit_tb_stream_io(stmt, ctx)
+    if isinstance(stmt, TbRegmapFileReadStmt):
+        return _emit_tb_regmap_file_read(stmt, ctx)
+    if isinstance(stmt, TbStatusJsonStmt):
+        return _emit_tb_status_json(stmt, ctx)
+    raise NotImplementedError(
+        f"Testbench codegen for {type(stmt).__name__} not implemented yet"
+    )
+
+
+def _emit_dut_bind(stmt: DutBindStmt, ctx: TbCodegenCtx) -> str:
+    """Emit stream + regmap-field local decls for the bound DUT."""
+    from pysilicon.simulation.simulation import Simulation
+    dut = stmt.comp_class(
+        name=f"_{stmt.local_name}",
+        sim=Simulation(),
+        **stmt.kwargs,
+    )
+    ctx.duts[stmt.local_name] = dut
+    pad = ctx.pad()
+    lines: list[str] = []
+    for attr, ep in _discover_stream_endpoints(dut):
+        tmpl = _stream_template_arg(ep)
+        lines.append(
+            f"{pad}hls::stream<streamutils::axi4s_word<{tmpl}>> {attr};"
+        )
+    regmap_slave = _discover_regmap(dut)
+    if regmap_slave is not None:
+        for fname, fld in regmap_slave.regmap._fields.items():
+            if fld.is_vitis_auto:
+                continue
+            schema = fld.schema
+            if (isinstance(schema, type) and issubclass(schema, DataArray)
+                    and getattr(schema, 'cpp_storage', 'struct') == 'raw'):
+                elem_cpp = cpp_type(schema.element_type)
+                count = schema._declared_count()
+                lines.append(f"{pad}{elem_cpp} {fname}[{count}] = {{}};")
+            else:
+                lines.append(f"{pad}{cpp_type(schema)} {fname} = 0;")
+    return "\n".join(lines)
+
+
+def _emit_kernel_call(stmt: KernelCallStmt, ctx: TbCodegenCtx) -> str:
+    """Emit ``<kernel_name>(args...);`` matching the DUT's kernel signature.
+
+    Arg order is canonical: stream endpoints (in ``vars(comp)`` order),
+    then non-vitis-auto regmap fields (in declaration order) — the same
+    iteration :func:`kernel_signature` uses, so emitter and signature
+    stay in lockstep.
+    """
+    dut = ctx.duts.get(stmt.local_name)
+    if dut is None:
+        raise RuntimeError(
+            f"KernelCallStmt for unbound DUT '{stmt.local_name}' — extractor "
+            f"and emitter side tables are out of sync."
+        )
+    kn = cpp_kernel_name(type(dut))
+    args: list[str] = [attr for attr, _ in _discover_stream_endpoints(dut)]
+    regmap_slave = _discover_regmap(dut)
+    if regmap_slave is not None:
+        for fname, fld in regmap_slave.regmap._fields.items():
+            if fld.is_vitis_auto:
+                continue
+            args.append(fname)
+    return f"{ctx.pad()}{kn}({', '.join(args)});"
+
+
+def _emit_schema_bind(stmt: SchemaBindStmt, ctx: TbCodegenCtx) -> str:
+    """Emit a TB-mode local declaration for a bound :class:`DataSchema`.
+
+    For raw-storage :class:`DataArray` subclasses the local is a C
+    array sized at the schema's declared ``max_shape[0]``; everything
+    else is a struct-typed local.  Either way we record the binding so
+    subsequent file-IO / stream-IO statements can look it up.
+    """
+    cls = stmt.schema_class
+    ctx.schemas[stmt.local_name] = cls
+    pad = ctx.pad()
+    if (isinstance(cls, type) and issubclass(cls, DataArray)
+            and getattr(cls, 'cpp_storage', 'struct') == 'raw'):
+        elem_cpp = cpp_type(cls.element_type)
+        count = cls._declared_count()
+        return f"{pad}{elem_cpp} {stmt.local_name}[{count}] = {{}};"
+    return f"{pad}{cls.cpp_class_name()} {stmt.local_name};"
+
+
+def _emit_tb_file_io(stmt: TbFileIOStmt, ctx: TbCodegenCtx) -> str:
+    """Lower a single :class:`TbFileIOStmt` to the right utility call."""
+    pad = ctx.pad()
+    target = stmt.target_local
+    path_cpp = _emit_str_expr(stmt.path, ctx)
+    if stmt.is_array:
+        cls = _require_array_schema(ctx, target)
+        ns = _array_utils_ns(cls.element_type)
+        fn = 'write_uint32_file_array' if stmt.is_write else 'read_uint32_file_array'
+        count_cpp = _emit_int_expr(stmt.count, ctx)
+        return (
+            f"{pad}{ns}::{fn}({target}, "
+            f"({path_cpp}).c_str(), {count_cpp});"
+        )
+    fn = 'write_uint32_file' if stmt.is_write else 'read_uint32_file'
+    return f"{pad}streamutils::{fn}({target}, ({path_cpp}).c_str());"
+
+
+def _emit_tb_stream_io(stmt: TbStreamIOStmt, ctx: TbCodegenCtx) -> str:
+    """Lower a push/pop/push_array/pop_array TB call to the right C++ form."""
+    pad = ctx.pad()
+    bw = _resolve_stream_bw(stmt.dut_local, stmt.endpoint_attr, ctx)
+    stream_name = stmt.endpoint_attr
+    value = stmt.value_local
+    if stmt.is_array:
+        cls = _require_array_schema(ctx, value)
+        ns = _array_utils_ns(cls.element_type)
+        count_cpp = _emit_int_expr(stmt.count, ctx)
+        if stmt.is_pop:
+            tl_var = f"_tlast_{value}"
+            return (
+                f"{pad}streamutils::tlast_status {tl_var} = "
+                f"streamutils::tlast_status::no_tlast;\n"
+                f"{pad}{ns}::read_axi4_stream<{bw}>("
+                f"{stream_name}, {value}, {tl_var}, {count_cpp});"
+            )
+        return (
+            f"{pad}{ns}::write_axi4_stream<{bw}>("
+            f"{stream_name}, {value}, true, {count_cpp});"
+        )
+    if stmt.is_pop:
+        tl_var = f"_tlast_{value}"
+        return (
+            f"{pad}streamutils::tlast_status {tl_var} = "
+            f"streamutils::tlast_status::no_tlast;\n"
+            f"{pad}{value}.read_axi4_stream<{bw}>({stream_name}, {tl_var});"
+        )
+    return f"{pad}{value}.write_axi4_stream<{bw}>({stream_name}, true);"
+
+
+def _emit_tb_regmap_file_read(
+    stmt: TbRegmapFileReadStmt, ctx: TbCodegenCtx,
+) -> str:
+    """``dut.regmap.read_uint32_file_array(field, path, count=...)`` →
+    ``<elem>_array_utils::read_uint32_file_array(<field>, path, count);``.
+    """
+    pad = ctx.pad()
+    dut = ctx.duts.get(stmt.dut_local)
+    if dut is None:
+        raise RuntimeError(
+            f"TbRegmapFileReadStmt references unbound DUT '{stmt.dut_local}'"
+        )
+    regmap_slave = _discover_regmap(dut)
+    if regmap_slave is None or stmt.field_name not in regmap_slave.regmap._fields:
+        raise RuntimeError(
+            f"DUT '{stmt.dut_local}' has no regmap field '{stmt.field_name}'"
+        )
+    fld = regmap_slave.regmap._fields[stmt.field_name]
+    schema = fld.schema
+    if not (isinstance(schema, type) and issubclass(schema, DataArray)
+            and getattr(schema, 'cpp_storage', 'struct') == 'raw'):
+        raise RuntimeError(
+            f"dut.regmap.read_uint32_file_array only supports raw-storage "
+            f"DataArray fields; field '{stmt.field_name}' is not."
+        )
+    ns = _array_utils_ns(schema.element_type)
+    path_cpp = _emit_str_expr(stmt.path, ctx)
+    count_cpp = _emit_int_expr(stmt.count, ctx)
+    return (
+        f"{pad}{ns}::read_uint32_file_array("
+        f"{stmt.field_name}, ({path_cpp}).c_str(), {count_cpp});"
+    )
+
+
+def _emit_tb_status_json(stmt: TbStatusJsonStmt, ctx: TbCodegenCtx) -> str:
+    """``dut.regmap.write_status_json(path, fields=[...])`` →
+    inline ``std::ofstream`` block matching the hand-written
+    ``examples/poly/poly_tb.cpp`` schema (each field cast to ``int``).
+    """
+    pad = ctx.pad()
+    path_cpp = _emit_str_expr(stmt.path, ctx)
+    if not stmt.field_names:
+        raise RuntimeError(
+            "write_status_json requires a non-empty fields list"
+        )
+    lines = [
+        f"{pad}{{",
+        f"{pad}    std::ofstream _status_ofs(({path_cpp}));",
+        f"{pad}    if (!_status_ofs) {{",
+        f"{pad}        throw std::runtime_error("
+        f'"Failed to open status JSON file for writing.");',
+        f"{pad}    }}",
+        f'{pad}    _status_ofs << "{{\\n";',
+    ]
+    last = len(stmt.field_names) - 1
+    for i, fname in enumerate(stmt.field_names):
+        comma = "" if i == last else ","
+        lines.append(
+            f'{pad}    _status_ofs << "  \\"{fname}\\": " '
+            f'<< (int){fname} << "{comma}\\n";'
+        )
+    lines.append(f'{pad}    _status_ofs << "}}\\n";')
+    lines.append(f"{pad}}}")
+    return "\n".join(lines)
+
+
+# ---------------------------------------------------------------------------
+# TB-mode expression helpers
+# ---------------------------------------------------------------------------
+
+
+def _emit_str_expr(node, ctx: TbCodegenCtx) -> str:
+    """Emit a TB-mode string expression (path argument) as C++.
+
+    Handles ``ast.Constant(str)``, ``ast.Attribute(self, 'data_dir')``,
+    ``ast.Name`` (raw locals), and ``ast.BinOp(Add)`` for concatenation.
+    """
+    import ast as _ast
+    if isinstance(node, _ast.Constant) and isinstance(node.value, str):
+        # Embed as a C++ string literal.  We deliberately use std::string
+        # so callers can ``.c_str()`` uniformly.
+        escaped = (
+            node.value
+            .replace('\\', '\\\\')
+            .replace('"', '\\"')
+        )
+        return f'std::string("{escaped}")'
+    if isinstance(node, _ast.Attribute) and isinstance(node.value, _ast.Name) \
+            and node.value.id == 'self':
+        # ``self.<attr>`` in TB main() resolves to a framework-provided
+        # C++ local of the same name (``data_dir`` is the only one for
+        # now, but the convention extends).
+        return node.attr
+    if isinstance(node, _ast.Name):
+        return node.id
+    if isinstance(node, _ast.BinOp) and isinstance(node.op, _ast.Add):
+        left = _emit_str_expr(node.left, ctx)
+        right = _emit_str_expr(node.right, ctx)
+        return f"{left} + {right}"
+    if isinstance(node, _ast.Call):
+        # Allow `<expr>.c_str()` if the user wrote it explicitly — strip
+        # it since the emitter adds .c_str() at the I/O site.
+        if (isinstance(node.func, _ast.Attribute)
+                and node.func.attr == 'c_str' and not node.args):
+            return _emit_str_expr(node.func.value, ctx)
+    raise RuntimeError(
+        f"Cannot lower TB string expression: {_ast.dump(node)}"
+    )
+
+
+def _emit_int_expr(node, ctx: TbCodegenCtx) -> str:
+    """Emit a TB-mode integer/count expression as C++.
+
+    Handles literals, name references, and ``<schema_local>.<field>``
+    chains so users can write ``count=data_hdr.nsamp`` directly.
+    """
+    import ast as _ast
+    if isinstance(node, _ast.Constant) and isinstance(node.value, int):
+        return str(node.value)
+    if isinstance(node, _ast.Name):
+        return node.id
+    if isinstance(node, _ast.Attribute) and isinstance(node.value, _ast.Name):
+        # `schema_local.field` — the C++ struct field of the bound local.
+        return f"{node.value.id}.{node.attr}"
+    if isinstance(node, _ast.Attribute) and isinstance(node.value, _ast.Name) \
+            and node.value.id == 'self':
+        return node.attr
+    raise RuntimeError(
+        f"Cannot lower TB int expression: {_ast.dump(node)}"
+    )
+
+
+def _array_utils_ns(elem_type) -> str:
+    """Return the ``<elem>_array_utils`` C++ namespace for ``elem_type``."""
+    from pysilicon.hw.arrayutils import _array_utils_namespace
+    return _array_utils_namespace(elem_type)
+
+
+def _require_array_schema(ctx: TbCodegenCtx, local: str) -> type:
+    """Return the bound DataArray class for ``local``, raising if mismatched."""
+    cls = ctx.schemas.get(local)
+    if cls is None:
+        raise RuntimeError(
+            f"TB array op references unbound local '{local}' "
+            f"— missing SchemaBindStmt"
+        )
+    if not (isinstance(cls, type) and issubclass(cls, DataArray)):
+        raise RuntimeError(
+            f"TB array op expected DataArray local '{local}', got {cls!r}"
+        )
+    return cls
+
+
+def _resolve_stream_bw(
+    dut_local: str, endpoint_attr: str, ctx: TbCodegenCtx,
+) -> int:
+    """Look up the integer bitwidth of a DUT stream endpoint."""
+    dut = ctx.duts.get(dut_local)
+    if dut is None:
+        raise RuntimeError(
+            f"Stream IO references unbound DUT '{dut_local}'"
+        )
+    ep = getattr(dut, endpoint_attr, None)
+    if ep is None:
+        raise RuntimeError(
+            f"DUT '{dut_local}' has no endpoint '{endpoint_attr}'"
+        )
+    return int(ep.bitwidth)
+
+
+# ---------------------------------------------------------------------------
+# Testbench-mode include discovery + top-level driver
+# ---------------------------------------------------------------------------
+
+
+def _collect_tb_array_elem_types(tree: HwStmt, ctx: TbCodegenCtx) -> list[type]:
+    """Walk the TB IR and return the unique array-element types referenced.
+
+    Order-preserving dedup keyed on the element type's class identity.
+    Drives the ``#include "include/<elem>_array_utils_tb.h"`` set in the
+    generated testbench prologue.
+    """
+    seen: dict[int, type] = {}
+
+    def add_array_cls(cls: type) -> None:
+        if (isinstance(cls, type) and issubclass(cls, DataArray)
+                and getattr(cls, 'cpp_storage', 'struct') == 'raw'):
+            et = cls.element_type
+            if id(et) not in seen:
+                seen[id(et)] = et
+
+    # SchemaBindStmt locals (TB main() body)
+    def visit(node):
+        if isinstance(node, SeqStmt):
+            for c in node.stmts:
+                visit(c)
+        elif isinstance(node, SchemaBindStmt):
+            add_array_cls(node.schema_class)
+
+    visit(tree)
+
+    # Regmap fields of every bound DUT (file-read / kernel-call args)
+    for dut in ctx.duts.values():
+        regmap_slave = _discover_regmap(dut)
+        if regmap_slave is None:
+            continue
+        for fld in regmap_slave.regmap._fields.values():
+            if fld.is_vitis_auto:
+                continue
+            add_array_cls(fld.schema)
+
+    return list(seen.values())
+
+
+def _collect_tb_schemas(tree: HwStmt, ctx: TbCodegenCtx) -> list[type]:
+    """Walk the TB IR and return the unique structured-schema classes used.
+
+    Excludes raw-array schemas (those flow through ``_array_utils_tb.h``
+    headers, not their own header).  ``IntField`` / ``FloatField`` map to
+    primitive C++ types and have no per-schema header.
+    """
+    seen: dict[str, type] = {}
+
+    def visit(node):
+        if isinstance(node, SeqStmt):
+            for c in node.stmts:
+                visit(c)
+        elif isinstance(node, SchemaBindStmt):
+            cls = node.schema_class
+            if not (isinstance(cls, type) and issubclass(cls, DataSchema)):
+                return
+            if issubclass(cls, (IntField, FloatField)):
+                return
+            if issubclass(cls, DataArray) \
+                    and getattr(cls, 'cpp_storage', 'struct') == 'raw':
+                return
+            seen[cls.cpp_class_name()] = cls
+
+    visit(tree)
+    return list(seen.values())
+
+
+def _testbench_cpp(tb_class) -> str:
+    """Build the full ``<kernel>_tb.cpp`` content for a testbench class.
+
+    Wraps the IR-driven body in the standard ``int main()`` boilerplate
+    plus a discovered include block (kernel header, ``streamutils_tb.h``,
+    one ``<elem>_array_utils_tb.h`` per array element type used, and
+    explicit ``include/<schema>.h`` lines for structured schemas).
+    """
+    from pysilicon.build.hwcodegen import extract_testbench
+    from pysilicon.simulation.simulation import Simulation
+
+    kn = cpp_kernel_name(tb_class)
+    tb = tb_class(name="_codegen", sim=Simulation())
+    tree = extract_testbench(tb)
+    ctx = TbCodegenCtx(comp=tb, indent=1)
+    body = tb_to_cpp(tree, ctx)
+
+    elem_types = _collect_tb_array_elem_types(tree, ctx)
+    schemas = _collect_tb_schemas(tree, ctx)
+
+    include_lines: list[str] = [
+        f'#include "{kn}.hpp"',
+        '#include "include/streamutils_tb.h"',
+    ]
+    for et in elem_types:
+        stem = _array_utils_stem(et)
+        include_lines.append(f'#include "include/{stem}_array_utils_tb.h"')
+    for s in schemas:
+        include_lines.append(
+            f'#include "include/{_snake_case(s.cpp_class_name())}.h"'
+        )
+
+    lines = list(include_lines) + [
+        '#include <fstream>',
+        '#include <cstdint>',
+        '#include <string>',
+        '#include <stdexcept>',
+        '',
+        'int main(int argc, char** argv) {',
+        '    const std::string data_dir = (argc > 1) ? argv[1] : "data";',
+        '    (void)data_dir;',
+    ]
+    if body:
+        lines.append(body)
+    lines.append('    return 0;')
+    lines.append('}')
+    return "\n".join(lines) + "\n"
+
+
+def _array_utils_stem(elem_type) -> str:
+    """Bridge to :func:`pysilicon.hw.arrayutils._array_utils_stem`."""
+    from pysilicon.hw.arrayutils import _array_utils_stem as _stem
+    return _stem(elem_type)
 
 
 def kernel_files_to_str(

@@ -18,16 +18,32 @@ if TYPE_CHECKING:
 from pysilicon.hw.hwstmt import (
     CaseStmt,
     ContinueStmt,
+    DutBindStmt,
     FieldRef,
     FunctionStmt,
     HwStmt,
     HwVar,
+    KernelCallStmt,
     Ref,
     ReturnStmt,
+    SchemaBindStmt,
     SeqStmt,
     SynthCallStmt,
+    TbCallStmt,
+    TbFileIOStmt,
+    TbRegmapFileReadStmt,
+    TbStatusJsonStmt,
+    TbStreamIOStmt,
     WhileStmt,
 )
+
+
+_TB_FILE_IO_METHODS = frozenset({
+    'read_uint32_file', 'write_uint32_file',
+    'read_uint32_file_array', 'write_uint32_file_array',
+})
+_TB_STREAM_PUSH_METHODS = frozenset({'push', 'push_array'})
+_TB_STREAM_POP_METHODS = frozenset({'pop', 'pop_array'})
 
 
 class SynthesisError(Exception):
@@ -49,10 +65,20 @@ class HwStmtExtractor:
     free-running components or a ``SeqStmt`` for per-invocation ones).
     """
 
-    def __init__(self, comp: HwComponent, method_name: str = 'run_proc') -> None:
+    def __init__(
+        self,
+        comp,
+        method_name: str = 'run_proc',
+        is_testbench: bool = False,
+    ) -> None:
         self._comp = comp
         self._method_name = method_name
+        self._is_testbench = is_testbench
         self._scope: dict[str, HwVar] = {}
+        # Testbench-mode side tables — empty in kernel mode, populated by
+        # the extractor as it walks the body in Phase 3/4.
+        self._duts: dict[str, object] = {}      # local_name -> HwComponent instance
+        self._tb_locals: dict[str, object] = {} # local_name -> object (binding)
 
     # ------------------------------------------------------------------
     # Public entry point
@@ -68,7 +94,14 @@ class HwStmtExtractor:
             raise SynthesisError(
                 f"{self._method_name} source did not parse as a function"
             )
-        self._validate_no_implicit_capture(func_def)
+        if not self._is_testbench:
+            # The implicit-capture rule applies to @synthesizable hook bodies
+            # and on_start/run_proc.  Testbench main() bodies legitimately
+            # read attributes of local DUTs (``dut.s_in.push(...)``), local
+            # schema instances (``cmd_hdr.write_uint32_file(...)``), etc.,
+            # so the rule isn't meaningful in TB mode — structural pattern
+            # matching in _visit_stmt_tb handles validation instead.
+            self._validate_no_implicit_capture(func_def)
         stmts = self._visit_stmts(func_def.body)
         if len(stmts) == 1:
             return stmts[0]
@@ -152,6 +185,13 @@ class HwStmtExtractor:
         return [s for s in (self._visit_stmt(n) for n in stmts) if s is not None]
 
     def _visit_stmt(self, stmt: ast.stmt) -> HwStmt | None:
+        if self._is_testbench:
+            tb_result = self._visit_stmt_tb(stmt)
+            if tb_result is not None:
+                return tb_result
+            # Fall through to the kernel-mode handlers for statements that
+            # apply identically in both modes (Return, If, Continue,
+            # bare-Constant docstrings, etc.).
         if isinstance(stmt, ast.While):
             return self._visit_while(stmt)
         if isinstance(stmt, ast.Continue):
@@ -170,6 +210,355 @@ class HwStmtExtractor:
             f"Non-synthesizable statement {type(stmt).__name__}"
             + (f" at line {stmt.lineno}" if hasattr(stmt, 'lineno') else "")
         )
+
+    # ------------------------------------------------------------------
+    # Testbench-mode statement handlers
+    # ------------------------------------------------------------------
+
+    def _visit_stmt_tb(self, stmt: ast.stmt) -> HwStmt | None:
+        """Match TB-only stmt shapes. Return ``None`` to fall through to
+        the kernel-mode handler (for stmts that have identical semantics in
+        both modes, e.g. ``return``, ``if``, bare docstring constants).
+        """
+        # `name = <ClassRef>(**kwargs)` — DUT or schema binding.
+        if (
+            isinstance(stmt, ast.Assign)
+            and len(stmt.targets) == 1
+            and isinstance(stmt.targets[0], ast.Name)
+            and isinstance(stmt.value, ast.Call)
+        ):
+            local_name = stmt.targets[0].id
+            bind = self._try_dut_bind(local_name, stmt.value, stmt)
+            if bind is not None:
+                return bind
+            schema_bind = self._try_schema_bind(local_name, stmt.value, stmt)
+            if schema_bind is not None:
+                return schema_bind
+        # Expression-statement calls (no return assignment): the bulk of TB
+        # mode lives here — push/pop, file IO, regmap helpers, dut.run().
+        if isinstance(stmt, ast.Expr) and isinstance(stmt.value, ast.Call):
+            result = self._visit_tb_call(stmt.value, stmt)
+            if result is not None:
+                return result
+        return None
+
+    # ------------------------------------------------------------------
+    # TB-mode call dispatch
+    # ------------------------------------------------------------------
+
+    def _visit_tb_call(
+        self, call: ast.Call, parent: ast.stmt,
+    ) -> HwStmt | None:
+        """Lower a bare ``<chain>(...)`` expression statement to TB IR."""
+        if not isinstance(call.func, ast.Attribute):
+            return None
+        attr = call.func.attr
+        receiver_chain = call.func.value
+
+        # `dut.run()` — kernel call.
+        if (
+            attr == 'run'
+            and isinstance(receiver_chain, ast.Name)
+            and receiver_chain.id in self._duts
+        ):
+            if call.args or call.keywords:
+                raise SynthesisError(
+                    f"dut.run() takes no arguments (line {parent.lineno})"
+                )
+            return KernelCallStmt(local_name=receiver_chain.id)
+
+        # `<schema_local>.read_uint32_file*(...)` / `.write_uint32_file*(...)`
+        if (
+            attr in _TB_FILE_IO_METHODS
+            and isinstance(receiver_chain, ast.Name)
+            and receiver_chain.id in self._tb_locals
+        ):
+            return self._make_file_io_stmt(
+                receiver_chain.id, attr, call, parent,
+            )
+
+        # `dut.<ep>.push(...)`, `.push_array(...)`, `.pop(...)`, `.pop_array(...)`
+        if (
+            (attr in _TB_STREAM_PUSH_METHODS or attr in _TB_STREAM_POP_METHODS)
+            and isinstance(receiver_chain, ast.Attribute)
+            and isinstance(receiver_chain.value, ast.Name)
+            and receiver_chain.value.id in self._duts
+        ):
+            return self._make_stream_io_stmt(
+                dut_local=receiver_chain.value.id,
+                endpoint_attr=receiver_chain.attr,
+                method_attr=attr,
+                call=call,
+                parent=parent,
+            )
+
+        # `dut.regmap.read_uint32_file_array(field, path, count=...)`
+        # `dut.regmap.write_status_json(path, fields=[...])`
+        if (
+            isinstance(receiver_chain, ast.Attribute)
+            and receiver_chain.attr == 'regmap'
+            and isinstance(receiver_chain.value, ast.Name)
+            and receiver_chain.value.id in self._duts
+        ):
+            return self._make_regmap_call_stmt(
+                dut_local=receiver_chain.value.id,
+                method_attr=attr,
+                call=call,
+                parent=parent,
+            )
+
+        return None
+
+    # ------------------------------------------------------------------
+    # TB-mode helpers
+    # ------------------------------------------------------------------
+
+    def _try_schema_bind(
+        self,
+        local_name: str,
+        call_node: ast.Call,
+        parent_stmt: ast.stmt,
+    ) -> SchemaBindStmt | None:
+        """If ``call_node`` constructs a ``DataSchema`` subclass with no
+        arguments, return a ``SchemaBindStmt`` and record the binding."""
+        from pysilicon.hw.dataschema import DataSchema
+
+        cls = self._resolve_tb_class(call_node.func)
+        if not (isinstance(cls, type) and issubclass(cls, DataSchema)):
+            return None
+        if call_node.args or call_node.keywords:
+            raise SynthesisError(
+                f"DataSchema construction in TB mode takes no arguments "
+                f"(line {parent_stmt.lineno})"
+            )
+        self._tb_locals[local_name] = cls
+        return SchemaBindStmt(local_name=local_name, schema_class=cls)
+
+    def _make_file_io_stmt(
+        self,
+        target_local: str,
+        method: str,
+        call: ast.Call,
+        parent: ast.stmt,
+    ) -> TbFileIOStmt:
+        """Build a :class:`TbFileIOStmt` from a ``<local>.<method>(...)`` call."""
+        is_array = method.endswith('_array')
+        is_write = method.startswith('write_')
+        if not call.args:
+            raise SynthesisError(
+                f"{method}() requires a path argument (line {parent.lineno})"
+            )
+        path = call.args[0]
+        count: object | None = None
+        if is_array:
+            count = self._extract_count_kwarg(call, method, parent)
+            if len(call.args) > 1:
+                raise SynthesisError(
+                    f"{method}() takes path + count=...; extra positional "
+                    f"args at line {parent.lineno}"
+                )
+        else:
+            if len(call.args) > 1 or call.keywords:
+                raise SynthesisError(
+                    f"{method}() takes only a path argument "
+                    f"(line {parent.lineno})"
+                )
+        return TbFileIOStmt(
+            target_local=target_local,
+            path=path,
+            is_write=is_write,
+            is_array=is_array,
+            count=count,
+        )
+
+    def _make_stream_io_stmt(
+        self,
+        dut_local: str,
+        endpoint_attr: str,
+        method_attr: str,
+        call: ast.Call,
+        parent: ast.stmt,
+    ) -> TbStreamIOStmt:
+        """Build a :class:`TbStreamIOStmt` from a ``dut.<ep>.<method>(...)`` call."""
+        is_pop = method_attr in _TB_STREAM_POP_METHODS
+        is_array = method_attr.endswith('_array')
+        if not call.args:
+            raise SynthesisError(
+                f"{method_attr}() requires a value argument "
+                f"(line {parent.lineno})"
+            )
+        value_node = call.args[0]
+        if not isinstance(value_node, ast.Name):
+            raise SynthesisError(
+                f"{method_attr}() value must be a local-name reference "
+                f"(line {parent.lineno})"
+            )
+        value_local = value_node.id
+        if value_local not in self._tb_locals:
+            raise SynthesisError(
+                f"{method_attr}({value_local}, ...) — '{value_local}' is "
+                f"not a bound schema local (line {parent.lineno})"
+            )
+        count: object | None = None
+        if is_array:
+            count = self._extract_count_kwarg(call, method_attr, parent)
+            if len(call.args) > 1:
+                raise SynthesisError(
+                    f"{method_attr}() takes value + count=...; extra "
+                    f"positional args at line {parent.lineno}"
+                )
+        else:
+            if len(call.args) > 1 or call.keywords:
+                raise SynthesisError(
+                    f"{method_attr}() takes only a value argument "
+                    f"(line {parent.lineno})"
+                )
+        return TbStreamIOStmt(
+            dut_local=dut_local,
+            endpoint_attr=endpoint_attr,
+            value_local=value_local,
+            is_pop=is_pop,
+            is_array=is_array,
+            count=count,
+        )
+
+    def _make_regmap_call_stmt(
+        self,
+        dut_local: str,
+        method_attr: str,
+        call: ast.Call,
+        parent: ast.stmt,
+    ) -> HwStmt | None:
+        """Handle ``dut.regmap.<method>(...)`` calls in TB mode."""
+        if method_attr == 'read_uint32_file_array':
+            if len(call.args) != 2:
+                raise SynthesisError(
+                    f"dut.regmap.read_uint32_file_array(field, path, count=...) "
+                    f"requires exactly two positional args "
+                    f"(line {parent.lineno})"
+                )
+            field_node = call.args[0]
+            if not (isinstance(field_node, ast.Constant)
+                    and isinstance(field_node.value, str)):
+                raise SynthesisError(
+                    f"dut.regmap.read_uint32_file_array(field, ...): "
+                    f"'field' must be a string literal (line {parent.lineno})"
+                )
+            count = self._extract_count_kwarg(call, method_attr, parent)
+            return TbRegmapFileReadStmt(
+                dut_local=dut_local,
+                field_name=field_node.value,
+                path=call.args[1],
+                count=count,
+            )
+        if method_attr == 'write_status_json':
+            if len(call.args) != 1:
+                raise SynthesisError(
+                    f"dut.regmap.write_status_json(path, fields=[...]) "
+                    f"requires exactly one positional arg "
+                    f"(line {parent.lineno})"
+                )
+            fields_kw = next(
+                (kw for kw in call.keywords if kw.arg == 'fields'), None,
+            )
+            if fields_kw is None or not isinstance(fields_kw.value, ast.List):
+                raise SynthesisError(
+                    f"dut.regmap.write_status_json(...) requires fields=[...]"
+                    f" as a list literal (line {parent.lineno})"
+                )
+            names: list[str] = []
+            for elt in fields_kw.value.elts:
+                if not (isinstance(elt, ast.Constant)
+                        and isinstance(elt.value, str)):
+                    raise SynthesisError(
+                        f"write_status_json fields must be string literals "
+                        f"(line {parent.lineno})"
+                    )
+                names.append(elt.value)
+            return TbStatusJsonStmt(
+                dut_local=dut_local,
+                path=call.args[0],
+                field_names=names,
+            )
+        return None
+
+    def _extract_count_kwarg(
+        self,
+        call: ast.Call,
+        method_name: str,
+        parent: ast.stmt,
+    ) -> object:
+        """Pull the required ``count=<expr>`` keyword from an array-mode call."""
+        for kw in call.keywords:
+            if kw.arg == 'count':
+                return kw.value
+        raise SynthesisError(
+            f"{method_name}() requires count=<int> (line {parent.lineno})"
+        )
+
+    def _try_dut_bind(
+        self,
+        local_name: str,
+        call_node: ast.Call,
+        parent_stmt: ast.stmt,
+    ) -> DutBindStmt | None:
+        """If ``call_node`` constructs a ``HwComponent`` subclass, return a
+        matching ``DutBindStmt``; otherwise ``None`` so the dispatcher can
+        try other patterns.
+        """
+        from pysilicon.hw.hw_component import HwComponent
+
+        cls = self._resolve_tb_class(call_node.func)
+        if not (isinstance(cls, type) and issubclass(cls, HwComponent)):
+            return None
+        if call_node.args:
+            raise SynthesisError(
+                f"DUT construction must use keyword arguments only "
+                f"(line {parent_stmt.lineno})"
+            )
+        kwargs: dict[str, object] = {}
+        for kw in call_node.keywords:
+            if kw.arg is None:
+                raise SynthesisError(
+                    f"DUT construction does not accept **kwargs "
+                    f"(line {parent_stmt.lineno})"
+                )
+            if not isinstance(kw.value, ast.Constant):
+                raise SynthesisError(
+                    f"DUT construction kwargs must be literal constants "
+                    f"(line {parent_stmt.lineno})"
+                )
+            kwargs[kw.arg] = kw.value.value
+        self._duts[local_name] = cls
+        return DutBindStmt(
+            local_name=local_name, comp_class=cls, kwargs=kwargs,
+        )
+
+    def _resolve_tb_class(self, func_node: ast.expr) -> object | None:
+        """Resolve a class reference in the testbench's ``main`` globals.
+
+        Supports bare names (``PolyAccelComponent``) and attribute chains
+        rooted in a global (``mod.PolyAccelComponent``).
+        """
+        method = getattr(self._comp, self._method_name)
+        globs = getattr(method, '__globals__', {})
+        if isinstance(func_node, ast.Name):
+            return globs.get(func_node.id)
+        if isinstance(func_node, ast.Attribute):
+            path: list[str] = []
+            node: ast.expr = func_node
+            while isinstance(node, ast.Attribute):
+                path.append(node.attr)
+                node = node.value
+            if not isinstance(node, ast.Name):
+                return None
+            obj = globs.get(node.id)
+            for attr in reversed(path):
+                if obj is None:
+                    return None
+                obj = getattr(obj, attr, None)
+            return obj
+        return None
 
     # ------------------------------------------------------------------
     # Individual statement handlers
@@ -468,14 +857,20 @@ class HwStmtExtractor:
 # ---------------------------------------------------------------------------
 
 
-def extract_kernel(comp: HwComponent) -> HwStmt:
+def extract_kernel(comp) -> HwStmt:
     """Extract the kernel body and return a fully-resolved ``HwStmt`` tree.
 
     Picks ``on_start`` if the component has a ``VitisRegMapMMIFSlave``
     endpoint, otherwise ``run_proc``.  The returned tree has every ``ast.*``
     node replaced with the real Python value and every output ``HwVar``
     typed where possible.
+
+    For ``HwTestbench`` subclasses this routes to :func:`extract_testbench`
+    instead — the testbench-mode entry point is ``main()`` with a different
+    rule profile.
     """
+    if getattr(type(comp), '_is_testbench', False):
+        return extract_testbench(comp)
     from pysilicon.build.hwresolve import resolve_kernel  # local: avoid cycle
     from pysilicon.hw.regmap import VitisRegMapMMIFSlave
     for ep in getattr(comp, 'endpoints', {}).values():
@@ -484,3 +879,18 @@ def extract_kernel(comp: HwComponent) -> HwStmt:
             return resolve_kernel(tree, comp)
     tree = HwStmtExtractor(comp, method_name='run_proc').extract()
     return resolve_kernel(tree, comp)
+
+
+def extract_testbench(comp) -> HwStmt:
+    """Extract the testbench ``main()`` body and return a resolved ``HwStmt`` tree.
+
+    Companion to :func:`extract_kernel`, but for the testbench-source
+    pathway introduced by Phase 14: the component is a ``HwTestbench``
+    subclass whose ``main()`` method is the codegen root.  Rule profile
+    differs from the kernel side — blocking stream ops, file I/O, and
+    DUT construction are legal, while pipelined ops stay forbidden.
+    """
+    from pysilicon.build.hwresolve import resolve_testbench
+    extractor = HwStmtExtractor(comp, method_name='main', is_testbench=True)
+    tree = extractor.extract()
+    return resolve_testbench(tree, comp)

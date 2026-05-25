@@ -47,11 +47,24 @@ class HlsCodegenStep(BuildStep):
     source_artifact: str
     output_dir: str = "."
     impl_dir: str | None = None  # None = use output_dir
+    is_testbench: bool | None = None  # None = auto-detect via HwTestbench
 
     def __post_init__(self) -> None:
         super().__post_init__()
         self._kernel_name = cpp_kernel_name(self.comp_class)
-        self._hook_info = self._discover_hooks()
+        # Resolve testbench mode: explicit flag wins; otherwise auto-detect.
+        if self.is_testbench is None:
+            self._is_testbench = bool(
+                getattr(self.comp_class, '_is_testbench', False)
+            )
+        else:
+            self._is_testbench = self.is_testbench
+        # Kernel-mode side state is meaningless in testbench mode but keep
+        # the attrs defined for any code paths that grep for them.
+        if self._is_testbench:
+            self._hook_info: list[tuple[str, str]] = []
+        else:
+            self._hook_info = self._discover_hooks()
         self._impl_dir = self.impl_dir if self.impl_dir is not None else self.output_dir
 
     def _discover_hooks(self) -> list[tuple[str, str]]:
@@ -74,8 +87,13 @@ class HlsCodegenStep(BuildStep):
     @property
     def produces(self) -> dict:  # type: ignore[override]
         out_dir = Path(self.output_dir)
-        impl_dir = Path(self._impl_dir)
         kn = self._kernel_name
+        if self._is_testbench:
+            # Testbench mode: single `<kernel>_tb.cpp`.  No header, no sticky
+            # impl files — the testbench main() body is fully framework-
+            # controlled.
+            return {f"{kn}_tb": out_dir / f"{kn}_tb.cpp"}
+        impl_dir = Path(self._impl_dir)
         d: dict[str, Path] = {
             f"{kn}_hpp": out_dir / f"{kn}.hpp",
             f"{kn}_cpp": out_dir / f"{kn}.cpp",
@@ -85,6 +103,8 @@ class HlsCodegenStep(BuildStep):
         return d
 
     def run(self, config: BuildConfig, **_) -> dict[str, Any]:
+        if self._is_testbench:
+            return self._run_testbench(config)
         files = kernel_files_to_str(
             self.comp_class,
             output_dir=self.output_dir,
@@ -132,3 +152,23 @@ class HlsCodegenStep(BuildStep):
             artifacts[f"{kn}_{hook_name}_impl"] = path
 
         return artifacts
+
+    def _run_testbench(self, config: BuildConfig) -> dict[str, Any]:
+        """Testbench-mode run: emit a single ``<kernel>_tb.cpp``.
+
+        The testbench file is always overwritten — its body is fully
+        framework-controlled, so there is no sticky-impl semantics like
+        the kernel-mode ``.tpp`` files.
+        """
+        from pysilicon.build.hwgen import tb_files_to_str
+        files = tb_files_to_str(
+            self.comp_class, output_dir=self.output_dir,
+        )
+        root_dir = Path(config.root_dir) if config.root_dir is not None else Path.cwd()
+        out_root = root_dir / self.output_dir
+        out_root.mkdir(parents=True, exist_ok=True)
+        kn = self._kernel_name
+        filename = f"{kn}_tb.cpp"
+        path = out_root / filename
+        path.write_text(files[filename], encoding="utf-8")
+        return {f"{kn}_tb": path}

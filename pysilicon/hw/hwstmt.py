@@ -111,3 +111,135 @@ class FunctionStmt(SynthCallStmt):
 class ReturnStmt(HwStmt):
     """``return`` from the kernel function. Optional return value."""
     value: HwExpr | None = None
+
+
+# ---------------------------------------------------------------------------
+# Testbench-mode IR nodes (Phase 14)
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class DutBindStmt(HwStmt):
+    """A ``dut = <HwComponentSubclass>(**kwargs)`` binding inside ``main()``.
+
+    The testbench emitter expands this into a block of local-variable
+    declarations: one ``hls::stream<...>`` per stream endpoint plus one
+    AXI-Lite scalar/array per regmap field.  The emitter also records a
+    binding from the Python-side ``dut`` name to those locals so later
+    statements (``dut.s_in.push(...)``, ``dut.run()`` etc.) can find the
+    right C++ symbol.
+    """
+    local_name: str                 # Python-side local (e.g. "dut")
+    comp_class: type                # The HwComponent subclass being bound
+    kwargs: dict[str, object]       # Construction kwargs (resolved to literals)
+
+
+@dataclass
+class KernelCallStmt(HwStmt):
+    """A ``<dut>.run()`` call site: invoke the DUT's kernel function.
+
+    The emitter resolves the kernel name from the DUT's component class
+    (via ``cpp_kernel_name``) and emits ``poly(s_in, m_out, halted,
+    error, tx_id, coeffs);`` — passing the locals introduced by the
+    matching ``DutBindStmt`` in canonical kernel-signature order.
+    """
+    local_name: str                 # Python-side DUT local (e.g. "dut")
+
+
+@dataclass
+class TbCallStmt(HwStmt):
+    """A testbench-mode method call (push, pop, read_uint32_file, ...).
+
+    Generic carrier: ``method_name`` is the Python-side method (e.g.
+    ``"push"``), ``receiver`` is the bound object (a ``StreamIFSlave``,
+    a ``DataSchema`` class, a regmap, etc. — resolved by the extractor),
+    ``inputs`` and ``outputs`` follow the same shape as ``SynthCallStmt``.
+    The testbench-mode emitter dispatches on ``method_name`` +
+    ``type(receiver)`` to pick the right C++ lowering.
+    """
+    method_name: str
+    receiver: object
+    inputs: list
+    outputs: list[HwVar]
+    # Optional: for stream ops, the bound DUT's local name + endpoint attr
+    # so the emitter can resolve "dut.s_in" → the right C++ stream variable.
+    dut_local: str | None = None
+    endpoint_attr: str | None = None
+
+
+@dataclass
+class SchemaBindStmt(HwStmt):
+    """A ``name = <DataSchemaSubclass>()`` binding inside ``main()``.
+
+    Declares a C++ schema local matching the Python instance.  For
+    structured schemas (``DataSchema``, ``DataList``) this emits
+    ``<SchemaCpp> <name>;``.  For raw-storage ``DataArray`` subclasses,
+    this emits a C-array of the element type sized at the schema's
+    declared ``max_shape[0]`` (e.g. ``float samp_in[128] = {};``).
+    """
+    local_name: str
+    schema_class: type   # DataSchema subclass
+
+
+@dataclass
+class TbFileIOStmt(HwStmt):
+    """File I/O on a TB schema local: ``read_uint32_file*`` /
+    ``write_uint32_file*``.
+
+    Captured as a single IR node with ``is_write`` and ``is_array``
+    booleans.  The emitter dispatches to either ``streamutils::*`` (for
+    structured schemas) or ``<elem>_array_utils::*`` (for raw arrays).
+    """
+    target_local: str
+    path: object             # AST expr — emitted via _emit_str_expr
+    is_write: bool
+    is_array: bool
+    count: object | None = None     # only for the ``_array`` variant
+
+
+@dataclass
+class TbStreamIOStmt(HwStmt):
+    """Stream IO on a DUT endpoint: ``dut.<ep>.push/pop[_array](...)``.
+
+    ``is_pop`` distinguishes push from pop; ``is_array`` distinguishes
+    single-schema from bulk-array variants.  ``value_local`` is the
+    schema local being pushed / popped into (for ``pop`` the schema is
+    populated by the call); ``count`` is the element count for array
+    variants.
+    """
+    dut_local: str
+    endpoint_attr: str
+    value_local: str
+    is_pop: bool
+    is_array: bool
+    count: object | None = None
+
+
+@dataclass
+class TbRegmapFileReadStmt(HwStmt):
+    """``dut.regmap.read_uint32_file_array(field, path, count=...)`` —
+    read a binary file directly into a regmap raw-array field.  The
+    emitter lowers to ``<elem>_array_utils::read_uint32_file_array(<field>,
+    path, count)`` where ``<field>`` is the C++ regmap local the DUT
+    binding introduced.
+    """
+    dut_local: str
+    field_name: str
+    path: object
+    count: object
+
+
+@dataclass
+class TbStatusJsonStmt(HwStmt):
+    """``dut.regmap.write_status_json(path, fields=[...])`` — write the
+    final values of the named regmap fields as a flat JSON object.
+
+    Field values are read from the C++ regmap locals that the DUT
+    binding introduced (the same locals the kernel call took as
+    references).  The emitter lowers this to an inline ``std::ofstream``
+    block matching the hand-written ``examples/poly/poly_tb.cpp``
+    schema.
+    """
+    dut_local: str
+    path: object
+    field_names: list[str]

@@ -566,6 +566,30 @@ class StreamIFSlave(QueuedTransferIFSlave):
         """Consume and discard the current word burst from the buffer."""
         yield from super().get()
 
+    # ----------------------------------------------------------------
+    # TB-mode blocking ops (codegen-only)
+    # ----------------------------------------------------------------
+    #
+    # ``pop`` and ``pop_array`` are the slave-side blocking dequeue
+    # primitives for ``HwTestbench.main()`` bodies.  They are recognized
+    # structurally by the TB extractor (``hwcodegen.py``) and lowered
+    # to ``streamutils::*`` / ``<elem>_array_utils::*`` calls; the
+    # Python implementations are not exercised in v1 (the SimPy testbench
+    # uses ``get`` instead).  They exist so the testbench source parses
+    # and so future SimPy-mode codegen has a binding to attach to.
+
+    def pop(self, value):
+        """TB-mode: dequeue one structured-schema instance from the stream."""
+        raise NotImplementedError(
+            "StreamIFSlave.pop is codegen-only in v1; use get() for sim."
+        )
+
+    def pop_array(self, value, *, count):
+        """TB-mode: dequeue ``count`` elements into the raw-storage array."""
+        raise NotImplementedError(
+            "StreamIFSlave.pop_array is codegen-only in v1; use get() for sim."
+        )
+
 
 @dataclass
 class StreamIFMaster(QueuedTransferIFMaster):
@@ -636,6 +660,23 @@ class StreamIFMaster(QueuedTransferIFMaster):
                 "is not bound to an interface"
             )
         yield self.process(self.interface.write(raw_words, tstart=t_out_start))
+
+    # ----------------------------------------------------------------
+    # TB-mode blocking ops (codegen-only) — see StreamIFSlave for the
+    # pop counterparts and the design rationale.
+    # ----------------------------------------------------------------
+
+    def push(self, value):
+        """TB-mode: enqueue one structured-schema instance into the stream."""
+        raise NotImplementedError(
+            "StreamIFMaster.push is codegen-only in v1; use write() for sim."
+        )
+
+    def push_array(self, value, *, count):
+        """TB-mode: enqueue ``count`` elements from the raw-storage array."""
+        raise NotImplementedError(
+            "StreamIFMaster.push_array is codegen-only in v1; use write() for sim."
+        )
 
 
 # ---------------------------------------------------------------------------

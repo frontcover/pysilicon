@@ -278,6 +278,88 @@ class RegMap:
             buf[sub_word] = value
         return int(buf[sub_word])
 
+    # ------------------------------------------------------------------
+    # Host-side bound access
+    # ------------------------------------------------------------------
+
+    def bind_master(self, master: MMIFMaster, base_addr: int = 0) -> "BoundRegMap":
+        """Return a :class:`BoundRegMap` proxying host-side bus access at
+        ``base_addr`` via ``master``.  The proxy looks up each field's
+        schema and offset from this regmap, so callers issue reads/writes
+        by field name instead of recomputing addresses and schema types
+        at every call site.
+        """
+        return BoundRegMap(self, master, base_addr)
+
+
+# ---------------------------------------------------------------------------
+# BoundRegMap — host-side proxy mirroring RegMap.get/set over an MMIFMaster
+# ---------------------------------------------------------------------------
+
+
+class BoundRegMap:
+    """Host-side proxy binding a :class:`RegMap` to an :class:`MMIFMaster`
+    plus a base address.  Exposes ``get`` / ``set`` / ``start`` methods
+    whose names mirror :meth:`RegMap.get` / :meth:`RegMap.set` (the
+    kernel-side, in-process API), but route through the master bus.
+
+    ``get`` returns a native Python value:
+
+    - ``IntField`` (including ``Bit``) → ``int``
+    - ``FloatField`` → ``float``
+    - ``EnumField`` → the matching ``IntEnum`` member
+    - ``DataArray`` / ``DataList`` / other → the schema instance
+
+    All methods are coroutines — call sites use ``yield from``.
+    """
+
+    def __init__(self, regmap: RegMap, master: MMIFMaster, base_addr: int = 0) -> None:
+        self._regmap = regmap
+        self._master = master
+        self._base_addr = base_addr
+
+    @property
+    def base_addr(self) -> int:
+        return self._base_addr
+
+    def set(self, name: str, value: Any) -> ProcessGen[None]:
+        """Write ``value`` to field ``name`` over the master bus.
+
+        Raw values are wrapped via ``schema(value)`` to match the kernel
+        side's :meth:`RegMap.set` ergonomics.
+        """
+        f = self._regmap._fields[name]
+        if not isinstance(value, f.schema):
+            value = f.schema(value)
+        addr = self._base_addr + self._regmap.offset_of(name)
+        yield from self._master.write_schema(value, addr=addr)
+
+    def get(self, name: str) -> ProcessGen[Any]:
+        """Read field ``name`` over the master bus and return a native value."""
+        f = self._regmap._fields[name]
+        addr = self._base_addr + self._regmap.offset_of(name)
+        obj = yield from self._master.read_schema(f.schema, addr=addr)
+        return self._to_native(obj, f.schema)
+
+    def start(self) -> ProcessGen[None]:
+        """Write 1 to ``ap_start`` (only valid on a :class:`VitisRegMap`)."""
+        yield from self._master.write_schema(
+            Bit(1),
+            addr=self._base_addr + self._regmap.offset_of("ap_start"),
+        )
+
+    @staticmethod
+    def _to_native(obj: Any, schema_cls: type) -> Any:
+        from pysilicon.hw.dataschema import FloatField, IntField
+        enum_type = getattr(schema_cls, "enum_type", None)
+        if enum_type is not None:
+            return enum_type(int(obj.val))
+        if isinstance(schema_cls, type) and issubclass(schema_cls, IntField):
+            return int(obj.val)
+        if isinstance(schema_cls, type) and issubclass(schema_cls, FloatField):
+            return float(obj.val)
+        return obj
+
 
 # ---------------------------------------------------------------------------
 # RegMapMMIFSlave — wires MMIFSlave callbacks to a RegMap
