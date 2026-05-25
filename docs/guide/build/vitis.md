@@ -56,7 +56,7 @@ class CSimStep(BuildStep):
 
 Things to notice:
 
-- **`consumes` lists every source file Vitis will touch.** `poly_cpp` / `poly_hpp` / `poly_tb` are `SourceStep` artifacts. Touching any of them invalidates the C-sim results — exactly what you want. `include_dir` is the generated headers directory from `GenCppStep`. `data_dir` is the input binaries directory from `BuildInputsStep`.
+- **`consumes` lists every source file Vitis will touch.** `poly_cpp` / `poly_hpp` / `poly_tb` are codegen artifacts from `HlsCodegenStep` instances. Touching any of them invalidates the C-sim results — exactly what you want. `include_dir` is the generated headers directory from `HlsGenIncludeStep`. `data_dir` is the input binaries directory from `BuildInputsStep`.
 - **`produces = {"csim_data_dir": "data_dir"}`** uses string aliasing. Vitis writes its output binaries back into the same `data_dir` that `BuildInputsStep` created (the testbench writes alongside the inputs), so this step doesn't produce a *new* path — it re-publishes the same path under a new name so downstream steps can express "I depend on Vitis having run here." String aliasing is the right tool for this; declaring `Path("data")` again would conflict with the existing producer.
 - **The `PYSILICON_POLY_*` env vars are a contract** between the build step and the C++ testbench. The testbench reads `PYSILICON_POLY_COSIM` to decide whether to skip the cosim flow; reads `PYSILICON_POLY_CLK_PERIOD_NS` to set timing. This is per-example — every design defines its own env-var schema. There is no framework-level convention (yet).
 - **`run.tcl` is hard-coded** as living at `config.root_dir / "run.tcl"`. Most Vitis flows have one canonical TCL script per project; this convention matches that. If you need multiple solutions, parameterize via the env dict or write a second step.
@@ -217,19 +217,20 @@ def build_poly_dag() -> BuildDag:
 
     # Source files
     dag.add(SourceStep(artifact="poly_source", path="poly.py"))
-    dag.add(SourceStep(artifact="poly_cpp",    path="poly.cpp"))
-    dag.add(SourceStep(artifact="poly_hpp",    path="poly.hpp"))
-    dag.add(SourceStep(artifact="poly_tb",     path="poly_tb.cpp"))
 
-    # Build steps
-    dag.add(BuildInputsStep(name="build_inputs"))     # writes data/*.bin
-    dag.add(GenCppStep(name="gen_cpp"))               # wraps codegen sub-DAG → include/*.h
-    dag.add(PySimStep(name="py_sim"))                 # SimPy → results/sim/*
-    dag.add(ValidateTimingStep(name="validate_timing"))
-    dag.add(CSimStep(name="csim"))                    # Vitis C-sim
-    dag.add(ValidateCSimStep(name="validate_csim"))
-    dag.add(CSynthStep(name="csynth"))                # Vitis C-synth
-    dag.add(InspectSynthStep(name="inspect_synth"))   # parse csynth.xml
+    # Build steps (groups expressed as docstring comments in poly_build.py)
+    dag.add(BuildInputsStep(name="build_inputs"))                  # writes data/*.bin
+    dag.add(PySimStep(name="py_sim"))                              # SimPy → results/sim/*
+    dag.add(ExtractPyTimingStep(name="extract_py_timing"))         # py_timing.json
+    dag.add(HlsGenIncludeStep(name="gen_include"))                 # codegen sub-DAG → include/*.h
+    dag.add(HlsCodegenStep(name="gen_kernel", comp_class=PolyAccelComponent, ...))
+    dag.add(HlsCodegenStep(name="gen_tb",     comp_class=PolyTBHls, is_testbench=True, ...))
+    dag.add(CSimStep(name="csim"))                                 # Vitis C-sim
+    dag.add(FunctionalVerifyStep(name="validate_csim", ...))       # generic comparator
+    dag.add(CSynthStep(name="csynth"))                             # Vitis C-synth + cosim
+    dag.add(InspectSynthStep(name="inspect_synth"))                # parse csynth.xml
+    dag.add(ExtractCosimTimingStep(name="extract_cosim_timing", top="poly"))
+    dag.add(ValidateTimingStep(name="validate_timing"))            # py vs cosim cycles
     return dag
 ```
 
@@ -238,11 +239,11 @@ Then per-run:
 ```python
 config = BuildConfig(root_dir=".", params={"clk_freq": 100e6, "nsamp": 100, ...})
 
-# Just Python sim + timing validation (no Vitis)
-dag.run(config, through="validate_timing")
+# Just Python sim + extracted timing (no Vitis)
+dag.run(config, through="extract_py_timing")
 
-# Full build, force re-synth even if outputs look fresh
-dag.run(config, through="inspect_synth", force=["csynth"])
+# Full build with cosim timing comparison
+dag.run(config, through="validate_timing")
 ```
 
 The CLI scaffolding around this is documented under [Python Simulation Pattern → CLI integration](./python.md#cli-integration); the same `main()` covers both Python-sim-only and full-Vitis runs because of `--through`.

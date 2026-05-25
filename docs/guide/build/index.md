@@ -12,7 +12,7 @@ PySilicon's build system models the full path from a Python design to its Vitis 
 ## Why it's useful
 
 - **One DAG, one command.** `dag.run(config)` executes every step in the right order. No shell scripts, no make.
-- **Mixed file / in-memory artifacts.** A `PySimStep` can produce a Python object; a downstream `ValidateTimingStep` consumes it directly without serialising to disk.
+- **Mixed file / in-memory artifacts.** A `PySimStep` can produce a Python object; a downstream `ExtractPyTimingStep` consumes it directly without serialising to disk.
 - **Auto-wired dependencies.** Steps declare `consumes = [...]` and `produces = {...}`; the DAG figures out who depends on whom. No manual `dep_step.add_dependent(self)` calls.
 - **Incremental rebuilds.** File freshness is checked by mtime; only stale steps re-run. `force=True` or `force=["step_name"]` overrides when needed.
 - **Subgraph execution.** `dag.run(config, through="csim")` runs everything required by `csim` and stops.
@@ -35,23 +35,24 @@ from pysilicon.build.build import BuildConfig, BuildDag, SourceStep
 
 dag = BuildDag()
 dag.add(SourceStep(artifact="poly_source", path="poly.py"))
-dag.add(SourceStep(artifact="poly_cpp",    path="poly.cpp"))
-dag.add(SourceStep(artifact="poly_hpp",    path="poly.hpp"))
-dag.add(SourceStep(artifact="poly_tb",     path="poly_tb.cpp"))
 
-dag.add(BuildInputsStep(name="build_inputs"))         # writes data/*.bin
-dag.add(GenCppStep(name="gen_cpp"))                   # writes include/*.h
-dag.add(PySimStep(name="py_sim"))                     # writes results/sim/*
-dag.add(ValidateTimingStep(name="validate_timing"))
-dag.add(CSimStep(name="csim"))                        # invokes Vitis
-dag.add(ValidateCSimStep(name="validate_csim"))
-dag.add(CSynthStep(name="csynth"))                    # invokes Vitis again
-dag.add(InspectSynthStep(name="inspect_synth"))       # parses csynth.xml
+dag.add(BuildInputsStep(name="build_inputs"))                    # writes data/*.bin
+dag.add(PySimStep(name="py_sim"))                                # writes results/sim/*
+dag.add(ExtractPyTimingStep(name="extract_py_timing"))           # writes results/py_timing.json
+dag.add(HlsGenIncludeStep(name="gen_include"))                   # writes include/*.h
+dag.add(HlsCodegenStep(name="gen_kernel", comp_class=PolyAccelComponent, ...))
+dag.add(HlsCodegenStep(name="gen_tb",     comp_class=PolyTBHls, is_testbench=True, ...))
+dag.add(CSimStep(name="csim"))                                   # invokes Vitis C-sim
+dag.add(FunctionalVerifyStep(name="validate_csim", ...))         # py vs Vitis outputs
+dag.add(CSynthStep(name="csynth"))                               # invokes Vitis C-synth + cosim
+dag.add(InspectSynthStep(name="inspect_synth"))                  # parses csynth.xml
+dag.add(ExtractCosimTimingStep(name="extract_cosim_timing", top="poly"))
+dag.add(ValidateTimingStep(name="validate_timing", tolerance_cycles=20))
 
 config = BuildConfig(root_dir=".", params={"nsamp": 100, "clk_freq": 100e6})
-dag.run(config, through="validate_timing")            # stop before Vitis
+dag.run(config, through="extract_py_timing")          # stop before Vitis
 # or:
-dag.run(config)                                       # full build
+dag.run(config)                                       # full build through validate_timing
 ```
 
 See [examples/poly/poly_build.py](https://github.com/sdrangan/pysilicon/tree/main/examples/poly/poly_build.py) for the full working pipeline this snippet is drawn from.
