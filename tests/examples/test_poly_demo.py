@@ -55,7 +55,7 @@ def _copy_poly_vitis_resources(dst_dir: Path) -> None:
 def test_poly_simulate_matches_expected_outputs(tmp_path: Path) -> None:
     results = build_poly_dag().run(
         BuildConfig(root_dir=tmp_path, params={'nsamp': 100}),
-        through='validate_timing',
+        through='extract_py_timing',
     )
 
     assert results['build_inputs'].success
@@ -115,7 +115,7 @@ def test_poly_timing_bandwidth_and_unroll(tmp_path: Path) -> None:
                 'out_bw': cfg['out_bw'],
                 'unroll_factor': cfg['unroll_factor'],
             }),
-            through='validate_timing',
+            through='extract_py_timing',
         )
         sim_result = PolySimResult.from_paths(
             cmd_hdr_path=results['build_inputs'].path('data_cmd_hdr'),
