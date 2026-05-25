@@ -10,6 +10,7 @@ from pathlib import Path
 import numpy as np
 
 from pysilicon.build.build import BuildConfig, BuildDag, BuildStep, SourceStep
+from pysilicon.build.cosim_steps import ExtractCosimTimingStep, ValidateTimingStep
 from pysilicon.build.hwcodegen_steps import HlsCodegenStep
 from pysilicon.build.streamutils import StreamUtilsStep
 from pysilicon.build.verify_steps import FunctionalVerifyStep
@@ -88,7 +89,7 @@ class BuildInputsStep(BuildStep):
 
 
 @dataclass(kw_only=True)
-class GenCppStep(BuildStep):
+class HlsGenIncludeStep(BuildStep):
     description = "Generate schema and utility headers needed for the Vitis flow."
     consumes    = ["poly_source"]
     params      = {}
@@ -168,13 +169,37 @@ class PySimStep(BuildStep):
 
 
 @dataclass(kw_only=True)
-class ValidateTimingStep(BuildStep):
-    description = "Read the simulation log, verify timing events, and write results/durations.json."
-    consumes    = ["log"]
-    produces    = {"durations": Path("results/durations.json")}
-    params      = {}
+class ExtractPyTimingStep(BuildStep):
+    """Extract a structured cycle-count measurement from the PySim event log.
 
-    def run(self, config: BuildConfig, log) -> dict:
+    Reads ``results/sim_log.csv`` (the SimPy logger output) and converts the
+    ``samp_out_write_end - samp_read_begin`` interval — the cycle-approximate
+    Python transaction time — into a structured ``py_timing`` JSON artifact:
+
+    .. code-block:: json
+
+        {
+            "transaction_cycles": 110,
+            "transaction_seconds": 1.10e-06,
+            "clk_freq": 100000000.0,
+            "source": "py_sim",
+            "events": {"samp_read_begin": ..., "samp_out_write_end": ...}
+        }
+
+    This is the producer of the ``py_timing`` artifact consumed by the new
+    cosim-side :class:`ValidateTimingStep`.  The legacy ``durations`` JSON
+    is preserved alongside for backwards-compat with notebooks that loaded
+    ``results/durations.json`` directly.
+    """
+    description = "Extract structured transaction-cycle measurement from the PySim event log."
+    consumes    = ["log"]
+    produces    = {
+        "py_timing": Path("results/py_timing.json"),
+        "durations": Path("results/durations.json"),
+    }
+    params      = {"clk_freq": 100e6}
+
+    def run(self, config: BuildConfig, log, clk_freq, **_) -> dict:
         events: dict[str, float] = {}
         with open(log, newline="") as f:
             for row in csv.DictReader(f):
@@ -185,11 +210,31 @@ class ValidateTimingStep(BuildStep):
         t_end = events.get("samp_out_write_end")
         if t_start is None or t_end is None:
             raise RuntimeError(f"Missing timing events in log: {list(events)}")
-        durations = {"samp_read_to_write_end": t_end - t_start}
-        durations_path = config.root_dir / "results" / "durations.json"
-        durations_path.parent.mkdir(parents=True, exist_ok=True)
+        transaction_seconds = t_end - t_start
+        # Match cosim's rounding (Vitis rounds to whole cycles).
+        transaction_cycles = int(round(transaction_seconds * clk_freq))
+
+        results_dir = config.root_dir / "results"
+        results_dir.mkdir(parents=True, exist_ok=True)
+
+        durations = {"samp_read_to_write_end": transaction_seconds}
+        durations_path = results_dir / "durations.json"
         durations_path.write_text(json.dumps(durations, indent=2), encoding="utf-8")
-        return {"durations": durations_path}
+
+        py_timing = {
+            "transaction_cycles": transaction_cycles,
+            "transaction_seconds": transaction_seconds,
+            "clk_freq": float(clk_freq),
+            "source": "py_sim",
+            "events": {
+                "samp_read_begin": t_start,
+                "samp_out_write_end": t_end,
+            },
+        }
+        py_timing_path = results_dir / "py_timing.json"
+        py_timing_path.write_text(json.dumps(py_timing, indent=2), encoding="utf-8")
+
+        return {"py_timing": py_timing_path, "durations": durations_path}
 
 
 
@@ -308,6 +353,12 @@ class InspectSynthStep(BuildStep):
 def build_poly_dag() -> BuildDag:
     """Build the canonical poly accelerator pipeline DAG.
 
+    The DAG follows the five-group narrative arc — Python golden model →
+    HLS codegen → C-sim functional verification → C-synth resource
+    estimation → RTL cosim timing verification.  Groups are docstring
+    markers only (NOT first-class DAG concepts); they exist to make the
+    reading order match the conceptual flow.
+
     All parameters (nsamp, in_bw, out_bw, unroll_factor, clk_freq, log_file,
     live_output) are read from BuildConfig.params at run time.  Pass them via
     BuildConfig(root_dir=..., params={...}) when calling dag.run().
@@ -318,9 +369,18 @@ def build_poly_dag() -> BuildDag:
         artifact="poly_source", path=_SOURCE_DIR / "poly.py",
         description="Python source for schemas, accelerator, and testbench.",
     ))
-    # Build steps — instance names (snake_case) for nicer CLI output
+
+    """
+    Python golden model
+    """
     dag.add(BuildInputsStep(name="build_inputs"))
-    dag.add(GenCppStep(name="gen_cpp"))
+    dag.add(PySimStep(name="py_sim"))
+    dag.add(ExtractPyTimingStep(name="extract_py_timing"))
+
+    """
+    HLS code generation
+    """
+    dag.add(HlsGenIncludeStep(name="gen_include"))
     # HLS codegen — writes generated .hpp/.cpp into gen/ and the sticky
     # poly_evaluate_impl.tpp into the source-tree root (impl_dir=".").
     # The hand-written .tpp body is committed; gen/ is .gitignored.
@@ -342,8 +402,10 @@ def build_poly_dag() -> BuildDag:
         output_dir="gen",
         is_testbench=True,
     ))
-    dag.add(PySimStep(name="py_sim"))
-    dag.add(ValidateTimingStep(name="validate_timing"))
+
+    """
+    C-sim functional verification
+    """
     dag.add(CSimStep(name="csim"))
     dag.add(FunctionalVerifyStep(
         name="validate_csim",
@@ -372,15 +434,34 @@ def build_poly_dag() -> BuildDag:
         output_artifact="vitis_dir",
         report_path="results/verify_csim.json",
     ))
+
+    """
+    C-synth resource estimation
+    """
     dag.add(CSynthStep(name="csynth"))
     dag.add(InspectSynthStep(name="inspect_synth"))
+
+    """
+    RTL cosim timing verification
+    """
+    dag.add(ExtractCosimTimingStep(
+        name="extract_cosim_timing",
+        top="poly",
+        report_dir_artifact="report_dir",
+    ))
+    dag.add(ValidateTimingStep(
+        name="validate_timing",
+        py_timing_artifact="py_timing",
+        cosim_timing_artifact="cosim_timing",
+        tolerance_cycles=20,
+    ))
     return dag
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description="Run the polynomial accelerator example.")
     parser.add_argument(
-        "--through", metavar="STEP", default="validate_timing",
+        "--through", metavar="STEP", default="extract_py_timing",
         help="Run the DAG up to and including this step.",
     )
     parser.add_argument(

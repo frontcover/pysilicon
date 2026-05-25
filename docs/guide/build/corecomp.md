@@ -259,7 +259,7 @@ Rules 4 and 5 propagate to a fixed point — `BuildDag._determine_must_run` loop
 ### What this means in practice
 
 - Touching a source file (`SourceStep`'s path) forces every step transitively downstream to re-run.
-- A step that produces only in-memory artifacts always re-runs, but only if something downstream needs it. If you `dag.run(config, through="gen_cpp")` and the in-memory step isn't on the path to `gen_cpp`, it stays idle.
+- A step that produces only in-memory artifacts always re-runs, but only if something downstream needs it. If you `dag.run(config, through="gen_include")` and the in-memory step isn't on the path to `gen_include`, it stays idle.
 - A step that produces files but whose files are up-to-date is genuinely skipped — its `BuildResult` has `skipped=True` and `success=True`, and its artifact paths are populated (so downstream steps can still find the files) without re-invoking the step's `run()`.
 
 ### Forcing a specific step

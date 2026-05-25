@@ -1,0 +1,19 @@
+****** xsim v2023.2 (64-bit)
+  **** SW Build 4029153 on Fri Oct 13 09:39:01 MDT 2023
+  **** IP Build 4028589 on Fri Oct 13 11:53:13 MDT 2023
+
+INFO: [SIM 211-1] CSIM start
+INFO: [SIM 211-3] *************** CSIM finish ***************
+
+INFO: [COSIM 212-302] Starting C TB testing ...
+
+INFO: [COSIM 212-333] Generating C post check test bench ...
+INFO: [COSIM 212-12] Generating cosim Verilog test bench ...
+INFO: [COSIM 212-15] Starting cosim ...
+
+INFO: [SIM 2-1] CSim done with 0 errors.
+
+INFO: [COSIM 212-316] Starting Verilog simulation ...
+INFO: [COSIM 212-333] Generating cosim test bench ...
+INFO: [COSIM 212-1000] *** C/RTL co-simulation finished: PASS ***
+INFO: [COSIM 212-1101] Total Execution Time: 110 cycles

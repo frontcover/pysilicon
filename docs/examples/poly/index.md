@@ -7,61 +7,82 @@ has_children: true
 
 # Polynomial Accelerator
 
-This example demonstrates an end-to-end PySilicon workflow for a small polynomial accelerator.  
-The key idea is that the interface is defined once in Python using PySilicon `DataSchema` classes, and that definition is then reused across software modeling, test-vector generation, and Vitis HLS integration.
+End-to-end PySilicon tutorial for a small polynomial accelerator —
+covering every stage from the Python golden model through RTL cosim
+timing verification.  Every stage downstream of the Python source is
+*derived* and *verified against* the Python golden, which is the
+philosophy this example is meant to teach.
 
-With this flow, PySilicon helps reduce drift between Python reference code and hardware-facing C++ interfaces, while making it easier to validate the accelerator against a golden model.
+## The five-group narrative arc
 
-In this example, we:
+The full pipeline reads as five conceptually distinct groups, in
+[`examples/poly/poly_build.py`](https://github.com/sdrangan/pysilicon/blob/main/examples/poly/poly_build.py)
+expressed as docstring markers in the DAG-construction function:
 
-- Define the request and response schemas in Python using PySilicon `DataSchema` classes
-- Auto-generate matching C++ headers for Vitis HLS, including serialization and deserialization support for the data schemas
-- Build a Python golden model and generate binary test vectors
-- Create a Vitis IP with AXI4-Streaming interfaces using the generated schema serialization logic
-- Create a Vitis testbench that reads and writes test vectors produced by the Python golden model
-- Run the Vitis testbench from Python using PySilicon `toolchain` utilities
-- Compare the Vitis outputs against the Python reference
+```
+   Python golden model        →  build_inputs, py_sim, extract_py_timing
+        │
+        ▼
+   HLS codegen                →  gen_include, gen_kernel, gen_tb
+        │
+        ▼
+   C-sim functional verify    →  csim, validate_csim
+        │
+        ▼
+   C-synth resource estimate  →  csynth, inspect_synth
+        │
+        ▼
+   RTL cosim timing verify    →  extract_cosim_timing, validate_timing
+```
 
-The full example files are in [examples/poly](https://github.com/sdrangan/pysilicon/tree/main/examples/poly).
+Each group has its own dedicated page in this tutorial:
 
-The main runnable script is [examples/poly/poly_demo.py](https://github.com/sdrangan/pysilicon/blob/main/examples/poly/poly_demo.py).
+1. [Python golden model](./01_python_golden_model.md) — schemas + sim + Python-side cycle measurement.
+2. [HLS code generation](./02_hls_codegen.md) — kernel + testbench C++ generated from the same Python sources.
+3. [C-sim functional verification](./03_csim_verification.md) — Vitis runs the generated kernel, outputs compared to the Python golden.
+4. [C-synth resource estimation](./04_csynth_resources.md) — C-synthesis report, resource + II tables.
+5. [RTL cosim timing verification](./05_cosim_timing.md) — measured RTL cycles vs PySim cycles, ±20 cycle tolerance.
 
-## Why this example matters
+A supplementary page covers
+[AXI4-Stream timing analysis from VCD](./poly_axi_stream.md), useful
+once cosim has run with tracing enabled.
 
-This example shows how PySilicon can be used to:
+## The polynomial accelerator protocol
 
-- Keep interface definitions consistent across Python and HLS code
-- Reuse the same schema description for both modeling and hardware integration
-- Generate reproducible test vectors from a Python golden model
-- Validate hardware-oriented code against a software reference
-- Move toward a more automated hardware/software co-design flow
+- The host writes polynomial coefficients to the accelerator's AXI-Lite
+  register map (a `VitisRegMap`), then writes `ap_start` to launch the
+  kernel.
+- The host sends a `PolyCmdHdr` (`cmd_type = DATA`) carrying the
+  transaction ID and sample count over the input AXI-Stream.
+- The host streams `nsamp` input values (`x`).
+- The accelerator returns a `PolyRespHdr` echoing the transaction ID,
+  then streams `nsamp` result values (`y`).
+- The host sends a `PolyCmdHdr` (`cmd_type = END`) to break the kernel's
+  persistent loop cleanly.
+- On error the kernel halts: it sets `halted = 1`, `error = <code>`,
+  `tx_id = <offending txn>` in the regmap and returns.
 
-## Current limitations
+## Files
 
-This example demonstrates only part of the intended PySilicon workflow. Future versions will add:
+| File | What it holds |
+|------|---------------|
+| [`examples/poly/poly.py`](https://github.com/sdrangan/pysilicon/blob/main/examples/poly/poly.py) | Schemas, `PolyAccelComponent`, `PolyTB` (SimPy), `PolyTBHls` (codegen-source) |
+| [`examples/poly/poly_build.py`](https://github.com/sdrangan/pysilicon/blob/main/examples/poly/poly_build.py) | Build DAG — the five groups above plus step definitions |
+| [`examples/poly/poly_evaluate_impl.tpp`](https://github.com/sdrangan/pysilicon/blob/main/examples/poly/poly_evaluate_impl.tpp) | Hand-written Horner evaluation hook (sticky impl) |
+| [`examples/poly/run.tcl`](https://github.com/sdrangan/pysilicon/blob/main/examples/poly/run.tcl) | Vitis HLS TCL driver consumed by `CSimStep` / `CSynthStep` |
 
-- A Python golden model represented as a PySilicon `HwObj` class that defines AXI interfaces and interface actions
-- Auto-generation of the Vitis IP and Vitis testbench code from the `HwObj` description
+`gen/` (kernel + TB C++) and `include/` (schema + utility headers) are
+generated artifacts — they are `.gitignored` and rebuilt by the DAG.
 
-## Polynomial Accelerator Protocol
+## Running the full pipeline
 
-This example implements a polynomial accelerator with the following protocol:
+```bash
+python -m examples.poly.poly_build --through validate_timing --force --live-output
+```
 
-- The host writes polynomial coefficients to the accelerator's AXI-Lite register map (a `VitisRegMap`), then writes `ap_start` to launch the kernel
-- The host sends a `PolyCmdHdr` (`cmd_type = DATA`) containing the transaction ID and sample count over the input AXI-Stream
-- The host then streams `nsamp` input values (`x`)
-- The accelerator returns a `PolyRespHdr` echoing the transaction ID, then streams `nsamp` result values (`y`)
-- When the host has no more work, it sends a `PolyCmdHdr` with `cmd_type = END` to break the kernel's persistent loop cleanly
-- On error the kernel halts: it sets `halted = 1`, `error = <code>`, `tx_id = <offending txn>` in the regmap and returns. The host re-launches the kernel via platform reset, then writes `ap_start` again
-## Files used in the example
-
-- [examples/poly/poly_demo.py](https://github.com/sdrangan/pysilicon/blob/main/examples/poly/poly_demo.py) drives the Python flow.
-- [examples/poly/poly.hpp](https://github.com/sdrangan/pysilicon/blob/main/examples/poly/poly.hpp) declares the HLS interface and includes the generated schemas.
-- [examples/poly/poly.cpp](https://github.com/sdrangan/pysilicon/blob/main/examples/poly/poly.cpp) implements the polynomial kernel.
-- [examples/poly/poly_tb.cpp](https://github.com/sdrangan/pysilicon/blob/main/examples/poly/poly_tb.cpp) reads vectors, calls the kernel, and writes outputs.
-- [examples/poly/run.tcl](https://github.com/sdrangan/pysilicon/blob/main/examples/poly/run.tcl) runs the Vitis C-simulation flow.
+The last step (`validate_timing`) emits `results/timing_verdict.json`
+with both measured cycle counts and a `pass` bit.
 
 ---
 
-Go to [Python flow](./python-flow.md)
-
+Next: [Python golden model →](./01_python_golden_model.md)

@@ -1,7 +1,7 @@
 ---
 title: AXI4-Stream Timing Analysis
 parent: Polynomial Accelerator
-nav_order: 4
+nav_order: 6
 has_children: false
 ---
 

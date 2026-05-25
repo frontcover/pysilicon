@@ -205,4 +205,4 @@ def gen_vitis_code(example_dir, include_dir="include"):
     return [results[step.name].artifacts["include"] for step in schema_steps]
 ```
 
-In a larger build that also runs Vitis, this would typically be wrapped in a single `GenCppStep(BuildStep)` so the codegen sub-DAG is one node in the outer pipeline — see the [Python Simulation Pattern](./python.md) and [Vitis Pattern](./vitis.md) pages for how that wrapping is done in practice.
+In a larger build that also runs Vitis, this would typically be wrapped in a single `HlsGenIncludeStep(BuildStep)` so the codegen sub-DAG is one node in the outer pipeline — see the [Python Simulation Pattern](./python.md) and [Vitis Pattern](./vitis.md) pages for how that wrapping is done in practice.
