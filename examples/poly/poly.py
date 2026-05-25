@@ -171,7 +171,10 @@ class PolyAccelComponent(HwComponent):
     aximm_bw:     HwParam[int] = 32
     clk:          Clock = field(default_factory=lambda: Clock(freq=1e9))
     proc_ii:      int = 1
-    proc_latency: int = 10
+    # Calibrated from RTL cosim: with nsamp=100, uf=1, bw=32, cosim reports
+    # 144 cycles total; matching pipeline depth + handshake overhead gives
+    # proc_latency ≈ 40.  Eventually fit per-variant from a cosim corpus.
+    proc_latency: int = 40
     logger:       Logger | NullLogger = field(default_factory=NullLogger)
     unroll_factor: int = 1
 

@@ -10,6 +10,7 @@ from pathlib import Path
 import numpy as np
 
 from pysilicon.build.build import BuildConfig, BuildDag, BuildStep, SourceStep
+from pysilicon.build.cosim_steps import ExtractCosimTimingStep, ValidateTimingStep
 from pysilicon.build.hwcodegen_steps import HlsCodegenStep
 from pysilicon.build.streamutils import StreamUtilsStep
 from pysilicon.build.verify_steps import FunctionalVerifyStep
@@ -439,6 +440,21 @@ def build_poly_dag() -> BuildDag:
     """
     dag.add(CSynthStep(name="csynth"))
     dag.add(InspectSynthStep(name="inspect_synth"))
+
+    """
+    RTL cosim timing verification
+    """
+    dag.add(ExtractCosimTimingStep(
+        name="extract_cosim_timing",
+        top="poly",
+        report_dir_artifact="report_dir",
+    ))
+    dag.add(ValidateTimingStep(
+        name="validate_timing",
+        py_timing_artifact="py_timing",
+        cosim_timing_artifact="cosim_timing",
+        tolerance_cycles=20,
+    ))
     return dag
 
 

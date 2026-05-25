@@ -107,3 +107,90 @@ def _detect_vitis_version(report_path: Path) -> str | None:
     if name == "cosim.log":
         return "pre-2025"
     return None
+
+
+@dataclass(kw_only=True)
+class ValidateTimingStep(BuildStep):
+    """Compare Python-side and cosim-side transaction cycle counts.
+
+    This is the *real* timing validator — it closes the cycle-approximate-
+    Python loop by asserting that the SimPy model agrees with the
+    measured RTL behaviour within a tolerance:
+
+    .. code-block:: python
+
+        abs(py_cycles - cosim_cycles) <= tolerance_cycles
+
+    Produces a structured ``timing_verdict`` artifact regardless of
+    pass/fail so downstream consumers (including the future model-
+    training workflow per [[project-cycle-model-training]]) can read
+    both raw numbers, not just a pass bit:
+
+    .. code-block:: json
+
+        {
+            "pass": true,
+            "py_cycles": 110,
+            "cosim_cycles": 113,
+            "delta": 3,
+            "tolerance": 20,
+            "py_timing_path": "...",
+            "cosim_timing_path": "..."
+        }
+
+    On failure ``run()`` writes the verdict, then raises
+    :class:`RuntimeError` with a one-line explanation so the build halts
+    with a clear message.
+    """
+
+    description: str = (
+        "Compare Python-side vs cosim-side transaction cycle counts and"
+        " enforce a tolerance bound."
+    )
+    params: ClassVar[dict] = {}
+
+    py_timing_artifact: str = "py_timing"
+    cosim_timing_artifact: str = "cosim_timing"
+    tolerance_cycles: int = 20
+    output_path: str = "results/timing_verdict.json"
+
+    @property
+    def consumes(self) -> list:  # type: ignore[override]
+        return [self.py_timing_artifact, self.cosim_timing_artifact]
+
+    @property
+    def produces(self) -> dict:  # type: ignore[override]
+        return {"timing_verdict": Path(self.output_path)}
+
+    def run(self, config: BuildConfig, **artifacts) -> dict[str, Any]:
+        py_path = Path(artifacts[self.py_timing_artifact])
+        cosim_path = Path(artifacts[self.cosim_timing_artifact])
+        py = json.loads(py_path.read_text(encoding="utf-8"))
+        cs = json.loads(cosim_path.read_text(encoding="utf-8"))
+        py_cycles = int(py["transaction_cycles"])
+        cosim_cycles = int(cs["transaction_cycles"])
+        delta = abs(py_cycles - cosim_cycles)
+        passed = delta <= self.tolerance_cycles
+
+        verdict = {
+            "pass": passed,
+            "py_cycles": py_cycles,
+            "cosim_cycles": cosim_cycles,
+            "delta": delta,
+            "tolerance": int(self.tolerance_cycles),
+            "py_timing_path": str(py_path),
+            "cosim_timing_path": str(cosim_path),
+        }
+
+        root_dir = Path(config.root_dir) if config.root_dir is not None else Path.cwd()
+        out_path = root_dir / self.output_path
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        out_path.write_text(json.dumps(verdict, indent=2), encoding="utf-8")
+
+        if not passed:
+            raise RuntimeError(
+                f"ValidateTimingStep: delta={delta} cycles "
+                f"(py={py_cycles}, cosim={cosim_cycles}) exceeds tolerance="
+                f"{self.tolerance_cycles}.  Verdict at {out_path}."
+            )
+        return {"timing_verdict": out_path}

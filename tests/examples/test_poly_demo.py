@@ -1,4 +1,5 @@
 import csv
+import json
 import shutil
 from pathlib import Path
 
@@ -94,7 +95,7 @@ def test_poly_timing_bandwidth_and_unroll(tmp_path: Path) -> None:
       Expected duration ≈ (nsamp/uf + proc_latency) cycles ≈ half of case 1.
     """
     nsamp = 100
-    proc_latency = 10
+    proc_latency = 40  # matches PolyAccelComponent default (cosim-calibrated)
     period = 1.0 / _CLK_FREQ
 
     configs = [
@@ -258,3 +259,51 @@ def test_poly_vitis_cosim_matches_python_model(tmp_path: Path) -> None:
     assert vitis_result.error is PolyError.NO_ERROR
     assert np.allclose(vitis_result.samp_out, sim_result.samp_out[:vitis_result.samp_out.size], rtol=1e-6, atol=1e-6)
     assert cosim_reports, f"No cosim report found in {sim_report_dir}"
+
+
+@pytest.mark.vitis
+def test_poly_vitis_cosim_timing_within_tolerance(tmp_path: Path) -> None:
+    """End-to-end success gate for the build-DAG-reorg plan.
+
+    Runs the full pipeline through ``validate_timing`` and asserts the
+    new ValidateTimingStep's verdict reports ``pass=true``.  Both
+    structured timing artifacts (``py_timing.json`` /
+    ``cosim_timing.json``) must be present so a future model-training
+    workflow can consume them.
+    """
+    if not toolchain.find_vitis_path():
+        pytest.skip("Vitis installation not found; skipping poly Vitis cosim timing regression.")
+
+    _copy_poly_vitis_resources(tmp_path)
+
+    results = build_poly_dag().run(
+        BuildConfig(root_dir=tmp_path, params={'nsamp': 100}),
+        through='validate_timing',
+    )
+
+    csim_result = results.get('csim')
+    if csim_result is None or not csim_result.success:
+        msg = csim_result.message if csim_result else "csim did not run"
+        pytest.skip(f"Vitis execution unavailable in current setup: {msg}")
+
+    assert results['validate_timing'].success, results['validate_timing'].message
+    verdict_path = results['validate_timing'].path('timing_verdict')
+    verdict = json.loads(verdict_path.read_text(encoding="utf-8"))
+    assert verdict['pass'] is True, (
+        f"Timing verdict failed: py={verdict['py_cycles']} cycles, "
+        f"cosim={verdict['cosim_cycles']} cycles, delta={verdict['delta']}, "
+        f"tolerance={verdict['tolerance']}."
+    )
+    assert verdict['delta'] <= 20, verdict
+    # Structured fields must round-trip — see [[project-cycle-model-training]].
+    assert 'py_cycles' in verdict and 'cosim_cycles' in verdict
+    py_timing = json.loads(
+        results['extract_py_timing'].path('py_timing').read_text(encoding="utf-8")
+    )
+    assert py_timing['source'] == 'py_sim'
+    assert isinstance(py_timing['transaction_cycles'], int)
+    cosim_timing = json.loads(
+        results['extract_cosim_timing'].path('cosim_timing').read_text(encoding="utf-8")
+    )
+    assert cosim_timing['source'] == 'cosim'
+    assert isinstance(cosim_timing['transaction_cycles'], int)
