@@ -6,39 +6,112 @@ has_children: true
 
 # PySilicon
 
+PySilicon is a **Python-native framework for hardware, algorithm, and software co-design**.
 
-PySilicon is an aspirational Python-native framework for designing, simulating, verifying, and synthesizing hardware systems from a single structured specification.
+Its core idea is simple: instead of separating algorithm models, architecture descriptions, simulation code, interface definitions, synthesis scripts, software bindings, and documentation into disconnected layers, PySilicon aims to describe them from a **single structured Python representation**.
 
-The long-term vision is to make **Python the single source of truth** for hardware architecture: typed data schemas, transactional interfaces, hardware objects, simulation behavior, testing, synthesis inputs, runtime APIs, and documentation. Rather than treating hardware as a collection of disconnected artifacts, PySilicon aims to unify the flow in one coherent, software-like environment.
+This makes PySilicon useful not only for hardware developers, but also for domain researchers — in areas such as wireless, DSP, and machine learning — who want to explore how algorithms map onto realistic hardware architectures without immediately dropping into RTL.
 
-The intended ideas behind PySilicon include:
+## Why PySilicon
 
-- **Typed hardware architecture** through explicit hardware objects and transactional interfaces  
-- **Unified Python simulation** for functional validation and approximate timing  
-- **Deterministic, AI-assisted synthesis** with reproducible, dependency-aware builds  
-- **Software-native hardware consumption** through generated Python APIs, docs, examples, and grounded AI assistants  
+PySilicon is built around a different point in the design flow than traditional RTL-first development.
 
-At this stage, PySilicon is still an early project and much of this vision has not yet been fully built. This repository is a place to explore the architecture, prototypes, and design ideas behind that goal.
+It focuses on **executable architecture models**:
+- **Typed data schemas** to define hardware-visible structures once
+- **Transactional interfaces** to capture how components communicate
+- **Composable hardware objects** that reflect system structure
+- **Python-native simulation** for early architectural validation
+- **Synthesis-oriented flows** that connect architectural models to implementation toolchains
 
----
+A key advantage is simulation speed.  
+Because PySilicon models systems at the **event level** rather than the raw signal-toggle level, and can apply **vectorized NumPy operations** over data, it can support **cycle-approximate simulations that run orders of magnitude faster than RTL simulation** for many architecture-exploration workloads.
+
+That makes it well suited for:
+- hardware/software partitioning studies
+- accelerator architecture exploration
+- DSP and wireless pipeline design
+- interface and buffering studies
+- memory, throughput, and scheduling tradeoffs
+- early validation before RTL implementation
+
+## What makes it different
+
+PySilicon is **not primarily a text-to-RTL system** and **not just an AI orchestration layer**.
+
+Its main goal is to provide a **structured and executable representation of a hardware system** that can serve as a durable foundation for:
+
+- architecture exploration
+- fast simulation
+- generated implementation artifacts
+- software-facing APIs
+- documentation
+- verification support
+- grounded AI assistance
+
+In this view, AI is important — but it is **downstream of the representation**, not the representation itself.  
+The long-term opportunity is that a typed, executable system model is much easier for both people and AI tools to inspect, reason about, validate, and transform than a collection of disconnected notebooks, scripts, HDL fragments, and build glue.
+
+## Who it is for
+
+PySilicon is intended for:
+
+- **Hardware architects** exploring system structure before RTL lock-in
+- **Researchers in wireless, DSP, and ML** studying hardware/algorithm co-design
+- **Teams building accelerators** who need a software-native architecture model
+- **Developers integrating hardware and software** through explicit typed interfaces
+- **Future AI-assisted toolchains** that need grounded, structured design context
+
+## What exists today
+
+PySilicon is still an early project, but it already explores several important building blocks:
+
+- typed schema definitions for hardware-facing data
+- explicit interface abstractions
+- hardware component composition
+- simulation infrastructure for executable system models
+- early synthesis-oriented flows
+- documentation and software-facing artifact generation ideas
+- MCP / assistant-facing infrastructure for grounded tooling
+
+These pieces are intended to support a workflow where one Python codebase can express architecture, behavior, interfaces, and downstream artifacts in a more coherent way than a fragmented hardware stack.
+
+## Long-term vision
+
+The long-term vision is to make **Python the operational source of truth** for hardware system design.
+
+In that model, a single structured specification would drive:
+
+- typed architectural definitions
+- executable simulation
+- cycle-approximate performance studies
+- synthesis and implementation inputs
+- software bindings and generated APIs
+- documentation and examples
+- verification scaffolding
+- AI-assisted design and analysis workflows
+
+This vision is aspirational and not yet fully built.  
+PySilicon today should be understood as a research and prototyping environment for that broader direction.
 
 ## Getting Started
 
 If you're new to PySilicon, begin with:
 
-- [Installation](./guide/installation/) — how to install PySilicon from source.
-- [Overview](./overview/) — conceptual background, motivation, and examples.
-- [Guide](./guide/) — implementation details for schemas, interfaces, components, synthesis, and build steps.
-
-
-These pages introduce the core ideas behind PySilicon and how the system fits together.
-
+- [Overview](./overview/) — motivation, positioning, and examples
+- [Installation](./guide/installation/) — how to install PySilicon from source
+- [Guide](./guide/) — schemas, interfaces, components, simulation, synthesis, and build steps
 
 ## People
 
-PySilicon is being developed by [Sundeep Rangan](https://wireless.engineering.nyu.edu/sundeep-rangan/), a Professor in Electrical and Computer Engineering and Director of [NYU Wireless](https://wireless.engineering.nyu.edu/).  Sundeep's research is in wireless communications.
+PySilicon is being developed by [Sundeep Rangan](https://wireless.engineering.nyu.edu/sundeep-rangan/), Professor of Electrical and Computer Engineering and Director of [NYU Wireless](https://wireless.engineering.nyu.edu/) at NYU.
 
 ## Feedback
 
-The project is very early.  We would love to get your feedback -- positive or negative.
+PySilicon is an early-stage project and the ideas are still evolving.
 
+Feedback is very welcome — especially from people working in:
+- accelerator design
+- wireless and DSP systems
+- hardware/software co-design
+- simulation and verification
+- AI-assisted engineering tools
