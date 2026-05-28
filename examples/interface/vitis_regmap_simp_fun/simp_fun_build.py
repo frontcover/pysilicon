@@ -97,7 +97,8 @@ class PySimStep(BuildStep):
         sim_dir.mkdir(parents=True, exist_ok=True)
         S32(result.y).write_uint32_file(sim_dir / "y.bin")
         (sim_dir / "regmap_status.json").write_text(
-            json.dumps({"status": int(result.status)}, indent=2), encoding="utf-8"
+            json.dumps({"status": int(result.status), "y": int(result.y)}, indent=2),
+            encoding="utf-8",
         )
         summary_path = write_sim_summary(config.root_dir / "results" / "sim_summary.json", result)
         return {"sim_dir": sim_dir, "log": log_path, "sim_summary": summary_path}
@@ -118,7 +119,7 @@ class ExtractPyTimingStep(BuildStep):
                 if event not in events:
                     events[event] = float(row["time"])
         t_start = events.get("ap_start_host")
-        t_end = events.get("status_done")
+        t_end = events.get("host_done", events.get("status_done"))
         if t_start is None or t_end is None:
             raise RuntimeError(f"Missing timing events in log: {list(events)}")
         transaction_seconds = t_end - t_start
@@ -276,7 +277,7 @@ def build_simp_fun_dag() -> BuildDag:
             {"filename": "y_data.bin", "golden_filename": "y.bin", "schema": S32},
         ],
         jsons=[
-            {"filename": "regmap_status.json", "compare_fields": ["status"]},
+            {"filename": "regmap_status.json", "compare_fields": ["status", "y"]},
         ],
         output_dir="results/vitis",
         output_artifact="vitis_dir",

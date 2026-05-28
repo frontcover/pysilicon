@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, ClassVar
+from typing import ClassVar
 
 from pysilicon.hw.aximm import DirectMMIF, MMIFMaster
 from pysilicon.hw.clock import Clock
@@ -99,7 +99,6 @@ class SimpFunComponent(HwComponent):
     def on_start(self) -> ProcessGen[None]:
         self.regmap.set("status", STATUS_BUSY)
         self._log("status_busy", STATUS_BUSY)
-        yield self.timeout(self.latency_cycles * self.clk.period)
         y = self.compute(
             self.regmap.get("x"),
             self.regmap.get("a"),
@@ -118,6 +117,7 @@ class SimpFunComponent(HwComponent):
 class SimpFunHost(SimObj):
     case: SimpFunCase
     clk: Clock
+    latency_cycles: int = 4
     logger: Logger | NullLogger = field(default_factory=NullLogger)
     base_addr: int = 0x0
     max_poll_cycles: int = 32
@@ -142,6 +142,7 @@ class SimpFunHost(SimObj):
         yield from rm.set("b", self.case.b)
         self._log("ap_start_host", 1)
         yield from rm.start()
+        yield self.timeout(self.latency_cycles * self.clk.period)
 
         status = STATUS_IDLE
         for poll in range(self.max_poll_cycles + 1):
@@ -153,6 +154,7 @@ class SimpFunHost(SimObj):
         else:
             raise RuntimeError("Timed out waiting for status == STATUS_DONE.")
 
+        self._log("host_done", int(status))
         self.y = yield from rm.get("y")
         self.status = int(status)
         self.passed = self.y == self.case.expected_y and self.status == STATUS_DONE
@@ -190,24 +192,14 @@ class SimpFunTBHls(HwTestbench):
 
     def main(self) -> None:
         dut = SimpFunComponent()
-
-        x = S32()
-        a = S32()
-        b = S32()
-        x.read_uint32_file(self.data_dir + "/x.bin")
-        a.read_uint32_file(self.data_dir + "/a.bin")
-        b.read_uint32_file(self.data_dir + "/b.bin")
-
-        dut.regmap.set("x", x)
-        dut.regmap.set("a", a)
-        dut.regmap.set("b", b)
+        dut.regmap.read_uint32_file("x", self.data_dir + "/x.bin")
+        dut.regmap.read_uint32_file("a", self.data_dir + "/a.bin")
+        dut.regmap.read_uint32_file("b", self.data_dir + "/b.bin")
         dut.run()
 
-        y = dut.regmap.get("y")
-        y.write_uint32_file(self.data_dir + "/y_data.bin")
         dut.regmap.write_status_json(
             self.data_dir + "/regmap_status.json",
-            fields=["status"],
+            fields=["status", "y"],
         )
 
 
@@ -234,7 +226,14 @@ def simulate_case(
         logger = Logger(name="simp_fun_log", sim=sim, file_path=log_path, fields=["event", "value"])
     accel = SimpFunComponent(name="simp_fun", sim=sim, clk=clk,
                              latency_cycles=latency_cycles, logger=logger)
-    host = SimpFunHost(name="host", sim=sim, case=case, clk=clk, logger=logger)
+    host = SimpFunHost(
+        name="host",
+        sim=sim,
+        case=case,
+        clk=clk,
+        latency_cycles=latency_cycles,
+        logger=logger,
+    )
     connect(sim, host, accel, clk)
     sim.run_sim()
     if host.y is None or host.status is None:

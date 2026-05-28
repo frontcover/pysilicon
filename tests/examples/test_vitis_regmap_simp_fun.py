@@ -29,14 +29,16 @@ def test_simp_fun_python_sim_matches_expected_outputs(tmp_path: Path) -> None:
     assert y == 11
     assert summary["passed"] is True
     assert summary["status"] == 2
-    assert py_timing["transaction_cycles"] == 4
+    assert py_timing["transaction_cycles"] == 5
 
 
 def test_simp_fun_codegen_emits_kernel_tb_and_impl(tmp_path: Path) -> None:
-    results = build_simp_fun_dag().run(BuildConfig(root_dir=tmp_path), through="gen_tb")
+    dag = build_simp_fun_dag()
+    kernel_results = dag.run(BuildConfig(root_dir=tmp_path), through="gen_kernel")
+    tb_results = dag.run(BuildConfig(root_dir=tmp_path), through="gen_tb")
 
-    assert results["gen_kernel"].success, results["gen_kernel"].message
-    assert results["gen_tb"].success, results["gen_tb"].message
+    assert kernel_results["gen_kernel"].success, kernel_results["gen_kernel"].message
+    assert tb_results["gen_tb"].success, tb_results["gen_tb"].message
     assert (tmp_path / "gen" / "simp_fun.hpp").exists()
     assert (tmp_path / "gen" / "simp_fun.cpp").exists()
     assert (tmp_path / "gen" / "simp_fun_tb.cpp").exists()

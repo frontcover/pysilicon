@@ -34,4 +34,4 @@ For the default case:
 
 `sim_summary.json` captures the input tuple, expected output, observed output, and pass/fail bit for the Python simulation.
 
-`py_timing.json` captures the cycle count measured from `ap_start_host` to `status_done`.
+`py_timing.json` captures the cycle count measured from `ap_start_host` to the host-observed completion event.
