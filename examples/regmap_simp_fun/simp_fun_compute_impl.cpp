@@ -1,5 +1,5 @@
 // simp_fun_compute_impl.cpp
-// Hand-written scalar math hook for the vitis_regmap_simp_fun example.
+// Hand-written scalar math hook for the regmap_simp_fun example.
 
 #include <ap_int.h>
 
