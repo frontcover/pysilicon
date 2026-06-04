@@ -43,6 +43,7 @@ from pysilicon.hw.hw_testbench import HwTestbench
 from pysilicon.hw.interface import StreamIF, StreamIFMaster, StreamIFSlave
 from pysilicon.hw.memif import DirectMMIF
 from pysilicon.hw.memory import MemComponent
+from pysilicon.hw.synth import synthesizable
 from pysilicon.simulation.simobj import ProcessGen, SimObj
 from pysilicon.simulation.simulation import Simulation
 
@@ -144,19 +145,32 @@ class IncrAccel(HwComponent):
             self.add_endpoint(ep)
 
     def run_proc(self) -> ProcessGen[None]:
-        """Kernel body (single ap_ctrl_hs invocation)."""
-        bw = self.mem_bw
+        """Kernel body (single ap_ctrl_hs invocation).
+
+        Written in the synthesizable restricted subset: each statement is a
+        ``yield from`` call to a synthesizable endpoint method or hook.  The
+        ``+1`` transform and the response write live in :meth:`transform` /
+        :meth:`respond` hooks (FunctionStmt), mirroring poly's ``evaluate``.
+        """
         cmd: IncrCmd = yield from self.s_in.get(IncrCmd)
-        n = int(cmd.n)
+        buf = yield from self.m_mem.read_array(Uint32Field, cmd.n, cmd.addr)
+        out = yield from self.transform(buf, cmd.n)
+        yield from self.m_mem.write_array(out, Uint32Field, cmd.addr, cmd.n)
+        yield from self.respond(self.m_out)
 
-        # m_axi read → local buffer, increment, m_axi write-back.
-        buf = yield from self.m_mem.read_array(Uint32Field, n, int(cmd.addr), word_bw=bw)
-        buf = (np.asarray(buf, dtype=np.uint32) + 1).astype(np.uint32)
-        yield from self.m_mem.write_array(buf, Uint32Field, int(cmd.addr), word_bw=bw)
+    @synthesizable
+    def transform(self, buf, n) -> ProcessGen[np.ndarray]:
+        """The increment transform hook: each of the ``n`` words gets +1."""
+        result = (np.asarray(buf, dtype=np.uint32)[:int(n)] + 1).astype(np.uint32)
+        return result
+        yield  # unreachable — makes this a generator
 
+    @synthesizable
+    def respond(self, m_out) -> ProcessGen[None]:
+        """Emit the (always NO_ERROR) response on the output stream."""
         resp = IncrResp()
         resp.status = IncrError.NO_ERROR
-        yield from self.m_out.write(resp)
+        yield from m_out.write(resp)
 
 
 # ---------------------------------------------------------------------------

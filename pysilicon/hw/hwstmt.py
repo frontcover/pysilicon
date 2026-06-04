@@ -96,6 +96,77 @@ class SynthCallStmt(HwStmt):
     outputs: list[HwVar]
 
 
+class MMArrayReadStmt(SynthCallStmt):
+    """IR node for ``port.read_array(elem_type, count, addr)`` — an m_axi
+    buffered read lowered to ``<elem>_array_utils::read_array<bw>(port +
+    byte_addr_to_word_index<bw>(addr), buf, count)`` (see
+    ``plans/aximm_codegen.md`` decision 4).
+
+    The constructor matches ``SynthCallStmt`` (``method``/``inputs``/``outputs``);
+    the named accessors below project the resolved positional args:
+    ``read_array(elem_type, count, addr)``.
+    """
+
+    @property
+    def port(self):
+        """The bound ``MMIFMaster`` endpoint (``method.__self__``)."""
+        return getattr(self.method, '__self__', None)
+
+    @property
+    def elem_type(self):
+        return self.inputs[0] if self.inputs else None
+
+    @property
+    def count_expr(self):
+        return self.inputs[1] if len(self.inputs) > 1 else None
+
+    @property
+    def addr_expr(self):
+        return self.inputs[2] if len(self.inputs) > 2 else None
+
+    @property
+    def target_var(self) -> "HwVar | None":
+        return self.outputs[0] if self.outputs else None
+
+    def __repr__(self) -> str:
+        tgt = self.target_var.name if self.target_var else '?'
+        return f"MMArrayReadStmt({tgt} = read_array)"
+
+
+class MMArrayWriteStmt(SynthCallStmt):
+    """IR node for ``port.write_array(buf, elem_type, addr, count)`` — an m_axi
+    buffered write lowered to ``<elem>_array_utils::write_array<bw>(buf, port +
+    byte_addr_to_word_index<bw>(addr), count)`` (the dual of
+    :class:`MMArrayReadStmt`).
+
+    Positional args: ``write_array(elements, elem_type, addr, count)``.
+    """
+
+    @property
+    def port(self):
+        return getattr(self.method, '__self__', None)
+
+    @property
+    def source_expr(self):
+        return self.inputs[0] if self.inputs else None
+
+    @property
+    def elem_type(self):
+        return self.inputs[1] if len(self.inputs) > 1 else None
+
+    @property
+    def addr_expr(self):
+        return self.inputs[2] if len(self.inputs) > 2 else None
+
+    @property
+    def count_expr(self):
+        return self.inputs[3] if len(self.inputs) > 3 else None
+
+    def __repr__(self) -> str:
+        src = getattr(self.source_expr, 'name', '?')
+        return f"MMArrayWriteStmt(write_array({src}))"
+
+
 @dataclass
 class FunctionStmt(SynthCallStmt):
     """Call to a user-written ``@synthesizable`` method (no ``synth_fn``).
