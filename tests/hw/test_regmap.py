@@ -464,30 +464,38 @@ class TestBoundRegMap:
 
 
 class TestVitisRegMap:
-    def test_prepends_ap_start_at_zero(self) -> None:
+    def test_prepends_ap_start_and_ap_done(self) -> None:
+        """VitisRegMap auto-prepends ap_start at 0x00 and ap_done at 0x04;
+        user fields land at 0x08 and beyond."""
         rm = VitisRegMap({
             "halted": RegField(Bit,      RegAccess.R),
             "error":  RegField(ErrField, RegAccess.R),
         })
         assert rm.offset_of("ap_start") == 0x00
-        assert rm.offset_of("halted")   == 0x04
-        assert rm.offset_of("error")    == 0x08
+        assert rm.offset_of("ap_done")  == 0x04
+        assert rm.offset_of("halted")   == 0x08
+        assert rm.offset_of("error")    == 0x0C
 
     def test_rejects_ap_prefix(self) -> None:
         with pytest.raises(ValueError, match="ap_"):
-            VitisRegMap({"ap_done": RegField(Bit, RegAccess.R)})
+            VitisRegMap({"ap_custom": RegField(Bit, RegAccess.R)})
 
     def test_rejects_offset_zero_collision(self) -> None:
         with pytest.raises(ValueError):
             VitisRegMap({"cfg": RegField(Bit, RegAccess.RW, offset=0x00)})
 
+    def test_rejects_offset_four_collision_with_ap_done(self) -> None:
+        with pytest.raises(ValueError):
+            VitisRegMap({"cfg": RegField(Bit, RegAccess.RW, offset=0x04)})
+
     def test_user_fields_at_nonzero_offsets(self) -> None:
         rm = VitisRegMap({
             "a": RegField(Bit, RegAccess.R, offset=0x10),
-            "b": RegField(Bit, RegAccess.RW),  # auto → 0x04
+            "b": RegField(Bit, RegAccess.RW),  # auto → 0x08 (after ap_start, ap_done)
         })
         assert rm.offset_of("ap_start") == 0x00
-        assert rm.offset_of("b")        == 0x04
+        assert rm.offset_of("ap_done")  == 0x04
+        assert rm.offset_of("b")        == 0x08
         assert rm.offset_of("a")        == 0x10
 
 
@@ -693,6 +701,201 @@ class TestVitisRegMapMMIFSlave:
         sim.env.process(_wrap())
         sim.env.run(until=done)
         assert ap_start_read[0] == 0  # auto-cleared
+
+
+class TestVitisRegMapApDone:
+    """The auto-prepended ``ap_done`` field is cleared on ap_start and set
+    when ``on_start`` returns, so a polling host doesn't need a user-defined
+    status register."""
+
+    def test_ap_done_initially_zero(self) -> None:
+        rm = VitisRegMap({"x": RegField(Bit, RegAccess.R)})
+        assert rm.read_word("ap_done", 0) == 0
+
+    def test_ap_done_set_after_on_start_returns(self) -> None:
+        def on_start() -> ProcessGen[None]:
+            yield sim.env.timeout(1)
+
+        rm = VitisRegMap({"x": RegField(Bit, RegAccess.R)})
+        sim = Simulation()
+        slave = VitisRegMapMMIFSlave(
+            sim=sim, bitwidth=32, regmap=rm, on_start=on_start
+        )
+        master = MMIFMaster(sim=sim, bitwidth=32)
+        direct = DirectMMIF(sim=sim, clk=Clock(freq=1.0))
+        direct.bind("master", master)
+        direct.bind("slave", slave)
+
+        ap_done_reads: list[int] = []
+
+        def proc() -> ProcessGen[None]:
+            yield from rm.start(master, base_addr=0)
+            yield sim.env.timeout(5)  # on_start completes
+            val = yield from master.read_schema(Bit, addr=rm.offset_of("ap_done"))
+            ap_done_reads.append(int(val.val))
+
+        done = sim.env.event()
+
+        def _wrap() -> ProcessGen[None]:
+            yield from proc()
+            done.succeed()
+
+        sim.env.process(_wrap())
+        sim.env.run(until=done)
+        assert ap_done_reads[0] == 1
+
+    def test_ap_done_cleared_on_relaunch(self) -> None:
+        """A second ap_start clears ap_done so the host's next poll cannot
+        see a stale completion from the previous transaction."""
+
+        def on_start() -> ProcessGen[None]:
+            yield sim.env.timeout(5)
+
+        rm = VitisRegMap({"x": RegField(Bit, RegAccess.R)})
+        sim = Simulation()
+        slave = VitisRegMapMMIFSlave(
+            sim=sim, bitwidth=32, regmap=rm, on_start=on_start
+        )
+        master = MMIFMaster(sim=sim, bitwidth=32)
+        direct = DirectMMIF(sim=sim, clk=Clock(freq=1.0))
+        direct.bind("master", master)
+        direct.bind("slave", slave)
+
+        ap_done_after_first: list[int] = []
+        ap_done_after_relaunch: list[int] = []
+
+        def proc() -> ProcessGen[None]:
+            yield from rm.start(master, base_addr=0)
+            yield sim.env.timeout(10)  # first on_start finishes; ap_done = 1
+            val1 = yield from master.read_schema(Bit, addr=rm.offset_of("ap_done"))
+            ap_done_after_first.append(int(val1.val))
+            yield from rm.start(master, base_addr=0)   # ap_done must clear immediately
+            val2 = yield from master.read_schema(Bit, addr=rm.offset_of("ap_done"))
+            ap_done_after_relaunch.append(int(val2.val))
+
+        done = sim.env.event()
+
+        def _wrap() -> ProcessGen[None]:
+            yield from proc()
+            done.succeed()
+
+        sim.env.process(_wrap())
+        sim.env.run(until=done)
+        assert ap_done_after_first[0] == 1
+        assert ap_done_after_relaunch[0] == 0
+
+
+class TestBoundRegMapPollEnd:
+    """``BoundRegMap.poll_end`` polls a field until it reads the target value
+    (default: ap_done == 1), with a real-time interval between reads."""
+
+    def test_poll_end_returns_on_ap_done(self) -> None:
+        """Happy path: kernel completes; poll_end observes ap_done=1 and returns."""
+
+        def on_start() -> ProcessGen[None]:
+            yield sim.env.timeout(3)
+
+        rm = VitisRegMap({"x": RegField(Bit, RegAccess.R)})
+        sim = Simulation()
+        slave = VitisRegMapMMIFSlave(
+            sim=sim, bitwidth=32, regmap=rm, on_start=on_start
+        )
+        master = MMIFMaster(sim=sim, bitwidth=32)
+        direct = DirectMMIF(sim=sim, clk=Clock(freq=1.0))
+        direct.bind("master", master)
+        direct.bind("slave", slave)
+
+        result: list[Any] = []
+
+        def proc() -> ProcessGen[None]:
+            rb = rm.bind_master(master)
+            yield from rb.start()
+            value = yield from rb.poll_end(interval=1.0, max_polls=20)
+            result.append(value)
+
+        done = sim.env.event()
+
+        def _wrap() -> ProcessGen[None]:
+            yield from proc()
+            done.succeed()
+
+        sim.env.process(_wrap())
+        sim.env.run(until=done)
+        assert result == [1]
+
+    def test_poll_end_raises_on_timeout(self) -> None:
+        """If on_start never returns within max_polls, poll_end raises."""
+
+        def on_start() -> ProcessGen[None]:
+            yield sim.env.timeout(10_000)   # never finishes within poll budget
+
+        rm = VitisRegMap({"x": RegField(Bit, RegAccess.R)})
+        sim = Simulation()
+        slave = VitisRegMapMMIFSlave(
+            sim=sim, bitwidth=32, regmap=rm, on_start=on_start
+        )
+        master = MMIFMaster(sim=sim, bitwidth=32)
+        direct = DirectMMIF(sim=sim, clk=Clock(freq=1.0))
+        direct.bind("master", master)
+        direct.bind("slave", slave)
+
+        captured: list[Exception] = []
+
+        def proc() -> ProcessGen[None]:
+            rb = rm.bind_master(master)
+            yield from rb.start()
+            try:
+                yield from rb.poll_end(interval=1.0, max_polls=3)
+            except RuntimeError as exc:
+                captured.append(exc)
+
+        done = sim.env.event()
+
+        def _wrap() -> ProcessGen[None]:
+            yield from proc()
+            done.succeed()
+
+        sim.env.process(_wrap())
+        sim.env.run(until=done)
+        assert len(captured) == 1
+        assert "ap_done" in str(captured[0])
+
+    def test_poll_end_field_and_target_override(self) -> None:
+        """User can poll a non-ap_done field (e.g. a custom status enum)."""
+
+        def on_start() -> ProcessGen[None]:
+            yield sim.env.timeout(2)
+            rm.set("error", ErrCode.OVERFLOW)
+
+        rm = VitisRegMap({"error": RegField(ErrField, RegAccess.R)})
+        sim = Simulation()
+        slave = VitisRegMapMMIFSlave(
+            sim=sim, bitwidth=32, regmap=rm, on_start=on_start
+        )
+        master = MMIFMaster(sim=sim, bitwidth=32)
+        direct = DirectMMIF(sim=sim, clk=Clock(freq=1.0))
+        direct.bind("master", master)
+        direct.bind("slave", slave)
+
+        result: list[Any] = []
+
+        def proc() -> ProcessGen[None]:
+            rb = rm.bind_master(master)
+            yield from rb.start()
+            value = yield from rb.poll_end(
+                interval=1.0, max_polls=20, field="error", target=ErrCode.OVERFLOW,
+            )
+            result.append(value)
+
+        done = sim.env.event()
+
+        def _wrap() -> ProcessGen[None]:
+            yield from proc()
+            done.succeed()
+
+        sim.env.process(_wrap())
+        sim.env.run(until=done)
+        assert result == [ErrCode.OVERFLOW]
 
 
 # ---------------------------------------------------------------------------
