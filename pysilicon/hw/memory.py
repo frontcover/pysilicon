@@ -494,4 +494,37 @@ class MemComponent(SimObj):
     def free(self, addr: int) -> None:
         """Free a previously allocated region."""
         self._mem.free(addr)
+
+    # ------------------------------------------------------------------
+    # Testbench-side direct access (zero sim time)
+    # ------------------------------------------------------------------
+    #
+    # These mirror the hand-written histogram testbench's flat-array access
+    # (``mgr.alloc`` + ``write_array(buf, mem+widx, n)`` / ``read_array(...)``):
+    # a sequential ``HwTestbench.main()`` populates and inspects memory by
+    # direct indexing, not over an ``m_axi`` master.  They are recognised by
+    # the testbench codegen (see ``plans/aximm_codegen.md`` decision 9) and
+    # lower to ``MemMgr::alloc`` + ``<elem>_array_utils::{write,read}_array``.
+
+    def alloc_array(self, data: Any, elem_type: type, count: int | None = None) -> int:
+        """Allocate a region sized for *count* elements and populate it.
+
+        Returns the **byte** start address (``addr_unit`` semantics), matching
+        the order-preserving ``Memory.alloc`` first-fit allocation (decision 8).
+        """
+        from pysilicon.hw.arrayutils import get_nwords, write_array
+        n = len(data) if count is None else int(count)
+        nwords = get_nwords(elem_type, word_bw=self.word_size, shape=n)
+        addr = self._mem.alloc(nwords)
+        packed = write_array(np.asarray(data)[:n], elem_type=elem_type,
+                             word_bw=self.word_size)
+        self._mem.write(addr, packed)
+        return addr
+
+    def read_array(self, addr: int, elem_type: type, count: int) -> Any:
+        """Read *count* elements from *addr* (byte address) and deserialize."""
+        from pysilicon.hw.arrayutils import get_nwords, read_array
+        nwords = get_nwords(elem_type, word_bw=self.word_size, shape=int(count))
+        words = self._mem.read(addr, nwords)
+        return read_array(words, elem_type, word_bw=self.word_size, shape=int(count))
     
