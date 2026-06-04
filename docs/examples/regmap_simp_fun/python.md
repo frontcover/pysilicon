@@ -1,6 +1,6 @@
 ---
 title: Python model
-parent: Vitis Register Map
+parent: Register Map
 nav_order: 1
 has_children: false
 ---
@@ -16,14 +16,14 @@ Vitis HLS automatically generates this AXI-Lite slave whenever a kernel function
 - A user-defined region with one register per scalar argument (allocated by Vitis in declaration order).
 - A reserved control region that Vitis adds at offsets `0x00–0x10`: `ap_start`, `ap_done`, `ap_idle`, `ap_ready`, and interrupt enables. The host writes `ap_start` to launch the kernel; the kernel writes `ap_done` when it returns.
 
-PySilicon's [`VitisRegMap`](../regmap.md) class mirrors this layout. The user declares only the application registers; the framework auto-prepends `ap_start` (W1S, offset `0x00`) and `ap_done` (R, offset `0x04`), and the [`VitisRegMapMMIFSlave`](../regmap.md) that wraps the regmap manages their values automatically.
+PySilicon's [`VitisRegMap`](../../guide/interface/regmap.md) class mirrors this layout. The user declares only the application registers; the framework auto-prepends `ap_start` (W1S, offset `0x00`) and `ap_done` (R, offset `0x04`), and the [`VitisRegMapMMIFSlave`](../../guide/interface/regmap.md) that wraps the regmap manages their values automatically.
 
 ## Describing the Register Map in Python
 
 A register map is declared by passing a dict of `RegField` entries to `VitisRegMap`. Each `RegField` carries the field's data schema (here `S32` — a specialised signed 32-bit `IntField`) and its host-side access mode (`R` / `W` / `RW` / `W1C` / `W1S`). Offsets are assigned automatically in declaration order; field names become the keys you use for `get` / `set` everywhere downstream.
 
 ```python
-# examples/interface/vitis_regmap_simp_fun/simp_fun.py
+# examples/regmap_simp_fun/simp_fun.py
 S32 = IntField.specialize(bitwidth=32, signed=True)
 
 self.regmap = VitisRegMap({
@@ -36,7 +36,7 @@ self.regmap = VitisRegMap({
 
 After construction, the layout is `ap_start@0x00`, `ap_done@0x04`, `x@0x08`, `a@0x0C`, `b@0x10`, `y@0x14` — the same layout Vitis HLS allocates from the equivalent `s_axilite` pragmas. The host-side offset map and the synthesized AXI-Lite slave use the same `name → offset` mapping, so there is one source of truth.
 
-The full set of `RegAccess` modes and the access matrix they imply is documented in [Register Maps](../regmap.md).
+The full set of `RegAccess` modes and the access matrix they imply is documented in [Register Maps](../../guide/interface/regmap.md).
 
 ## Creating the Kernel with the Register Map
 

@@ -639,3 +639,7 @@ from pysilicon.hw.regmap import (
 | Host write a field          | `yield from master.write_schema(value, addr=base + regmap.offset_of("name"))` |
 | Host read a field           | `val = yield from master.read_schema(SchemaType, addr=base + regmap.offset_of("name"))` |
 | Host launch a Vitis kernel  | `yield from regmap.start(master, base_addr=BASE)` |
+
+## Worked example
+
+For an end-to-end walkthrough that puts these abstractions to work — declaring a `VitisRegMap`, running it in SimPy, generating the Vitis HLS kernel, and validating the measured RTL timing against the Python model — see the [Register Map example](../../examples/regmap_simp_fun/) in the Examples section.

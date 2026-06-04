@@ -1,6 +1,6 @@
 ---
 title: Vitis HLS Code Generation
-parent: Vitis Register Map
+parent: Register Map
 nav_order: 3
 has_children: false
 ---
@@ -13,10 +13,10 @@ The codegen pipeline reuses the same `HlsCodegenStep` build step used by every P
 
 ## Build Step
 
-Both stages are added to the build DAG in [`simp_fun_build.py`](../../../../examples/interface/vitis_regmap_simp_fun/simp_fun_build.py):
+Both stages are added to the build DAG in [`simp_fun_build.py`](../../../examples/regmap_simp_fun/simp_fun_build.py):
 
 ```python
-# examples/interface/vitis_regmap_simp_fun/simp_fun_build.py
+# examples/regmap_simp_fun/simp_fun_build.py
 dag.add(HlsCodegenStep(
     name="gen_kernel",
     comp_class=SimpFunComponent,
@@ -40,7 +40,7 @@ Three constructor arguments are doing the work:
 - **`impl_dir="."`** — where the **sticky** hand-written hook files land. "Sticky" means: the framework writes a stub once if the file does not exist, then leaves it alone forever. Edits to the impl file survive every subsequent rebuild. This is the seam through which the user owns the compute body without owning the wrapper.
 - **`is_testbench=True`** — flips `HlsCodegenStep` into testbench mode: the generated artifact is a single `<top>_tb.cpp` with a `main()` function instead of the kernel `.hpp` / `.cpp` pair. The same Python source — the `HwTestbench.main()` method — produces the C++ host code.
 
-For a fuller treatment of `HlsCodegenStep`, see [Build System – HLS codegen](../../build/codegen.md).
+For a fuller treatment of `HlsCodegenStep`, see [Build System – HLS codegen](../../guide/build/codegen.md).
 
 ## File artifacts
 
@@ -62,7 +62,7 @@ The auto-generated kernel files declare the AXI-Lite slave, the regmap struct, e
 The full hand-written compute body for simp_fun:
 
 ```cpp
-// examples/interface/vitis_regmap_simp_fun/simp_fun_compute_impl.cpp
+// examples/regmap_simp_fun/simp_fun_compute_impl.cpp
 #include <ap_int.h>
 
 namespace simp_fun_impl {
@@ -91,7 +91,7 @@ The first time you run the build, `HlsCodegenStep` writes a minimal stub for thi
 To run only the codegen portion of the flow:
 
 ```bash
-cd examples/interface/vitis_regmap_simp_fun
+cd examples/regmap_simp_fun
 python simp_fun_build.py --through gen_tb
 ```
 

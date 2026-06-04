@@ -1,11 +1,11 @@
 ---
-title: Vitis Register Map
-parent: Interfaces
+title: Register Map
+parent: Examples
 nav_order: 5
 has_children: true
 ---
 
-# Vitis Register Map
+# Register Map
 
 This is the first end-to-end example in the interface guide. It walks through one PySilicon kernel from the Python specification all the way to RTL co-simulation, using the simplest of the AXI-* interfaces — an **AXI-Lite register map**.
 
@@ -16,7 +16,7 @@ Vitis HLS automatically generates this AXI-Lite slave whenever a kernel function
 - A user-defined region with one register per scalar argument (allocated by Vitis in declaration order).
 - A reserved control region that Vitis adds at offsets `0x00–0x10`: `ap_start`, `ap_done`, `ap_idle`, `ap_ready`, and interrupt enables. The host writes `ap_start` to launch the kernel; the kernel writes `ap_done` when it returns.
 
-PySilicon's [`VitisRegMap`](../regmap.md) class mirrors this layout exactly: the user declares each register as a Python `RegField` with its data schema and access mode (`R`, `W`, `RW`, `W1C`, `W1S`), and PySilicon prepends the same Vitis control registers automatically. The same declaration drives the Python simulation, the generated HLS pragmas, and the host-side offset map.
+PySilicon's [`VitisRegMap`](../../guide/interface/regmap.md) class mirrors this layout exactly: the user declares each register as a Python `RegField` with its data schema and access mode (`R`, `W`, `RW`, `W1C`, `W1S`), and PySilicon prepends the same Vitis control registers automatically. The same declaration drives the Python simulation, the generated HLS pragmas, and the host-side offset map.
 
 In going through this example, you will learn to:
 
@@ -68,7 +68,7 @@ Vitis HLS prepends a small fixed control region to every `s_axilite`-controlled 
 
 ## File map
 
-The Python source, build script, and Vitis driver all live in [`examples/interface/vitis_regmap_simp_fun/`](../../../../examples/interface/vitis_regmap_simp_fun/):
+The Python source, build script, and Vitis driver all live in [`examples/regmap_simp_fun/`](../../../examples/regmap_simp_fun/):
 
 - `simp_fun.py` — the `HwComponent` kernel, its `VitisRegMap`, and a SimPy host-side testbench.
 - `simp_fun_build.py` — the build DAG: golden Python sim → HLS codegen → Vitis C-sim → C-synth → cosim timing.
@@ -91,7 +91,7 @@ The Python `VitisRegMap` declaration in `simp_fun.py` lists exactly these fields
 
 ## End-to-end stages
 
-The build DAG in `simp_fun_build.py` chains the standard five-stage pipeline introduced by the [poly example](../../../examples/poly/):
+The build DAG in `simp_fun_build.py` chains the standard five-stage pipeline introduced by the [poly example](../poly/):
 
 - **Python golden model** — run the kernel in SimPy and record `y` plus a cycle-accurate timing log.
 - **HLS code generation** — emit the Vitis HLS kernel C++ and testbench C++ from the Python source.
