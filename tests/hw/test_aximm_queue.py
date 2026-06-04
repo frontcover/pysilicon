@@ -12,10 +12,34 @@ import numpy as np
 import numpy.testing as npt
 import pytest
 
-from pysilicon.hw.aximm_queue import AXIMMQueueLayout, MMMemory
+from pysilicon.hw.aximm_queue import (
+    AXIMMQueue,
+    AXIMMQueueLayout,
+    MMMemory,
+    _split,
+)
 from pysilicon.hw.clock import Clock
 from pysilicon.hw.memif import DirectMMIF, MMIFMaster
 from pysilicon.simulation.simulation import Simulation
+
+
+# ---------------------------------------------------------------------------
+# Shared helpers
+# ---------------------------------------------------------------------------
+
+def _make_queue_direct(capacity, *, elem_words=1, mem_bw=32, base_addr=0x0):
+    """One AXIMMQueue over a DirectMMIF + MMMemory; returns (sim, queue)."""
+    sim = Simulation()
+    clk = Clock(freq=1.0)
+    mem = MMMemory(sim=sim, bitwidth=mem_bw)
+    master = MMIFMaster(sim=sim, bitwidth=mem_bw)
+    direct = DirectMMIF(sim=sim, clk=clk)
+    direct.bind("master", master)
+    direct.bind("slave", mem.slave_ep)
+    layout = AXIMMQueueLayout(
+        base_addr=base_addr, capacity=capacity, elem_words=elem_words, mem_bw=mem_bw
+    )
+    return sim, AXIMMQueue(master=master, layout=layout)
 
 
 # ---------------------------------------------------------------------------
@@ -140,3 +164,163 @@ class TestMMMemory:
         sim.env.run()
         assert mem._mem[0x0] == 1
         assert mem._mem[0x8] == 2   # stride 8 bytes for 64-bit
+
+
+# ---------------------------------------------------------------------------
+# _split wrap helper
+# ---------------------------------------------------------------------------
+
+class TestSplit:
+    def test_no_wrap(self):
+        assert _split(2, 3, 8) == [(2, 3)]
+
+    def test_exact_end(self):
+        assert _split(5, 3, 8) == [(5, 3)]
+
+    def test_wrap(self):
+        assert _split(6, 5, 8) == [(6, 2), (0, 3)]
+
+    def test_full_wrap_from_zero(self):
+        assert _split(0, 8, 8) == [(0, 8)]
+
+
+# ---------------------------------------------------------------------------
+# AXIMMQueue core (try_write / try_get), elem_words == 1
+# ---------------------------------------------------------------------------
+
+class TestAXIMMQueueCore:
+    def test_mem_bw_mismatch_raises(self):
+        sim = Simulation()
+        master = MMIFMaster(sim=sim, bitwidth=32)
+        layout = AXIMMQueueLayout(base_addr=0, capacity=8, mem_bw=64)
+        with pytest.raises(ValueError, match="mem_bw"):
+            AXIMMQueue(master=master, layout=layout)
+
+    def test_fifo_order_many_cycles(self):
+        sim, q = _make_queue_direct(capacity=8)
+        out = []
+
+        def proc():
+            yield from q.reset()
+            nxt = 0
+            for _ in range(20):
+                batch = np.arange(nxt, nxt + 3, dtype=np.uint32)
+                ok = yield from q.try_write(batch)
+                assert ok
+                nxt += 3
+                got = yield from q.try_get(3)
+                out.append(np.array(got))
+
+        sim.env.process(proc())
+        sim.env.run()
+        npt.assert_array_equal(np.concatenate(out), np.arange(60))
+
+    def test_full_returns_false(self):
+        sim, q = _make_queue_direct(capacity=8)   # usable depth 7
+        result = {}
+
+        def proc():
+            yield from q.reset()
+            ok = yield from q.try_write(np.arange(7, dtype=np.uint32))
+            result["fill"] = ok
+            result["space"] = yield from q.space()
+            result["count"] = yield from q.count()
+            # one more slot must not fit
+            result["overflow"] = yield from q.try_write(np.array([99], dtype=np.uint32))
+
+        sim.env.process(proc())
+        sim.env.run()
+        assert result["fill"] is True
+        assert result["space"] == 0
+        assert result["count"] == 7
+        assert result["overflow"] is False
+
+    def test_drain_to_empty(self):
+        sim, q = _make_queue_direct(capacity=8)
+        result = {}
+
+        def proc():
+            yield from q.reset()
+            yield from q.try_write(np.arange(5, dtype=np.uint32))
+            got = yield from q.try_get(5)
+            result["drained"] = np.array(got)
+            result["count"] = yield from q.count()
+            # empty now: try_get returns empty
+            empty = yield from q.try_get(3)
+            result["empty_len"] = len(empty)
+
+        sim.env.process(proc())
+        sim.env.run()
+        npt.assert_array_equal(result["drained"], np.arange(5))
+        assert result["count"] == 0
+        assert result["empty_len"] == 0
+
+    def test_wrap_around_integrity(self):
+        """capacity 8, repeatedly write 5 / get 5 forces head/tail past the end."""
+        sim, q = _make_queue_direct(capacity=8)
+        out = []
+
+        def proc():
+            yield from q.reset()
+            nxt = 0
+            for _ in range(10):
+                ok = yield from q.try_write(np.arange(nxt, nxt + 5, dtype=np.uint32))
+                assert ok
+                got = yield from q.try_get(5)
+                out.append(np.array(got))
+                nxt += 5
+
+        sim.env.process(proc())
+        sim.env.run()
+        npt.assert_array_equal(np.concatenate(out), np.arange(50))
+
+    def test_partial_get_short(self):
+        """try_get with max_slots > available returns only what's there."""
+        sim, q = _make_queue_direct(capacity=8)
+        result = {}
+
+        def proc():
+            yield from q.reset()
+            yield from q.try_write(np.array([10, 11], dtype=np.uint32))
+            got = yield from q.try_get(5)   # only 2 available
+            result["got"] = np.array(got)
+
+        sim.env.process(proc())
+        sim.env.run()
+        npt.assert_array_equal(result["got"], [10, 11])
+
+    def test_space_count_track(self):
+        sim, q = _make_queue_direct(capacity=8)
+        trace = []
+
+        def proc():
+            yield from q.reset()
+            for n in (1, 2, 3):
+                yield from q.try_write(np.arange(n, dtype=np.uint32))
+                c = yield from q.count()
+                s = yield from q.space()
+                trace.append((c, s))
+
+        sim.env.process(proc())
+        sim.env.run()
+        # cumulative counts 1, 3, 6; space = 7 - count
+        assert trace == [(1, 6), (3, 4), (6, 1)]
+
+    def test_wrap_split_in_single_write(self):
+        """A batch that itself straddles the wrap is stored correctly."""
+        sim, q = _make_queue_direct(capacity=8)
+        result = {}
+
+        def proc():
+            yield from q.reset()
+            # advance tail to 6: write 6, get 6
+            yield from q.try_write(np.arange(6, dtype=np.uint32))
+            yield from q.try_get(6)
+            # now head=tail=6; write 4 slots -> wraps [6,8)+[0,2)
+            yield from q.try_write(np.array([100, 101, 102, 103], dtype=np.uint32))
+            got = yield from q.try_get(4)
+            result["got"] = np.array(got)
+
+        sim.env.process(proc())
+        sim.env.run()
+        npt.assert_array_equal(result["got"], [100, 101, 102, 103])

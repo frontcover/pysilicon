@@ -40,7 +40,7 @@ from typing import ClassVar
 
 import numpy as np
 
-from pysilicon.hw.memif import MMIFSlave, Words
+from pysilicon.hw.memif import MMIFMaster, MMIFSlave, Words
 from pysilicon.simulation.simobj import ProcessGen, SimObj
 
 
@@ -191,3 +191,154 @@ class MMMemory(SimObj):
             [self._mem.get(local_addr + i * word_bytes, 0) for i in range(nwords)],
             dtype=dtype,
         )
+
+
+# ---------------------------------------------------------------------------
+# Queue proxy
+# ---------------------------------------------------------------------------
+
+def _split(idx: int, nslots: int, capacity: int) -> list[tuple[int, int]]:
+    """Split a run of *nslots* slots starting at *idx* across the ring wrap.
+
+    Returns one or two ``(start_idx, count)`` runs so a ``write``/``get`` issues
+    at most two MM transfers (decision 10) — never a per-element modular loop.
+    """
+    first = min(nslots, capacity - idx)
+    runs = [(idx, first)]
+    if nslots > first:
+        runs.append((0, nslots - first))
+    return runs
+
+
+@dataclass
+class AXIMMQueue:
+    """Proxy a master uses to ``write``/``get`` a memory-backed ring buffer.
+
+    Wraps an :class:`MMIFMaster` and an :class:`AXIMMQueueLayout`.  The producer
+    side calls ``write*`` (writes data + ``tail``, reads ``head``); the consumer
+    side calls ``get*`` (reads data + ``tail``, writes ``head``).  Two instances
+    over the same layout/base — one per master endpoint — form the full SPSC
+    queue (decision 7).
+
+    The non-blocking ``try_write`` / ``try_get`` are the primitives; the public
+    blocking ``write`` / ``get`` (Phase 3) poll them.
+    """
+
+    master: MMIFMaster
+    layout: AXIMMQueueLayout
+
+    def __post_init__(self) -> None:
+        # Decision 11: the layout's mem_bw is the single source of word width
+        # and must match the bound master/interconnect bitwidth, else every
+        # computed byte offset would be wrong.
+        if self.master.bitwidth != self.layout.mem_bw:
+            raise ValueError(
+                f"AXIMMQueue: master bitwidth {self.master.bitwidth} does not "
+                f"match layout mem_bw {self.layout.mem_bw}"
+            )
+
+    # ------------------------------------------------------------------
+    # Helpers
+    # ------------------------------------------------------------------
+
+    @property
+    def _dtype(self) -> np.dtype:
+        return np.dtype(np.uint32) if self.layout.mem_bw <= 32 else np.dtype(np.uint64)
+
+    def _read_ptrs(self) -> ProcessGen[tuple[int, int]]:
+        """Read (head, tail) in one transaction (they are adjacent words)."""
+        w = yield from self.master.read(2, self.layout.head_addr)
+        return int(w[0]), int(w[1])
+
+    # ------------------------------------------------------------------
+    # Setup / status
+    # ------------------------------------------------------------------
+
+    def reset(self) -> ProcessGen[None]:
+        """Zero head and tail and record capacity (call once, by whichever side
+        owns setup)."""
+        ctrl = np.zeros(self.layout.NUM_CONTROL_WORDS, dtype=self._dtype)
+        ctrl[2] = self.layout.capacity   # informational capacity word
+        yield from self.master.write(ctrl, self.layout.head_addr)
+
+    def count(self) -> ProcessGen[int]:
+        """Number of occupied slots."""
+        head, tail = yield from self._read_ptrs()
+        return (tail - head) % self.layout.capacity
+
+    def space(self) -> ProcessGen[int]:
+        """Number of free (usable) slots; usable depth is capacity - 1."""
+        c = yield from self.count()
+        return (self.layout.capacity - 1) - c
+
+    # ------------------------------------------------------------------
+    # Non-blocking primitives
+    # ------------------------------------------------------------------
+
+    def try_write(self, words: Words) -> ProcessGen[bool]:
+        """Try to enqueue ``len(words) // elem_words`` slots.
+
+        Returns ``False`` (a no-op) if the whole batch will not fit.  Data is
+        written **before** ``tail`` is advanced so the consumer can never see a
+        tail pointing at unwritten data (the SPSC ordering crux, decision 2).
+        """
+        ew = self.layout.elem_words
+        cap = self.layout.capacity
+        nslots = len(words) // ew
+        if nslots * ew != len(words):
+            raise ValueError(
+                f"try_write: {len(words)} words is not a multiple of "
+                f"elem_words={ew}"
+            )
+        if nslots == 0:
+            return True
+
+        head, tail = yield from self._read_ptrs()
+        free = (cap - 1) - (tail - head) % cap
+        if nslots > free:
+            return False
+
+        # 1) write data (possibly split across the wrap)
+        offset = 0
+        for start, cnt in _split(tail, nslots, cap):
+            nwords = cnt * ew
+            yield from self.master.write(
+                words[offset:offset + nwords], self.layout.slot_addr(start)
+            )
+            offset += nwords
+
+        # 2) only now advance tail
+        new_tail = (tail + nslots) % cap
+        yield from self.master.write(
+            np.array([new_tail], dtype=self._dtype), self.layout.tail_addr
+        )
+        return True
+
+    def try_get(self, max_slots: int) -> ProcessGen[Words]:
+        """Dequeue up to *max_slots* slots; returns the words actually read
+        (possibly short or empty).
+
+        Data is read **before** ``head`` is advanced so the producer can never
+        reclaim a slot still being read (the SPSC ordering crux, decision 2).
+        """
+        ew = self.layout.elem_words
+        cap = self.layout.capacity
+
+        head, tail = yield from self._read_ptrs()
+        avail = (tail - head) % cap
+        nslots = min(max_slots, avail)
+        if nslots == 0:
+            return np.empty(0, dtype=self._dtype)
+
+        # 1) read data (possibly split across the wrap)
+        chunks = []
+        for start, cnt in _split(head, nslots, cap):
+            chunk = yield from self.master.read(cnt * ew, self.layout.slot_addr(start))
+            chunks.append(chunk)
+
+        # 2) only now advance head
+        new_head = (head + nslots) % cap
+        yield from self.master.write(
+            np.array([new_head], dtype=self._dtype), self.layout.head_addr
+        )
+        return np.concatenate(chunks) if len(chunks) > 1 else chunks[0]
