@@ -348,6 +348,45 @@ class BoundRegMap:
             addr=self._base_addr + self._regmap.offset_of("ap_start"),
         )
 
+    def poll_end(
+        self,
+        interval: float,
+        max_polls: int = 100,
+        field: str = "ap_done",
+        target: Any = 1,
+    ) -> ProcessGen[Any]:
+        """Poll ``field`` until it reads ``target``, with ``interval`` seconds between reads.
+
+        Defaults to the standard ``ap_done == 1`` completion contract that
+        :class:`VitisRegMap` auto-emits via :class:`VitisRegMapMMIFSlave` — so a
+        typical kernel-launch flow is just::
+
+            yield from rm.start()
+            yield from rm.poll_end(interval=clk.period * 4, max_polls=64)
+
+        ``interval`` is a real-time delay (seconds); the caller usually
+        computes it from a clock period (e.g. ``4 * clk.period`` to poll
+        every four cycles). Polling more aggressively than the bus can
+        service stuffs the AXI-Lite link with redundant reads — choose
+        ``interval`` to match the expected kernel runtime.
+
+        Polling is a pedagogical / debugging convenience. Production hosts
+        should wait on the AXI-Lite interrupt line instead.
+
+        Raises :class:`RuntimeError` if ``target`` has not been observed
+        after ``max_polls`` reads.
+        """
+        env = self._master.env
+        for _ in range(max_polls):
+            value = yield from self.get(field)
+            if value == target:
+                return value
+            yield env.timeout(interval)
+        raise RuntimeError(
+            f"poll_end: '{field}' did not reach {target!r} after {max_polls} polls "
+            f"(interval={interval} s); last value={value!r}."
+        )
+
     @staticmethod
     def _to_native(obj: Any, schema_cls: type) -> Any:
         from pysilicon.hw.dataschema import FloatField, IntField
@@ -447,15 +486,18 @@ class VitisRegMap(RegMap):
     """
 
     def __init__(self, fields: dict[str, RegField], bitwidth: int = 32) -> None:
+        word_bytes = bitwidth // 8
+        reserved_offsets = {0x00, 0x04}
         for name, f in fields.items():
             if name.startswith("ap_"):
                 raise ValueError(
                     f"Field name '{name}' begins with reserved prefix 'ap_'."
                 )
-            if f.offset == 0:
+            if f.offset in reserved_offsets:
                 raise ValueError(
-                    f"Field '{name}' specifies offset=0, which collides with "
-                    "the auto-prepended ap_start register."
+                    f"Field '{name}' specifies offset=0x{f.offset:02x}, which "
+                    "collides with an auto-prepended ap_* register (ap_start@0x00, "
+                    "ap_done@0x04)."
                 )
         ctrl: dict[str, RegField] = {
             "ap_start": RegField(
@@ -464,7 +506,14 @@ class VitisRegMap(RegMap):
                 offset=0x00,
                 description="Start the kernel (Vitis ap_ctrl_hs)",
                 is_vitis_auto=True,
-            )
+            ),
+            "ap_done": RegField(
+                Bit,
+                RegAccess.R,
+                offset=0x04,
+                description="Set by the slave when on_start returns; cleared on ap_start",
+                is_vitis_auto=True,
+            ),
         }
         super().__init__({**ctrl, **fields}, bitwidth=bitwidth)
 
@@ -509,18 +558,25 @@ class VitisRegMapMMIFSlave(RegMapMMIFSlave):
         super().__post_init__()
 
     def _on_ap_start(self, name: str, sub_word: int, value: int) -> None:
-        """Hook installed on ap_start; spawns _launch() if not busy."""
+        """Hook installed on ap_start; spawns _launch() if not busy.
+
+        Clears the auto-prepended ``ap_done`` field before launching so a
+        subsequent host poll cannot see a stale completion from the
+        previous transaction.
+        """
         if self._busy:
             return
+        self.regmap.set("ap_done", 0)
         self._busy = True
         self.env.process(self._launch())
 
     def _launch(self) -> ProcessGen[None]:
-        """Runs on_start() and clears _busy when it returns."""
+        """Runs on_start() and sets ap_done + clears _busy when it returns."""
         try:
             if self.on_start is not None:
                 result = self.on_start()
                 if result is not None:
                     yield from result
         finally:
+            self.regmap.set("ap_done", 1)
             self._busy = False
