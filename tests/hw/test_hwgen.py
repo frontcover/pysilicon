@@ -1556,3 +1556,102 @@ def test_header_includes_streamutils_for_stream_using_component():
     hpp = header_to_cpp(type(comp))
     assert '#include "include/streamutils_hls.h"' in hpp
 
+
+# ---------------------------------------------------------------------------
+# Inline regmap.get(...) + local-shadows-regmap-field fix
+# ---------------------------------------------------------------------------
+
+from pysilicon.hw.synth import synthesizable as _synth2
+
+_S32_PH3 = _IntField.specialize(bitwidth=32, signed=True)
+
+
+@_dataclass
+class _InlineGetComp(HwComponent):
+    """``on_start`` reads regmap fields inline as a call argument, and
+    assigns the compute result into a local whose name matches the
+    output regmap field. Both patterns must lower cleanly to C++.
+    """
+
+    cpp_kernel_name: ClassVar[str | None] = "inline_get"
+
+    def __post_init__(self) -> None:
+        super().__post_init__()
+        self.regmap = _VitisRegMap({
+            "x": _RegField(_S32_PH3, _RegAccess.RW),
+            "a": _RegField(_S32_PH3, _RegAccess.RW),
+            "b": _RegField(_S32_PH3, _RegAccess.RW),
+            "y": _RegField(_S32_PH3, _RegAccess.R),
+        })
+        self.s_lite = _VitisRegMapMMIFSlave(
+            name=f'{self.name}_s_lite', sim=self.sim, bitwidth=32,
+            regmap=self.regmap, on_start=self.on_start,
+        )
+        self.add_endpoint(self.s_lite)
+
+    def on_start(self) -> _ProcessGen[None]:
+        y = self.compute(
+            self.regmap.get("x"),
+            self.regmap.get("a"),
+            self.regmap.get("b"),
+        )
+        self.regmap.set("y", y)
+
+    @_synth2
+    def compute(self, x: _S32_PH3, a: _S32_PH3, b: _S32_PH3) -> _S32_PH3:
+        return x
+
+
+def test_inline_regmap_get_lowers_to_kernel_param_name():
+    """``self.regmap.get("x")`` as a call argument lowers to the kernel
+    parameter ``x``, not raw AST repr text.
+    """
+    from pysilicon.build.hwgen import kernel_to_cpp
+
+    cpp = kernel_to_cpp(_InlineGetComp)
+    # The compute call should reference the kernel parameter names.
+    assert "compute(x, a, b)" in cpp, (
+        "expected inline regmap.get(...) to lower to bare param names:\n"
+        + cpp
+    )
+    # The bug symptom — ast.dump text — must not appear anywhere.
+    assert "Call(func=" not in cpp
+    assert "Attribute(value=" not in cpp
+
+
+def test_local_shadowing_regmap_field_does_not_self_assign():
+    """``y = compute(...); self.regmap.set("y", y)`` must not lower to the
+    no-op ``y = y;``. The local that aliases the kernel parameter is
+    either renamed at codegen time (option a) or extraction raises a
+    clear error (option b).
+    """
+    from pysilicon.build.hwcodegen import SynthesisError
+    from pysilicon.build.hwgen import kernel_to_cpp
+
+    try:
+        cpp = kernel_to_cpp(_InlineGetComp)
+    except SynthesisError as exc:
+        # Option (b) fallback: a clear error pointing at the shadowing.
+        msg = str(exc).lower()
+        assert "y" in msg and ("shadow" in msg or "rename" in msg), (
+            f"SynthesisError did not explain the shadowing issue: {exc}"
+        )
+        return
+
+    # Option (a) success path: the assignment is no longer a self-assign.
+    assert "y = y;" not in cpp, (
+        "regmap.set('y', y) emitted as self-assignment; the compute "
+        "result is being lost:\n" + cpp
+    )
+    # The compute result must flow into the kernel-parameter ``y`` via
+    # SOME renamed local.
+    assert "compute(x, a, b)" in cpp
+    # Final assignment line of the form ``y = <something_not_y>;`` must
+    # exist so the parameter gets the compute result.
+    import re
+    final_assigns = re.findall(r"^\s*y\s*=\s*([A-Za-z_]\w*)\s*;", cpp, re.M)
+    assert any(rhs != "y" for rhs in final_assigns), (
+        "no ``y = <local>;`` assignment found that propagates the compute "
+        "result:\n" + cpp
+    )
+

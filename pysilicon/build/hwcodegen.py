@@ -658,15 +658,49 @@ class HwStmtExtractor:
             self._require_synthesizable(method, node)
             assert method is not None
             inputs = self._resolve_call_args(node.value)
-            outputs = self._make_output_vars(node.targets)
+            target_names = self._extract_names(node.targets)
+            outputs = self._make_output_vars_with_rename(
+                target_names, method=method,
+            )
             stmt = self._make_call_stmt(method, inputs, outputs)
-            for v in outputs:
+            for orig_name, v in zip(target_names, outputs):
                 v.producer = stmt
-                self._scope[v.name] = v
+                self._scope[orig_name] = v
             return stmt
         raise SynthesisError(
             f"Non-synthesizable assignment at line {node.lineno}"
         )
+
+    def _make_output_vars_with_rename(
+        self,
+        target_names: list[str],
+        method: object,
+    ) -> list[HwVar]:
+        """Build output ``HwVar``s for an assignment, renaming any local
+        that would shadow a kernel parameter declared by the regmap.
+
+        A local named after a regmap field aliases the kernel-signature
+        parameter in C++. Without rename, ``y = compute(...)`` followed
+        by ``self.regmap.set("y", y)`` lowers to ``ap_int<32> y = ...;
+        y = y;`` — a self-assignment that discards the computed value.
+
+        Same-name ``<name> = self.regmap.get("<name>")`` is the existing
+        idiom recognized by ``_emit_regmap_get`` (it elides into a
+        comment), so we leave that case alone — the parameter is in
+        scope, no local is actually declared.
+        """
+        from pysilicon.hw.regmap import RegMapGetStmt
+        is_regmap_get = (
+            getattr(method, '_stmt_class', None) is RegMapGetStmt
+        )
+        rm_fields = self._regmap_field_names()
+        outputs: list[HwVar] = []
+        for n in target_names:
+            emit_name = n
+            if n in rm_fields and not is_regmap_get:
+                emit_name = f"_{n}_local"
+            outputs.append(HwVar(name=emit_name, typ=None))
+        return outputs
 
     def _visit_ann_assign(self, node: ast.AnnAssign) -> HwStmt:
         # x: T = yield from self.ep.method(...)
@@ -856,9 +890,47 @@ class HwStmtExtractor:
             elif isinstance(arg, ast.Attribute):
                 obj = self._resolve_obj(arg)
                 result.append(obj if obj is not None else arg)
+            elif isinstance(arg, ast.Call):
+                hw_var = self._try_inline_regmap_get(arg)
+                result.append(hw_var if hw_var is not None else arg)
             else:
                 result.append(arg)
         return result
+
+    def _try_inline_regmap_get(self, call_node: ast.Call) -> HwVar | None:
+        """Recognize ``self.regmap.get("<name>")`` as a sub-expression and
+        lower it to a ``HwVar`` named after the field.
+
+        The kernel signature already declares a parameter named after each
+        non-vitis-auto regmap field, so emitting ``<name>`` as the call
+        argument resolves to the right C++ scalar (or array) directly —
+        no temp local, no AST repr leak.
+        """
+        from pysilicon.hw.regmap import RegMapGetStmt
+        method = self._resolve_method(call_node.func)
+        if method is None:
+            return None
+        if getattr(method, '_stmt_class', None) is not RegMapGetStmt:
+            return None
+        if len(call_node.args) != 1 or call_node.keywords:
+            return None
+        name_node = call_node.args[0]
+        if not (isinstance(name_node, ast.Constant)
+                and isinstance(name_node.value, str)):
+            return None
+        field_name = name_node.value
+        regmap = getattr(self._comp, 'regmap', None)
+        if regmap is None or field_name not in regmap._fields:
+            return None
+        return HwVar(name=field_name, typ=regmap._fields[field_name].schema)
+
+    def _regmap_field_names(self) -> set[str]:
+        """Return the set of regmap field names declared on the component,
+        or an empty set when the component has no regmap."""
+        regmap = getattr(self._comp, 'regmap', None)
+        if regmap is None:
+            return set()
+        return set(regmap._fields.keys())
 
     def _make_output_vars(self, targets: list[ast.expr]) -> list[HwVar]:
         names = self._extract_names(targets)
