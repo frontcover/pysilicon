@@ -94,19 +94,13 @@ class SimpFunComponent(HwComponent):
     def on_start(self) -> ProcessGen[None]:
         # ap_done is auto-managed by VitisRegMapMMIFSlave: cleared on ap_start,
         # set when on_start returns. The kernel only writes its result.
-        #
-        # The codegen recognises ``<name> = self.regmap.get("<name>")`` as
-        # "this register is already a kernel parameter named <name>" and
-        # emits a comment instead of a redundant read.  Naming the compute
-        # result ``result`` (not ``y``) avoids shadowing the ``y`` kernel
-        # parameter so the subsequent ``set("y", result)`` lowers cleanly to
-        # ``y = result;`` rather than the no-op ``y = y;``.
         self._log("kernel_busy", 1)
-        x = self.regmap.get("x")
-        a = self.regmap.get("a")
-        b = self.regmap.get("b")
-        result = self.compute(x, a, b)
-        self.regmap.set("y", result)
+        y = self.compute(
+            self.regmap.get("x"),
+            self.regmap.get("a"),
+            self.regmap.get("b"),
+        )
+        self.regmap.set("y", y)
         self._log("kernel_done", 1)
 
     @synthesizable
