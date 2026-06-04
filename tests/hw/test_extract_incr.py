@@ -57,7 +57,7 @@ def test_mm_array_write_stmt_fields():
     wr = next(s for s in stmts if isinstance(s, MMArrayWriteStmt))
 
     assert wr.port is comp.m_mem
-    assert wr.source_expr.name == "out"
+    assert wr.source_expr.name == "buf"   # transform is in-place; same buffer
     assert wr.elem_type is Uint32Field
     assert isinstance(wr.addr_expr, FieldRef)
     assert wr.addr_expr.field == "addr"

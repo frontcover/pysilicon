@@ -154,19 +154,21 @@ class IncrAccel(HwComponent):
         """
         cmd: IncrCmd = yield from self.s_in.get(IncrCmd)
         buf = yield from self.m_mem.read_array(Uint32Field, cmd.n, cmd.addr)
-        out = yield from self.transform(buf, cmd.n)
-        yield from self.m_mem.write_array(out, Uint32Field, cmd.addr, cmd.n)
+        yield from self.transform(buf, cmd.n)
+        yield from self.m_mem.write_array(buf, Uint32Field, cmd.addr, cmd.n)
         yield from self.respond(self.m_out)
 
     @synthesizable
-    def transform(self, buf, n) -> ProcessGen[np.ndarray]:
-        """The increment transform hook: each of the ``n`` words gets +1."""
-        result = (np.asarray(buf, dtype=np.uint32)[:int(n)] + 1).astype(np.uint32)
-        return result
+    def transform(self, buf: IncrArray, n: Uint32Field) -> ProcessGen[None]:
+        """The increment transform hook: each of the first ``n`` words gets +1,
+        in place (C++ can't return an array by value, so the kernel writes the
+        same buffer back)."""
+        np.asarray(buf)[:int(n)] += 1
+        return
         yield  # unreachable — makes this a generator
 
     @synthesizable
-    def respond(self, m_out) -> ProcessGen[None]:
+    def respond(self, m_out: StreamIFMaster) -> ProcessGen[None]:
         """Emit the (always NO_ERROR) response on the output stream."""
         resp = IncrResp()
         resp.status = IncrError.NO_ERROR
