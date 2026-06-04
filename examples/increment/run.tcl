@@ -4,9 +4,11 @@ set_top incr
 # transform hook body lives in incr_transform_impl.cpp at the source-tree root;
 # the templated respond hook body is #include'd by gen/incr.hpp from
 # "../incr_respond_impl.tpp".
-add_files gen/incr.cpp -cflags "-I."
-add_files incr_transform_impl.cpp -cflags "-I."
-add_files -tb incr_tb.cpp -cflags "-I."
+# -Igen puts the generated kernel header (gen/incr.hpp) on the include path so
+# the root-level TB and transform-impl can `#include "incr.hpp"`.
+add_files gen/incr.cpp -cflags "-I. -Igen"
+add_files incr_transform_impl.cpp -cflags "-I. -Igen"
+add_files -tb incr_tb.cpp -cflags "-I. -Igen"
 
 set script_dir [file dirname [file normalize [info script]]]
 set streamutils_cpp [file join $script_dir "streamutils.cpp"]

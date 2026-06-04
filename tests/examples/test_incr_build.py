@@ -83,8 +83,11 @@ def test_incr_vitis_csim_matches_python(tmp_path):
     except subprocess.CalledProcessError as exc:
         pytest.fail(f"Vitis C-sim failed: {exc}\n{exc.stdout}\n{exc.stderr}")
 
+    # Vitis was found (gate above), so a csim failure is a real failure — do not
+    # mask it as a skip. (An earlier soft-skip here hid a build-wiring bug that
+    # made C-sim fail to compile while the test still reported "passed".)
     csim = results.get("csim")
-    if csim is None or not csim.success:
-        pytest.skip(f"Vitis unavailable: {csim.message if csim else 'csim did not run'}")
-
+    assert csim is not None and csim.success, (
+        f"C-sim failed: {csim.message if csim else 'csim step did not run'}"
+    )
     assert results["validate_csim"].success, results["validate_csim"].message
