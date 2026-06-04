@@ -1,0 +1,102 @@
+<mxfile host="app.diagrams.net">
+  <diagram name="Page-1" id="rw-qz_ojBGCwmfFGyCgK">
+    <mxGraphModel grid="1" page="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" pageScale="1" pageWidth="850" pageHeight="1100" math="0" shadow="0">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+
+        <mxCell id="src-container" parent="1" vertex="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#F5F5F0;strokeColor=#57068C;strokeWidth=2;verticalAlign=top;" value="">
+          <mxGeometry x="80" y="70" width="220" height="115" as="geometry" />
+        </mxCell>
+        <mxCell id="src-label" parent="1" vertex="1" style="text;html=1;whiteSpace=wrap;strokeColor=none;fillColor=none;align=center;verticalAlign=middle;rounded=0;fontStyle=1;fontColor=#57068C;" value="&lt;font face=&quot;Times New Roman&quot;&gt;Python source&lt;/font&gt;">
+          <mxGeometry x="100" y="75" width="180" height="20" as="geometry" />
+        </mxCell>
+        <mxCell id="src-hw" parent="1" vertex="1" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#57068C;" value="&lt;font face=&quot;Times New Roman&quot;&gt;Hardware&lt;br&gt;description&lt;/font&gt;">
+          <mxGeometry x="95" y="105" width="90" height="60" as="geometry" />
+        </mxCell>
+        <mxCell id="src-tb" parent="1" vertex="1" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#FFFFFF;strokeColor=#57068C;" value="&lt;font face=&quot;Times New Roman&quot;&gt;Test&lt;br&gt;bench&lt;/font&gt;">
+          <mxGeometry x="195" y="105" width="90" height="60" as="geometry" />
+        </mxCell>
+
+        <mxCell id="pysim" parent="1" vertex="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#F5F5F0;strokeColor=#57068C;strokeWidth=2;" value="&lt;font face=&quot;Times New Roman&quot;&gt;Python simulation&lt;br&gt;(SimPy)&lt;/font&gt;">
+          <mxGeometry x="110" y="230" width="160" height="55" as="geometry" />
+        </mxCell>
+        <mxCell id="fast-results" parent="1" vertex="1" style="shape=document;whiteSpace=wrap;html=1;fillColor=#E8DBF0;strokeColor=#57068C;boundedLbl=1;" value="&lt;font face=&quot;Times New Roman&quot;&gt;Fast, cycle / resource&lt;br&gt;approximate results&lt;/font&gt;">
+          <mxGeometry x="120" y="325" width="140" height="80" as="geometry" />
+        </mxCell>
+
+        <mxCell id="codegen" parent="1" vertex="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#F5F5F0;strokeColor=#57068C;strokeWidth=2;" value="&lt;font face=&quot;Times New Roman&quot;&gt;AI-assisted&lt;br&gt;codegen&lt;/font&gt;">
+          <mxGeometry x="340" y="100" width="120" height="55" as="geometry" />
+        </mxCell>
+        <mxCell id="hls-code" parent="1" vertex="1" style="shape=document;whiteSpace=wrap;html=1;fillColor=#E8DBF0;strokeColor=#57068C;boundedLbl=1;" value="&lt;font face=&quot;Times New Roman&quot;&gt;Vitis HLS code&lt;br&gt;(kernel + TB)&lt;/font&gt;">
+          <mxGeometry x="500" y="95" width="130" height="70" as="geometry" />
+        </mxCell>
+        <mxCell id="csim" parent="1" vertex="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#F5F5F0;strokeColor=#57068C;strokeWidth=2;" value="&lt;font face=&quot;Times New Roman&quot;&gt;C-Sim /&lt;br&gt;RTL co-sim&lt;/font&gt;">
+          <mxGeometry x="505" y="230" width="120" height="55" as="geometry" />
+        </mxCell>
+        <mxCell id="slow-results" parent="1" vertex="1" style="shape=document;whiteSpace=wrap;html=1;fillColor=#E8DBF0;strokeColor=#57068C;boundedLbl=1;" value="&lt;font face=&quot;Times New Roman&quot;&gt;Slow, cycle / resource&lt;br&gt;exact results&lt;/font&gt;">
+          <mxGeometry x="500" y="325" width="140" height="80" as="geometry" />
+        </mxCell>
+
+        <mxCell id="mcp" parent="1" vertex="1" style="shape=hexagon;perimeter=hexagonPerimeter2;whiteSpace=wrap;html=1;fillColor=#8A4FBB;strokeColor=#57068C;strokeWidth=2;fontColor=#FFFFFF;fontStyle=1;" value="&lt;font face=&quot;Times New Roman&quot;&gt;MCP&lt;br&gt;server&lt;/font&gt;">
+          <mxGeometry x="690" y="230" width="120" height="60" as="geometry" />
+        </mxCell>
+        <mxCell id="agent" parent="1" vertex="1" style="shape=hexagon;perimeter=hexagonPerimeter2;whiteSpace=wrap;html=1;fillColor=#57068C;strokeColor=#57068C;strokeWidth=2;fontColor=#FFFFFF;fontStyle=1;" value="&lt;font face=&quot;Times New Roman&quot;&gt;AI agent&lt;/font&gt;">
+          <mxGeometry x="690" y="100" width="120" height="60" as="geometry" />
+        </mxCell>
+
+        <mxCell id="future-train" parent="1" vertex="1" style="rounded=1;whiteSpace=wrap;html=1;fillColor=#EEEEEE;strokeColor=#888888;strokeWidth=2;dashed=1;fontColor=#555555;" value="&lt;font face=&quot;Times New Roman&quot;&gt;&lt;b&gt;Future:&lt;/b&gt;&lt;br&gt;Cycle-model training&lt;br&gt;(fit proc_latency, proc_ii)&lt;/font&gt;">
+          <mxGeometry x="320" y="460" width="240" height="75" as="geometry" />
+        </mxCell>
+
+        <mxCell id="e-src-pysim" parent="1" edge="1" source="src-container" target="pysim" style="endArrow=block;html=1;rounded=0;exitX=0.3;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;strokeColor=#57068C;strokeWidth=2;" value="">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e-pysim-fast" parent="1" edge="1" source="pysim" target="fast-results" style="endArrow=block;html=1;rounded=0;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;strokeColor=#57068C;strokeWidth=2;" value="">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <mxCell id="e-src-codegen" parent="1" edge="1" source="src-container" target="codegen" style="endArrow=block;html=1;rounded=0;exitX=1;exitY=0.4;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;strokeColor=#57068C;strokeWidth=2;" value="">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e-codegen-hls" parent="1" edge="1" source="codegen" target="hls-code" style="endArrow=block;html=1;rounded=0;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;strokeColor=#57068C;strokeWidth=2;" value="">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e-hls-csim" parent="1" edge="1" source="hls-code" target="csim" style="endArrow=block;html=1;rounded=0;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;strokeColor=#57068C;strokeWidth=2;" value="">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e-csim-slow" parent="1" edge="1" source="csim" target="slow-results" style="endArrow=block;html=1;rounded=0;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;strokeColor=#57068C;strokeWidth=2;" value="">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <mxCell id="e-validates" parent="1" edge="1" source="fast-results" target="slow-results" style="endArrow=open;startArrow=open;dashed=1;html=1;rounded=0;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;strokeColor=#57068C;strokeWidth=2;labelBackgroundColor=#FFFFFF;fontColor=#57068C;" value="&lt;font face=&quot;Times New Roman&quot;&gt;validates&lt;br&gt;(±20 cyc)&lt;/font&gt;">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <mxCell id="e-fast-mcp" parent="1" edge="1" source="fast-results" target="mcp" style="endArrow=block;html=1;rounded=0;exitX=1;exitY=0.7;exitDx=0;exitDy=0;entryX=0;entryY=0.8;entryDx=0;entryDy=0;strokeColor=#57068C;strokeWidth=2;" value="">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="e-slow-mcp" parent="1" edge="1" source="slow-results" target="mcp" style="endArrow=block;html=1;rounded=0;exitX=1;exitY=0.5;exitDx=0;exitDy=0;entryX=0;entryY=0.5;entryDx=0;entryDy=0;strokeColor=#57068C;strokeWidth=2;" value="">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <mxCell id="e-mcp-agent" parent="1" edge="1" source="mcp" target="agent" style="endArrow=block;startArrow=block;html=1;rounded=0;exitX=0.5;exitY=0;exitDx=0;exitDy=0;entryX=0.5;entryY=1;entryDx=0;entryDy=0;strokeColor=#57068C;strokeWidth=2;labelBackgroundColor=#FFFFFF;fontColor=#57068C;" value="&lt;font face=&quot;Times New Roman&quot;&gt;tools&lt;/font&gt;">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <mxCell id="e-mcp-src" parent="1" edge="1" source="mcp" target="src-container" style="endArrow=block;dashed=1;html=1;rounded=0;exitX=0;exitY=0;exitDx=0;exitDy=0;entryX=1;entryY=0.3;entryDx=0;entryDy=0;strokeColor=#888888;strokeWidth=2;labelBackgroundColor=#FFFFFF;fontColor=#555555;" value="&lt;font face=&quot;Times New Roman&quot;&gt;agent edits&lt;br&gt;(future)&lt;/font&gt;">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <mxCell id="e-mcp-train" parent="1" edge="1" source="mcp" target="future-train" style="endArrow=block;dashed=1;html=1;rounded=0;exitX=0;exitY=1;exitDx=0;exitDy=0;entryX=0.85;entryY=0;entryDx=0;entryDy=0;strokeColor=#888888;strokeWidth=2;labelBackgroundColor=#FFFFFF;fontColor=#555555;" value="&lt;font face=&quot;Times New Roman&quot;&gt;trains model&lt;br&gt;(future)&lt;/font&gt;">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+        <mxCell id="e-train-src" parent="1" edge="1" source="future-train" target="src-container" style="endArrow=block;dashed=1;html=1;rounded=0;exitX=0;exitY=0.5;exitDx=0;exitDy=0;entryX=0.5;entryY=1;entryDx=0;entryDy=0;strokeColor=#888888;strokeWidth=2;labelBackgroundColor=#FFFFFF;fontColor=#555555;" value="&lt;font face=&quot;Times New Roman&quot;&gt;tuned params&lt;br&gt;(future)&lt;/font&gt;">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>
