@@ -1132,6 +1132,26 @@ def header_to_cpp(
             lines.append(
                 f'static const int {attr}_depth = {_mm_port_depth(ep, tree, depth_ctx)};'
             )
+        # Total m_axi region + interface widths + word typedefs — not used by the
+        # kernel (which inlines its widths), but make the header a drop-in for a
+        # testbench that drives the kernel (it sizes the flat memory array and the
+        # axis/mem word types from these).
+        all_maxes = [
+            _emit_expr(s.max_expr, depth_ctx)
+            for s in _collect_mm_stmts(tree) if s.max_expr is not None
+        ]
+        if all_maxes:
+            lines.append(f'static const int max_mem_words = {" + ".join(all_maxes)};')
+        streams = _discover_stream_endpoints(default_comp)
+        if streams:
+            lines.append(f'static const int stream_dwidth = {int(streams[0][1].bitwidth)};')
+        lines.append(f'static const int mem_dwidth = {int(mm_masters[0][1].bitwidth)};')
+        mem_awidth = getattr(default_comp, 'mem_awidth', None)
+        if mem_awidth is not None:
+            lines.append(f'static const int mem_awidth = {int(mem_awidth)};')
+        if streams:
+            lines.append('using axis_word_t = streamutils::axi4s_word<stream_dwidth>;')
+        lines.append('using mem_word_t = ap_uint<mem_dwidth>;')
 
     for suffix, variant_comp in variants:
         lines.append('')

@@ -43,12 +43,12 @@ from pysilicon.simulation.simulation import Simulation
 try:
     from examples.shared_mem.hist_demo import (
         Float32, HistCmd, HistError, HistResp, MAX_NDATA, MAX_NBINS,
-        MEM_DWIDTH, STREAM_DWIDTH, Uint32Field,
+        MEM_AWIDTH, MEM_DWIDTH, STREAM_DWIDTH, Uint32Field,
     )
 except ModuleNotFoundError:  # direct execution from the example dir
     from hist_demo import (  # type: ignore[no-redef]
         Float32, HistCmd, HistError, HistResp, MAX_NDATA, MAX_NBINS,
-        MEM_DWIDTH, STREAM_DWIDTH, Uint32Field,
+        MEM_AWIDTH, MEM_DWIDTH, STREAM_DWIDTH, Uint32Field,
     )
 
 
@@ -125,6 +125,7 @@ class HistAccel(HwComponent):
     in_bw:     HwParam[int] = STREAM_DWIDTH
     out_bw:    HwParam[int] = STREAM_DWIDTH
     mem_bw:    HwParam[int] = MEM_DWIDTH
+    mem_awidth: HwParam[int] = MEM_AWIDTH   # m_axi address width (TB-side typing)
     max_ndata: HwParam[int] = MAX_NDATA
     max_nbins: HwParam[int] = MAX_NBINS
     clk:       Clock = field(default_factory=lambda: Clock(freq=1e9))
