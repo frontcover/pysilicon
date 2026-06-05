@@ -33,6 +33,7 @@ from pysilicon.hw.arrayutils import get_nwords
 from pysilicon.hw.clock import Clock
 from pysilicon.hw.dataschema import DataArray
 from pysilicon.hw.hw_component import HwComponent, HwParam
+from pysilicon.hw.hw_testbench import HwTestbench
 from pysilicon.hw.interface import StreamIF, StreamIFMaster, StreamIFSlave
 from pysilicon.hw.memif import DirectMMIF, MMIFMaster
 from pysilicon.hw.memory import MemComponent
@@ -58,6 +59,12 @@ except ModuleNotFoundError:  # direct execution from the example dir
 # not change the SimPy runtime (the hook works on numpy arrays) and are not
 # schema headers; they carry only (element type, compile-time max) for codegen.
 # ---------------------------------------------------------------------------
+
+#: Total m_axi region the testbench's flat memory array spans: data (max_ndata)
+#: + edges (max_nbins) + counts (max_nbins).  Matches the generated header's
+#: ``max_mem_words``.
+MAX_MEM_WORDS = MAX_NDATA + 2 * MAX_NBINS
+
 
 class HistDataBuf(DataArray):
     cpp_typing_only = True
@@ -297,6 +304,60 @@ def connect(sim: Simulation, ctrl: HistController, accel: HistAccel,
     out_stream.bind("slave",  ctrl.s_resp)
     mem_link.bind(  "master", accel.m_mem)
     mem_link.bind(  "slave",  mem.s_mm)
+
+
+# ---------------------------------------------------------------------------
+# Codegen-source testbench (lowered to gen/hist_tb.cpp; mirrors IncrTBHls)
+# ---------------------------------------------------------------------------
+
+@dataclass
+class HistTBHls(HwTestbench):
+    """Sequential codegen-source testbench for the histogram kernel.
+
+    ``main()`` lowers to ``gen/hist_tb.cpp``: read the command + input buffers
+    from disk, allocate the three regions (data, edges, counts) preserving
+    allocation order, populate the inputs, run the DUT with the ``mem`` pointer,
+    drain the response, and write the kernel-produced counts back out for the
+    functional-verify step.  The three allocations carry runtime counts that can
+    be 0 (``nbins-1`` edges when ``nbins==1``; an invalid ``ndata``/``nbins`` on a
+    validation-failure case); the alloc codegen clamps each region to >= 1 word
+    so those cases still get a valid address (the kernel reads/writes the runtime
+    count, a no-op when 0).
+    """
+
+    cpp_kernel_name: ClassVar[str | None] = "hist"
+
+    def main(self) -> None:
+        dut = HistAccel()
+        mem = MemComponent(name="mem", sim=None, inline=False,
+                           nwords_tot=MAX_MEM_WORDS)
+
+        cmd = HistCmd()
+        cmd.read_uint32_file(self.data_dir + "/cmd.bin")
+
+        data = HistDataBuf()
+        data.read_uint32_file_array(self.data_dir + "/data_array.bin", count=cmd.ndata)
+        edges = HistEdgeBuf()
+        edges.read_uint32_file_array(self.data_dir + "/edges_array.bin", count=cmd.nbins - 1)
+        counts = HistCountBuf()
+
+        # Allocate the three regions in order (data, edges, counts) — addresses
+        # come from alloc, not the file (so the cmd stays parametric in n).
+        cmd.data_addr = mem.alloc_array(data, Float32, count=cmd.ndata)
+        cmd.bin_edges_addr = mem.alloc_array(edges, Float32, count=cmd.nbins - 1)
+        cmd.cnt_addr = mem.alloc_array(counts, Uint32Field, count=cmd.nbins)
+
+        dut.s_in.push(cmd)
+        dut.run(mem=mem)
+
+        resp = HistResp()
+        dut.m_out.pop(resp)
+
+        out = mem.read_array(cmd.cnt_addr, Uint32Field, count=cmd.nbins)
+
+        # Outputs for FunctionalVerifyStep (actual side, in the data dir).
+        resp.write_uint32_file(self.data_dir + "/resp_data.bin")
+        out.write_uint32_file_array(self.data_dir + "/counts_array.bin", count=cmd.nbins)
 
 
 # ---------------------------------------------------------------------------

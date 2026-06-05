@@ -1441,9 +1441,17 @@ def _emit_mem_alloc_array(stmt: MemAllocArrayStmt, ctx: TbCodegenCtx) -> str:
     ns = _array_utils_ns(stmt.elem_type)
     count = _emit_int_expr(stmt.count, ctx)
     widx = f"_{stmt.target_local}_{stmt.target_field}_widx"
+    nwords = f"_{stmt.target_local}_{stmt.target_field}_nwords"
     mem = stmt.mem_local
+    # Clamp the allocation to >= 1 word.  A 0-word region is meaningless and
+    # MemMgr::alloc rejects it, but a runtime count can legitimately be 0 — the
+    # nbins==1 (zero-edge) buffer, or a validation-failure case (ndata<=0 data,
+    # nbins<=0 counts).  This mirrors the SimPy HistController, which allocs
+    # max(nedges, 1) so such cases still get a valid address; the kernel then
+    # reads/writes the runtime count (0 = a no-op burst).
     return (
-        f"{pad}const int {widx} = {mem}_mgr.alloc({ns}::get_nwords<{bw}>({count}));\n"
+        f"{pad}const int {nwords} = {ns}::get_nwords<{bw}>({count});\n"
+        f"{pad}const int {widx} = {mem}_mgr.alloc({nwords} > 0 ? {nwords} : 1);\n"
         f"{pad}{stmt.target_local}.{stmt.target_field} = {widx} * ({bw} / 8);\n"
         f"{pad}{ns}::write_array<{bw}>({stmt.src_local}, {mem} + {widx}, {count});"
     )
@@ -1707,23 +1715,12 @@ def _emit_str_expr(node, ctx: TbCodegenCtx) -> str:
 def _emit_int_expr(node, ctx: TbCodegenCtx) -> str:
     """Emit a TB-mode integer/count expression as C++.
 
-    Handles literals, name references, and ``<schema_local>.<field>``
-    chains so users can write ``count=data_hdr.nsamp`` directly.
+    Delegates to the kernel-side expression lowerer (:func:`_emit_ast_expr`) so a
+    count such as ``nbins - 1`` lowers **identically** in the kernel and the
+    testbench — a single source of truth that keeps them from diverging. Handles
+    literals, names, ``local.field`` chains, and ``+``/``-``/``*`` arithmetic.
     """
-    import ast as _ast
-    if isinstance(node, _ast.Constant) and isinstance(node.value, int):
-        return str(node.value)
-    if isinstance(node, _ast.Name):
-        return node.id
-    if isinstance(node, _ast.Attribute) and isinstance(node.value, _ast.Name):
-        # `schema_local.field` — the C++ struct field of the bound local.
-        return f"{node.value.id}.{node.attr}"
-    if isinstance(node, _ast.Attribute) and isinstance(node.value, _ast.Name) \
-            and node.value.id == 'self':
-        return node.attr
-    raise RuntimeError(
-        f"Cannot lower TB int expression: {_ast.dump(node)}"
-    )
+    return _emit_ast_expr(node, ctx)
 
 
 def _array_utils_ns(elem_type) -> str:

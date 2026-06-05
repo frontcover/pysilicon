@@ -3,31 +3,32 @@
 Generates the Vitis HLS include headers (reusing ``HistTest.gen_vitis_code``) and
 the **generated** kernel (``gen/hist.cpp`` / ``gen/hist.hpp``) from the Python
 ``HistAccel``, writes per-case input vectors, and exposes the golden expectation
-(status + counts) — the pieces the Phase-4 C-sim test drives.  The generated
-kernel is compiled by ``run_gen.tcl`` against the hand-written datapath hooks and
-the robust ``hist_csim_tb.cpp`` driver.
+(status + counts) — the pieces the C-sim test drives.  The generated kernel and
+generated testbench (``gen/hist_tb.cpp`` from ``HistTBHls``) are compiled by
+``run_gen.tcl`` against the hand-written datapath hooks.
 """
 from __future__ import annotations
 
-import json
 from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
 import numpy.typing as npt
 
-from pysilicon.build.hwgen import header_to_cpp, kernel_to_cpp
+from pysilicon.build.hwgen import header_to_cpp, kernel_to_cpp, tb_files_to_str
 from pysilicon.hw.arrayutils import read_uint32_file, write_uint32_file
 
 try:
-    from examples.shared_mem.hist import HistAccel, golden_counts
+    from examples.shared_mem.hist import HistAccel, HistTBHls, golden_counts
     from examples.shared_mem.hist_demo import (
-        Float32, HistError, HistResp, HistTest, MAX_NBINS, MAX_NDATA, Uint32Field,
+        Float32, HistCmd, HistError, HistResp, HistTest, MAX_NBINS, MAX_NDATA,
+        Uint32Field,
     )
 except ModuleNotFoundError:  # direct execution from the example dir
-    from hist import HistAccel, golden_counts  # type: ignore[no-redef]
+    from hist import HistAccel, HistTBHls, golden_counts  # type: ignore[no-redef]
     from hist_demo import (  # type: ignore[no-redef]
-        Float32, HistError, HistResp, HistTest, MAX_NBINS, MAX_NDATA, Uint32Field,
+        Float32, HistCmd, HistError, HistResp, HistTest, MAX_NBINS, MAX_NDATA,
+        Uint32Field,
     )
 
 
@@ -52,7 +53,22 @@ def generate_vitis_sources(work_dir: str | Path) -> Path:
     gen.mkdir(parents=True, exist_ok=True)
     (gen / "hist.cpp").write_text(kernel_to_cpp(HistAccel), encoding="utf-8")
     (gen / "hist.hpp").write_text(header_to_cpp(HistAccel), encoding="utf-8")
+    # The generated testbench (Phase 5) — drives the generated kernel.
+    for fname, content in tb_files_to_str(HistTBHls).items():
+        (gen / fname).write_text(content, encoding="utf-8")
     return gen
+
+
+def _write_array_file(path: Path, arr, elem_type, count: int) -> None:
+    """Write exactly ``count`` elements as the raw word stream the C++
+    ``read_uint32_file_array`` expects.  ``write_uint32_file`` emits a spurious
+    1-word file for an empty array, which the TB's ``count==0`` read flags as
+    trailing bytes — so write a true 0-byte file when there is nothing to emit
+    (the nbins==1 zero-edge case, or a validation-failure 0-data case)."""
+    if count > 0:
+        write_uint32_file(arr, elem_type=elem_type, file_path=path, nwrite=count)
+    else:
+        Path(path).write_bytes(b"")
 
 
 @dataclass
@@ -85,16 +101,15 @@ class HistCase:
         data_dir = Path(data_dir)
         data_dir.mkdir(parents=True, exist_ok=True)
         data, edges = self.gen_data()
-        (data_dir / "params.json").write_text(
-            json.dumps({"tx_id": self.seed, "ndata": self.ndata, "nbins": self.nbins}),
-            encoding="utf-8",
-        )
-        if self.ndata > 0:
-            write_uint32_file(data, elem_type=Float32,
-                              file_path=data_dir / "data_array.bin", nwrite=self.ndata)
-        if self.nbins > 1:
-            write_uint32_file(edges, elem_type=Float32,
-                              file_path=data_dir / "edges_array.bin", nwrite=len(edges))
+        # The generated TB reads the full HistCmd from cmd.bin (addresses are
+        # placeholders it overwrites via alloc) and reads the input files
+        # unconditionally, so write them always — even 0-element (the TB's read
+        # of a 0/negative count is a no-op).
+        HistCmd(tx_id=self.seed, data_addr=0, bin_edges_addr=0,
+                ndata=self.ndata, nbins=self.nbins, cnt_addr=0
+                ).write_uint32_file(str(data_dir / "cmd.bin"))
+        _write_array_file(data_dir / "data_array.bin", data, Float32, max(self.ndata, 0))
+        _write_array_file(data_dir / "edges_array.bin", edges, Float32, max(self.nbins - 1, 0))
         return data, edges
 
     def check_outputs(self, data_dir: str | Path, data, edges) -> tuple[bool, str]:
@@ -117,11 +132,20 @@ class HistCase:
         return True, f"counts={counts.tolist()} match golden"
 
 
-# The Phase-4 coverage set: nbins==1 (unconditional zero-count edges read),
-# nbins>1 with several bins (normal binning), and a validation-failure case.
+# Coverage set: nbins==1 (the unconditional zero-count edges read), nbins>1 with
+# several bins (normal binning), and a validation-failure case.
+#
+# The validation case is ndata==0 (INVALID_NDATA), NOT nbins==0.  The generated
+# TB reads `count = nbins - 1` edges unconditionally (it mirrors the kernel's
+# guard-free read; the extractor can't lower the `if nbins>1` guard the robust
+# hist_csim_tb.cpp uses).  For nbins==0 that count is -1, which the file read
+# rejects, and nbins>max_nbins would overrun the fixed edges[max_nbins] buffer —
+# so an nbins-based failure isn't drivable through the generated TB.  ndata==0
+# still exercises the >=1 alloc clamp (data count is 0); the counts-alloc clamp
+# is the same emitted expression, confirmed by inspecting gen/hist_tb.cpp.
 CSIM_CASES = [
     HistCase(ndata=37, nbins=1),
     HistCase(ndata=37, nbins=6),
     HistCase(ndata=200, nbins=12),
-    HistCase(ndata=37, nbins=0),    # INVALID_NBINS
+    HistCase(ndata=0, nbins=6),    # INVALID_NDATA
 ]

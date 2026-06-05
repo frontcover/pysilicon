@@ -150,3 +150,54 @@ def test_missing_max_count_fails_loudly():
     stmt.kwargs = {}   # drop the max_count
     with pytest.raises(SynthesisError, match="no compile-time buffer bound"):
         _emit_mm_array_read(stmt, ctx)
+
+
+# ---------------------------------------------------------------------------
+# Phase 5: generated testbench (HistTBHls -> gen/hist_tb.cpp)
+# ---------------------------------------------------------------------------
+
+def _gen_tb() -> str:
+    from examples.shared_mem.hist import HistTBHls
+    from pysilicon.build.hwgen import tb_files_to_str
+    return tb_files_to_str(HistTBHls)["hist_tb.cpp"]
+
+
+def test_tb_int_expr_reuses_kernel_lowerer():
+    """The TB count lowering delegates to the kernel's expression lowerer, so a
+    count like ``nbins - 1`` lowers identically on both sides (single source of
+    truth — they must never diverge)."""
+    import ast
+    from pysilicon.build.hwgen import _emit_ast_expr, _emit_int_expr
+    for src in ("cmd.nbins - 1", "cmd.ndata", "cmd.nbins", "5"):
+        node = ast.parse(src, mode="eval").body
+        assert _emit_int_expr(node, None) == _emit_ast_expr(node, None)
+
+
+def test_tb_edges_count_lowers_as_binop():
+    """The edges region's count is ``nbins - 1`` (BinOp), reused from the kernel
+    lowerer; it must appear verbatim in the read and the alloc/populate."""
+    tb = _gen_tb()
+    assert "read_uint32_file_array(edges, (data_dir + std::string(\"/edges_array.bin\")).c_str(), cmd.nbins - 1)" in tb
+    assert "get_nwords<32>(cmd.nbins - 1)" in tb
+    assert "write_array<32>(edges, mem + _cmd_bin_edges_addr_widx, cmd.nbins - 1)" in tb
+
+
+def test_tb_allocs_clamp_to_one_word():
+    """Every region's alloc clamps to >= 1 word — the robustness that lets the TB
+    drive the nbins==1 (zero-edge) and validation-failure (zero-count) cases
+    without MemMgr::alloc rejecting a 0-word region. Covers all three allocs,
+    including counts (the validation-fail path)."""
+    tb = _gen_tb()
+    for field in ("data", "bin_edges", "cnt"):
+        assert (f"mem_mgr.alloc(_cmd_{field}_addr_nwords > 0 ? "
+                f"_cmd_{field}_addr_nwords : 1)") in tb
+
+
+def test_tb_drives_generated_kernel():
+    """The TB reads the command, runs the kernel via its m_axi signature, and
+    writes the response + counts back for functional verify."""
+    tb = _gen_tb()
+    assert "streamutils::read_uint32_file(cmd," in tb
+    assert "hist(s_in, m_out, mem);" in tb
+    assert "write_uint32_file(resp," in tb
+    assert "write_uint32_file_array(out," in tb

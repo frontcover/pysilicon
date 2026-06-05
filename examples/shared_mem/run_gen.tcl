@@ -38,7 +38,7 @@ if {$start_at eq "csim"} {
     add_files gen/hist.cpp -cflags "-I. -Igen"
     add_files hist_validate_impl.cpp -cflags "-I. -Igen"
     add_files hist_compute_impl.cpp -cflags "-I. -Igen"
-    add_files -tb hist_csim_tb.cpp -cflags "-I. -Igen"
+    add_files -tb gen/hist_tb.cpp -cflags "-I. -Igen"
     set streamutils_cpp [file join $script_dir "include" "streamutils.cpp"]
     if {[file exists $streamutils_cpp]} {
         add_files -tb $streamutils_cpp -cflags "-I. -Igen"

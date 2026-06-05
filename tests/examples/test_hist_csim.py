@@ -1,9 +1,9 @@
-"""Phase 4 (milestone): the GENERATED histogram kernel passes Vitis C-sim.
+"""The GENERATED histogram kernel + GENERATED testbench pass Vitis C-sim.
 
-Generates hist.cpp/hist.hpp from HistAccel, compiles them with the hand-written
-datapath hooks via run_gen.tcl, and runs C-sim across coverage cases — asserting
-the kernel's status and counts match the HistogramAccel golden. Vitis-gated; the
-non-vitis suite skips it.
+Generates hist.cpp/hist.hpp from HistAccel and gen/hist_tb.cpp from HistTBHls,
+compiles them with the hand-written datapath hooks via run_gen.tcl, and runs
+C-sim across coverage cases — asserting status and counts match the
+HistogramAccel golden. Vitis-gated; the non-vitis suite skips it.
 """
 from __future__ import annotations
 
@@ -19,7 +19,6 @@ from pysilicon.toolchain import toolchain
 SHARED_DIR = Path(__file__).resolve().parents[2] / "examples" / "shared_mem"
 _RESOURCES = (
     "run_gen.tcl",
-    "hist_csim_tb.cpp",
     "hist_validate_impl.cpp",
     "hist_compute_impl.cpp",
     "hist_respond_impl.tpp",
