@@ -25,23 +25,20 @@ This module exposes two classes:
 ``AXIMMQueueLayout``
     The memory map.  Owns all address math given ``mem_bw``, ``capacity`` and
     ``elem_words``.
-``MMMemory``
-    A reusable word-addressed RAM ``SimObj`` backing an MM slave (a cleaned-up,
-    generalized version of the ``MemBank`` defined locally in
-    ``examples/interface/aximm_demo.py``).  Lives here (rather than in
-    ``memif.py``) so the queue's dependency on a concrete memory model stays
-    local; any MM slave with read/write callbacks works — ``MMMemory`` is just
-    the convenient default.
+``AXIMMQueue``
+    The proxy a master uses to ``write``/``get`` the ring.  Storage-agnostic —
+    it only issues ``MMIFMaster`` transactions — so it works over any MM slave;
+    :class:`~pysilicon.hw.memory.MemComponent` is the canonical backing store.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import ClassVar
 
 import numpy as np
 
-from pysilicon.hw.memif import MMIFMaster, MMIFSlave, Words
-from pysilicon.simulation.simobj import ProcessGen, SimObj
+from pysilicon.hw.memif import MMIFMaster, Words
+from pysilicon.simulation.simobj import ProcessGen
 
 
 # ---------------------------------------------------------------------------
@@ -128,69 +125,6 @@ class AXIMMQueueLayout:
     def total_bytes(self) -> int:
         """Size of the whole region, for ``assign_address_ranges``."""
         return self.control_bytes + self.capacity * self.elem_words * self.word_bytes
-
-
-# ---------------------------------------------------------------------------
-# Reusable memory slave
-# ---------------------------------------------------------------------------
-
-@dataclass
-class MMMemory(SimObj):
-    """Word-addressed RAM backing an MM slave (generalized aximm_demo MemBank).
-
-    Backed by a dict keyed by byte address.  In the FULL protocol the slave
-    callback receives the whole burst at the starting ``local_addr`` and is
-    responsible for striding words within it; the stride per word is
-    ``bitwidth // 8`` bytes, never a hard-coded 4.
-
-    Parameters
-    ----------
-    bitwidth : int
-        Data word width in bits.  Must match the queue layout's ``mem_bw`` and
-        the interconnect ``bitwidth``.
-    access_latency : float
-        Simulated read access time (seconds).  Writes are non-blocking.
-    """
-
-    bitwidth: int = 32
-    access_latency: float = 0.0
-
-    slave_ep: MMIFSlave = field(init=False)
-
-    def __init_subclass__(cls, **kwargs):
-        super().__init_subclass__(**kwargs)
-
-    def __post_init__(self) -> None:
-        super().__post_init__()
-        self._mem: dict[int, int] = {}
-        self.slave_ep = MMIFSlave(
-            sim=self.sim,
-            bitwidth=self.bitwidth,
-            rx_write_proc=self.rx_write,
-            rx_read_proc=self.rx_read,
-        )
-
-    @property
-    def _word_bytes(self) -> int:
-        return self.bitwidth // 8
-
-    def rx_write(self, words: Words, local_addr: int) -> ProcessGen[None]:
-        word_bytes = self._word_bytes
-        for i, w in enumerate(words):
-            self._mem[local_addr + i * word_bytes] = int(w)
-        yield self.timeout(0)   # write is non-blocking for the caller
-
-    def rx_read(self, nwords: int, local_addr: int) -> ProcessGen[Words]:
-        if self.access_latency > 0:
-            yield self.timeout(self.access_latency)
-        else:
-            yield self.timeout(0)
-        word_bytes = self._word_bytes
-        dtype = np.uint32 if self.bitwidth <= 32 else np.uint64
-        return np.array(
-            [self._mem.get(local_addr + i * word_bytes, 0) for i in range(nwords)],
-            dtype=dtype,
-        )
 
 
 # ---------------------------------------------------------------------------
@@ -354,22 +288,28 @@ class AXIMMQueue:
     def write(
         self, words: Words, poll_interval: float = DEFAULT_POLL_INTERVAL
     ) -> ProcessGen[None]:
-        """Enqueue *words* as one atomic batch, blocking until it fits.
+        """Enqueue *words*, blocking until the whole array is in (decision 8).
 
-        The batch is enqueued all-or-nothing, so it must fit in the usable depth
-        (``capacity - 1`` slots); a producer that wants to stream more than that
-        chunks the data into multiple ``write`` calls.  Polls :meth:`try_write`,
-        sleeping *poll_interval* simulation seconds between attempts; the loop is
-        cancelled by simulation end like any other SimObj process.
+        Accepts an array of *any* size: it is streamed through in pieces of at
+        most the usable depth (``capacity - 1`` slots), blocking as the consumer
+        drains, until every word is enqueued.  This mirrors :meth:`get`, which
+        already collects across multiple :meth:`try_get` calls — there is no size
+        guard and no error for a batch larger than the queue.  Polls
+        :meth:`try_write`, sleeping *poll_interval* simulation seconds when the
+        queue is full; the loop is cancelled by simulation end like any other
+        SimObj process.  The atomic single-shot enqueue stays available as
+        :meth:`try_write`.
         """
-        nslots = len(words) // self.layout.elem_words
-        if nslots > self.layout.capacity - 1:
-            raise ValueError(
-                f"write: batch of {nslots} slots can never fit in usable depth "
-                f"{self.layout.capacity - 1}; chunk the data into smaller writes"
-            )
-        while not (yield from self.try_write(words)):
-            yield self.master.timeout(poll_interval)
+        ew = self.layout.elem_words
+        chunk_words = (self.layout.capacity - 1) * ew   # max words per attempt
+        n = len(words)
+        off = 0
+        while off < n:
+            piece = words[off:off + chunk_words]
+            if (yield from self.try_write(piece)):
+                off += len(piece)
+            else:
+                yield self.master.timeout(poll_interval)
 
     def get(
         self, nslots: int, poll_interval: float = DEFAULT_POLL_INTERVAL
@@ -390,4 +330,8 @@ class AXIMMQueue:
             else:
                 out.append(chunk)
                 collected += len(chunk) // ew
+        if not out:
+            # nslots == 0 (or nothing collected): return an empty array rather
+            # than indexing out[0] on an empty list.
+            return np.empty(0, dtype=self._dtype)
         return np.concatenate(out) if len(out) > 1 else out[0]

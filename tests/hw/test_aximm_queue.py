@@ -1,10 +1,15 @@
 """
 Unit tests for pysilicon/hw/aximm_queue.py.
 
-Phase 1 coverage
-----------------
+Coverage
+--------
 AXIMMQueueLayout  — address math across mem_bw and elem_words, validation
-MMMemory          — burst round-trip over a DirectMMIF
+AXIMMQueue        — try_write/try_get core, blocking write/get, concurrent SPSC
+
+The ring is backed by a real ``MemComponent`` (decision 9): ``inline=False`` plus
+a single ``alloc`` puts the backing segment at byte 0, which is exactly where
+both the DirectMMIF (pass-through, base_addr=0) and crossbar (global − base)
+paths deliver their local addresses.
 """
 from __future__ import annotations
 
@@ -15,7 +20,6 @@ import pytest
 from pysilicon.hw.aximm_queue import (
     AXIMMQueue,
     AXIMMQueueLayout,
-    MMMemory,
     _split,
 )
 from pysilicon.hw.clock import Clock
@@ -25,6 +29,7 @@ from pysilicon.hw.memif import (
     MMIFMaster,
     assign_address_ranges,
 )
+from pysilicon.hw.memory import MemComponent
 from pysilicon.simulation.simulation import Simulation
 
 
@@ -32,19 +37,55 @@ from pysilicon.simulation.simulation import Simulation
 # Shared helpers
 # ---------------------------------------------------------------------------
 
+def _make_mem(sim, layout, clk):
+    """A ``MemComponent`` backing *layout*'s ring region.
+
+    ``inline=False`` + one ``alloc`` of the region's word count places the
+    segment at byte 0; the slave then accepts the local addresses ``[0,
+    total_bytes)`` that both interconnects deliver.
+    """
+    total_words = layout.total_bytes // layout.word_bytes
+    mem = MemComponent(sim=sim, word_size=layout.mem_bw, inline=False, clk=clk)
+    mem.alloc(total_words)
+    return mem
+
+
 def _make_queue_direct(capacity, *, elem_words=1, mem_bw=32, base_addr=0x0):
-    """One AXIMMQueue over a DirectMMIF + MMMemory; returns (sim, queue)."""
+    """One AXIMMQueue over a DirectMMIF + MemComponent; returns (sim, queue)."""
     sim = Simulation()
     clk = Clock(freq=1.0)
-    mem = MMMemory(sim=sim, bitwidth=mem_bw)
-    master = MMIFMaster(sim=sim, bitwidth=mem_bw)
-    direct = DirectMMIF(sim=sim, clk=clk)
-    direct.bind("master", master)
-    direct.bind("slave", mem.slave_ep)
     layout = AXIMMQueueLayout(
         base_addr=base_addr, capacity=capacity, elem_words=elem_words, mem_bw=mem_bw
     )
+    mem = _make_mem(sim, layout, clk)
+    master = MMIFMaster(sim=sim, bitwidth=mem_bw)
+    direct = DirectMMIF(sim=sim, clk=clk)
+    direct.bind("master", master)
+    direct.bind("slave", mem.s_mm)
     return sim, AXIMMQueue(master=master, layout=layout)
+
+
+def _make_spsc_crossbar(sim, layout, clk, *, latency_init=0.0, latency_read_return=0.0):
+    """Producer/consumer AXIMMQueues over a 2-master crossbar + MemComponent.
+
+    Returns ``(producer_queue, consumer_queue)`` sharing one ring region.
+    """
+    mem = _make_mem(sim, layout, clk)
+    xbar = AXIMMCrossBarIF(
+        sim=sim, clk=clk,
+        nports_master=2, nports_slave=1, bitwidth=layout.mem_bw,
+        latency_init=latency_init, latency_read_return=latency_read_return,
+    )
+    prod_master = MMIFMaster(sim=sim, bitwidth=layout.mem_bw)
+    cons_master = MMIFMaster(sim=sim, bitwidth=layout.mem_bw)
+    xbar.bind("master_0", prod_master)
+    xbar.bind("master_1", cons_master)
+    xbar.bind("slave_0", mem.s_mm)
+    assign_address_ranges([mem.s_mm], [(layout.base_addr, layout.total_bytes)])
+    return (
+        AXIMMQueue(master=prod_master, layout=layout),
+        AXIMMQueue(master=cons_master, layout=layout),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -103,72 +144,6 @@ class TestAXIMMQueueLayout:
             AXIMMQueueLayout(base_addr=0, capacity=4, elem_words=0)
         with pytest.raises(ValueError, match="mem_bw"):
             AXIMMQueueLayout(base_addr=0, capacity=4, mem_bw=128)
-
-
-# ---------------------------------------------------------------------------
-# MMMemory
-# ---------------------------------------------------------------------------
-
-class TestMMMemory:
-    def _make(self, bitwidth=32):
-        sim = Simulation()
-        clk = Clock(freq=1.0)
-        mem = MMMemory(sim=sim, bitwidth=bitwidth)
-        master = MMIFMaster(sim=sim, bitwidth=bitwidth)
-        direct = DirectMMIF(sim=sim, clk=clk)
-        direct.bind("master", master)
-        direct.bind("slave", mem.slave_ep)
-        return sim, master, mem
-
-    def test_burst_round_trip(self):
-        sim, master, mem = self._make()
-        data = np.arange(6, dtype=np.uint32) + 100
-        result = []
-
-        def proc():
-            yield from master.write(data, 0x0)
-            got = yield from master.read(6, 0x0)
-            result.append(got)
-
-        sim.env.process(proc())
-        sim.env.run()
-        npt.assert_array_equal(result[0], data)
-
-    def test_byte_stride_keys(self):
-        """Words are stored at byte addresses spaced by bitwidth // 8."""
-        sim, master, mem = self._make(bitwidth=32)
-
-        def proc():
-            yield from master.write(np.array([7, 8, 9], dtype=np.uint32), 0x10)
-
-        sim.env.process(proc())
-        sim.env.run()
-        assert mem._mem[0x10] == 7
-        assert mem._mem[0x14] == 8
-        assert mem._mem[0x18] == 9
-
-    def test_unwritten_reads_zero(self):
-        sim, master, mem = self._make()
-        result = []
-
-        def proc():
-            got = yield from master.read(3, 0x200)
-            result.append(got)
-
-        sim.env.process(proc())
-        sim.env.run()
-        npt.assert_array_equal(result[0], [0, 0, 0])
-
-    def test_64bit_stride(self):
-        sim, master, mem = self._make(bitwidth=64)
-
-        def proc():
-            yield from master.write(np.array([1, 2], dtype=np.uint64), 0x0)
-
-        sim.env.process(proc())
-        sim.env.run()
-        assert mem._mem[0x0] == 1
-        assert mem._mem[0x8] == 2   # stride 8 bytes for 64-bit
 
 
 # ---------------------------------------------------------------------------
@@ -336,17 +311,6 @@ class TestAXIMMQueueCore:
 # ---------------------------------------------------------------------------
 
 class TestBlocking:
-    def test_write_too_large_raises(self):
-        sim, q = _make_queue_direct(capacity=8)   # usable depth 7
-
-        def proc():
-            yield from q.reset()
-            yield from q.write(np.arange(8, dtype=np.uint32))   # 8 > 7
-
-        sim.env.process(proc())
-        with pytest.raises(ValueError, match="never fit"):
-            sim.env.run()
-
     def test_blocking_write_get_single_process(self):
         sim, q = _make_queue_direct(capacity=4)   # usable depth 3
         result = {}
@@ -361,6 +325,20 @@ class TestBlocking:
         sim.env.run()
         npt.assert_array_equal(result["got"], [1, 2, 3])
 
+    def test_get_zero_returns_empty(self):
+        """get(0) returns an empty array without indexing an empty list."""
+        sim, q = _make_queue_direct(capacity=4)
+        result = {}
+
+        def proc():
+            yield from q.reset()
+            got = yield from q.get(0)
+            result["got"] = np.array(got)
+
+        sim.env.process(proc())
+        sim.env.run()
+        assert len(result["got"]) == 0
+
 
 class TestConcurrentSPSC:
     def test_producer_consumer_crossbar(self):
@@ -370,22 +348,9 @@ class TestConcurrentSPSC:
         clk = Clock(freq=1.0)
         N = 100
         layout = AXIMMQueueLayout(base_addr=0x1000, capacity=8, mem_bw=32)
-
-        mem = MMMemory(sim=sim, bitwidth=32)
-        xbar = AXIMMCrossBarIF(
-            sim=sim, clk=clk,
-            nports_master=2, nports_slave=1, bitwidth=32,
-            latency_init=1.0, latency_read_return=1.0,
+        pq, cq = _make_spsc_crossbar(
+            sim, layout, clk, latency_init=1.0, latency_read_return=1.0
         )
-        prod_master = MMIFMaster(sim=sim, bitwidth=32)
-        cons_master = MMIFMaster(sim=sim, bitwidth=32)
-        xbar.bind("master_0", prod_master)
-        xbar.bind("master_1", cons_master)
-        xbar.bind("slave_0", mem.slave_ep)
-        assign_address_ranges([mem.slave_ep], [(layout.base_addr, layout.total_bytes)])
-
-        pq = AXIMMQueue(master=prod_master, layout=layout)
-        cq = AXIMMQueue(master=cons_master, layout=layout)
 
         data = np.arange(N, dtype=np.uint32)
         result = {}
@@ -412,20 +377,7 @@ class TestConcurrentSPSC:
         clk = Clock(freq=1.0)
         N = 30
         layout = AXIMMQueueLayout(base_addr=0x0, capacity=6, mem_bw=32)
-
-        mem = MMMemory(sim=sim, bitwidth=32)
-        xbar = AXIMMCrossBarIF(
-            sim=sim, clk=clk, nports_master=2, nports_slave=1, bitwidth=32,
-        )
-        prod_master = MMIFMaster(sim=sim, bitwidth=32)
-        cons_master = MMIFMaster(sim=sim, bitwidth=32)
-        xbar.bind("master_0", prod_master)
-        xbar.bind("master_1", cons_master)
-        xbar.bind("slave_0", mem.slave_ep)
-        assign_address_ranges([mem.slave_ep], [(layout.base_addr, layout.total_bytes)])
-
-        pq = AXIMMQueue(master=prod_master, layout=layout)
-        cq = AXIMMQueue(master=cons_master, layout=layout)
+        pq, cq = _make_spsc_crossbar(sim, layout, clk)
         data = np.arange(N, dtype=np.uint32) + 1000
         result = {}
 
@@ -437,6 +389,32 @@ class TestConcurrentSPSC:
 
         def consumer():
             got = yield from cq.get(N, poll_interval=0.5)
+            result["got"] = np.array(got)
+
+        sim.env.process(producer())
+        sim.env.process(consumer())
+        sim.env.run()
+        npt.assert_array_equal(result["got"], data)
+
+    def test_write_larger_than_depth_streams(self):
+        """A single ``write`` of an array far larger than the usable depth
+        streams through, blocking as the consumer drains — the case the old
+        all-or-nothing ``write`` raised on (decision 8)."""
+        sim = Simulation()
+        clk = Clock(freq=1.0)
+        N = 1000
+        layout = AXIMMQueueLayout(base_addr=0x0, capacity=8, mem_bw=32)  # usable 7
+        pq, cq = _make_spsc_crossbar(sim, layout, clk)
+        data = np.arange(N, dtype=np.uint32)
+        result = {}
+
+        def producer():
+            yield from pq.reset()
+            # One write call for the whole 1000-word array (>> usable depth 7).
+            yield from pq.write(data, poll_interval=1.0)
+
+        def consumer():
+            got = yield from cq.get(N, poll_interval=1.0)
             result["got"] = np.array(got)
 
         sim.env.process(producer())
