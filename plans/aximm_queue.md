@@ -578,8 +578,17 @@ it, assert it passes (the pattern other example tests use).
 - **MPSC/MPMC** needs an atomic pointer update or a lock register — AXI-MM here
   has no atomics. Would require a new interconnect primitive (e.g. an
   exclusive-access or compare-and-swap slave op).
-- **HLS codegen** for the ring (generate `m_axi` `write`/`get`). Blocked on AXI-MM
-  codegen existing at all — see the AXI-MM-codegen gap noted in the build
-  subsystem. Likely lands as part of a broader "AXI-MM HwComponent port" effort.
+- **HLS codegen** for the ring (generate `m_axi` `write`/`get`). **Unblocked:**
+  m_axi kernel **and** testbench codegen now exist and are cosim-proven — see the
+  `examples/increment/` increment-buffer toy (the `IncrAccel` `HwComponent` →
+  generated `incr.cpp`/`incr_tb.cpp`, validated through Vitis C-synth + RTL
+  co-sim + AXI-MM burst extraction). The pieces to build the ring on:
+  `MMArrayReadStmt`/`MMArrayWriteStmt` in the synthesizable statement IR
+  (`hwcodegen.py`/`hwstmt.py`), the m_axi paths in `hwgen.py` (`_discover_mm_masters`,
+  `kernel_signature` m_axi pragma + local-buffer sizing, `_emit_mm_array_read/write`
+  lowering to `array_utils`), and the TB emitters (`MemComponent`→array+`MemMgr`,
+  `alloc_array`/`read_array`, mem-pointer `KernelCallStmt`). The ring's `write`/`get`
+  generate on top of these. The `aximm_codegen` plan that delivered this has been
+  retired (all phases done).
 - **Interrupt/doorbell** instead of polling for the blocking path — would let a
   consumer sleep until a doorbell write rather than poll `tail`.
