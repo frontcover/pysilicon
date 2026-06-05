@@ -47,7 +47,6 @@ import os
 import sys
 import shutil
 import subprocess
-import re
 import argparse
 from pathlib import Path
 
@@ -106,7 +105,7 @@ def run_batch(batch_path):
 def copy_vcd(sim_dir, base_dir, component_path, output_vcd):
     src = os.path.join(sim_dir, 'dump.vcd')
     if not os.path.exists(src):
-        print("⚠️ dump.vcd not found.")
+        print("WARNING: dump.vcd not found.")
         return
 
     vcd_dir = os.path.join(base_dir, 'vcd')
@@ -114,7 +113,7 @@ def copy_vcd(sim_dir, base_dir, component_path, output_vcd):
 
     dst = os.path.join(vcd_dir, output_vcd)
     shutil.copyfile(src, dst)
-    print(f"✅ VCD copied to {dst}")
+    print(f"VCD copied to {dst}")
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Process VCD dump options.")
@@ -262,7 +261,7 @@ def main():
 
     # Check if OS is Windows.  If not declare error and exit.
     if os.name != 'nt':
-        print("❌ This script only works on Windows.  I will try to add a linux version later.")
+        print("ERROR: This script only works on Windows.  I will try to add a linux version later.")
         sys.exit(1)
 
     # Get arguments
@@ -283,10 +282,10 @@ def main():
     if solution_name is None:
         subdirs = [d for d in os.listdir(component_path) if os.path.isdir(os.path.join(component_path, d))]
         if len(subdirs) == 0:
-            print(f"❌ No subdirectories found in {component_path}. Please specify a solution name with --soln.")
+            print(f"ERROR: No subdirectories found in {component_path}. Please specify a solution name with --soln.")
             sys.exit(1)
         elif len(subdirs) > 1:
-            print(f"❌ Multiple subdirectories found in {component_path}. Please specify a solution name with --soln.")
+            print(f"ERROR: Multiple subdirectories found in {component_path}. Please specify a solution name with --soln.")
             print("Subdirectories:")
             for d in subdirs:
                 print(f"  - {d}")
@@ -307,7 +306,7 @@ def main():
             found_sim_dir = True
             break
     if not found_sim_dir:
-        print("❌ No valid simulation directory found. Please check your solution structure.")
+        print("ERROR: No valid simulation directory found. Please check your solution structure.")
         print("Checked the following directories: ")
         for d in sim_dir_candidates:
             print(f"  - {d}")

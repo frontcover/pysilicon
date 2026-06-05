@@ -203,9 +203,16 @@ class MMIFMaster(InterfaceEndpoint):
         element_type: type,
         addr: int,
         count: int | None = None,
+        max_count: int | None = None,
         word_bw: int = 32,
     ) -> ProcessGen[None]:
         """Serialize *elements* and write them to *addr*.
+
+        *max_count* is a codegen-only compile-time bound: it sizes the static
+        local buffer the generated kernel writes from (``static <ctype>
+        buf[max_count]``).  Ignored in simulation; required for an
+        m_axi buffered read at codegen time — the generated kernel fails loudly
+        without it (each buffer declares its own bound; there is no fallback).
 
         Accepts a ``np.ndarray`` (fast path for scalar ``FloatField`` /
         ``IntField`` types) or an iterable of schema instances / raw values.
@@ -240,9 +247,16 @@ class MMIFMaster(InterfaceEndpoint):
         element_type: type,
         count: int,
         addr: int,
+        max_count: int | None = None,
         word_bw: int = 32,
     ) -> ProcessGen[np.ndarray | list]:
         """Read and deserialize *count* elements from *addr*.
+
+        *max_count* is a codegen-only compile-time bound: it sizes the static
+        local buffer the generated kernel reads into (``static <ctype>
+        buf[max_count]``).  Ignored in simulation; required for an
+        m_axi buffered read at codegen time — the generated kernel fails loudly
+        without it (each buffer declares its own bound; there is no fallback).
 
         Returns a ``np.ndarray`` for scalar ``FloatField`` / ``IntField`` types,
         or a ``list`` of deserialized instances for composite types.

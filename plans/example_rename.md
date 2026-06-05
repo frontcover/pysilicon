@@ -11,9 +11,10 @@ like the rest. Increment is retained as a minimal codegen regression, not a
 headline.
 
 This is an **umbrella plan**. The meaty sub-effort — regenerating the histogram
-kernel/TB from a Python `HistAccel` HwComponent — has its own detailed plan:
-[plans/histogram_codegen.md](histogram_codegen.md). This plan owns the renames +
-the docs restructure + sequencing.
+kernel/TB from a Python `HistAccel` HwComponent — is **done** (cosim-validated,
+`gen/` canonical); the design rationale lives in
+`examples/shared_mem/CODEGEN_NOTES.md` and the `shared-mem-histogram-codegen`
+branch history. This plan owns the renames + the docs restructure + sequencing.
 
 ## The five examples (the progression)
 
@@ -22,16 +23,19 @@ the docs restructure + sequencing.
 | 1 | simple function | `examples/regmap/` (was `regmap_simp_fun`) | register-mapped control (AXI4-Lite) | rename only |
 | 2 | moving-average filter | `examples/pure_stream/` | streaming dataflow — no packet boundary / no TLAST / no control | **reserved (TBD)** |
 | 3 | polynomial | `examples/stream_inband/` (was `poly`) | packetization (TLAST) + in-band control on the stream | rename only |
-| 4 | **histogram** | `examples/shared_mem/` (was `histogram`) | data in memory (AXI-MM), control over a dedicated stream | rename **+ codegen upgrade** ([histogram_codegen.md](histogram_codegen.md)) |
+| 4 | **histogram** | `examples/shared_mem/` (was `histogram`) | data in memory (AXI-MM), control over a dedicated stream | rename **+ codegen upgrade** — ✅ done |
 | 5 | vector unit | `examples/mem_queue/` | control *also* in memory, via a descriptor queue | **reserved (TBD)** |
 
-**Retained, not headline:** `examples/increment/` stays in place as the *minimal
-m_axi codegen regression* (the smallest vehicle that proves the generated kernel
-path). It is referenced from the index as a "minimal reference," not as one of
-the five pattern examples.
+**Increment dropped (update):** `examples/increment/` was the scaffolding toy
+that de-risked the m_axi codegen path. With `shared_mem` (histogram) now
+codegen-driven, it strictly subsumes increment's coverage (multi-buffer ⊇
+single-buffer, float+uint ⊇ uint-only, validation ⊇ trivial-status), and the
+clean multi-buffer lowering has no single-`max_n` codepath to keep increment
+working — so increment was removed during the shared_mem codegen effort. The
+`shared_mem` example is the m_axi codegen reference.
 
 **Settled by review (do not re-litigate):**
-- shared_mem = histogram, codegen-driven; increment kept as regression.
+- shared_mem = histogram, codegen-driven; increment dropped (subsumed).
 - The histogram codegen upgrade IS in scope for this effort.
 - `pure_stream` and `mem_queue` are **reserved slots** — listed as planned, not
   built now. `aximm_queue` stays where it is (`examples/interface/aximm_queue_demo.py`,
@@ -55,8 +59,7 @@ the five pattern examples.
    Python timing model.
 
 Per-example coverage markers keep it honest: regmap / stream_inband / shared_mem
-= all five; increment = all five (minimal); mem_queue = stages 1–2 (codegen TBD);
-pure_stream = planned.
+= all five; mem_queue = stages 1–2 (codegen TBD); pure_stream = planned.
 
 ## Scope
 
@@ -101,19 +104,16 @@ paths, doc front-matter + links.
 `timing_analysis.py`, `view_timing.ipynb`, and `test_dataschema_poly.py` paths.
 **Commit:** `examples: rename poly → stream_inband (in-band stream control pattern)`
 
-### Phase 3: `histogram` → `shared_mem` + codegen upgrade
-`git mv examples/histogram examples/shared_mem` (+ doc folder, new if absent);
-then execute [plans/histogram_codegen.md](histogram_codegen.md) to make it
-codegen-driven (build `HistAccel`, generate kernel/TB, validate against the
-existing hand-written `hist.cpp`/`hist_tb.cpp` + cosim/burst harness). Multiple
-commits per that plan.
-**Commits:** per histogram_codegen.md, prefixed `shared_mem:`
+### Phase 3: `histogram` → `shared_mem` + codegen upgrade ✅ done
+`shared_mem` = codegen-driven histogram; cosim-validated, multi-buffer m_axi,
+`gen/` canonical. Done — see git history / the `shared-mem-histogram-codegen`
+branch.
+**Commits:** prefixed `shared_mem:`
 
 ### Phase 4: Rewrite `docs/examples/index.md`
 Five examples in progression order with "new concept" one-liners + coverage
 markers; the general five-stage flow statement; reserve `pure_stream` and
-`mem_queue` as planned; note `increment` as the minimal reference; fix the
-example-section nav to sort in teaching order.
+`mem_queue` as planned; fix the example-section nav to sort in teaching order.
 **Commit:** `docs: example index — five-pattern progression + general PySilicon flow`
 
 ## Future / out of scope (capture, don't build)

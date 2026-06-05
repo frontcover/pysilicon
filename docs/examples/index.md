@@ -43,14 +43,9 @@ base case.
 | 1 | [`regmap`](./regmap/) | simple function | register-mapped control (AXI4-Lite) | stages 1–5 | available |
 | 2 | `pure_stream` | moving-average filter | streaming dataflow — no packet boundary, no TLAST, no control | planned | reserved (not built yet) |
 | 3 | [`stream_inband`](./stream_inband/) | polynomial | packetization (TLAST) + in-band control on the stream | stages 1–5 | available |
-| 4 | `shared_mem` | histogram | data in memory (AXI-MM), control over a dedicated stream | stages 1–5 | dir still `examples/histogram/`; codegen upgrade pending |
+| 4 | [`shared_mem`](./shared_mem/) | histogram | data in memory (AXI-MM), control over a dedicated stream | stages 1–5 | available; codegen upgrade in progress |
 | 5 | `mem_queue` | vector unit | control *also* in memory, via a descriptor queue | stages 1–2 (codegen TBD) | reserved (not built yet) |
 
-## Minimal codegen reference
-
-[`examples/increment/`](https://github.com/sdrangan/pysilicon/tree/main/examples/increment)
-is **not** one of the five teaching patterns — it is the *minimal* AXI-MM
-(`m_axi`) codegen regression: the smallest vehicle (increment a buffer in place)
-that exercises the full generated-kernel path, stages 1–5, for memory-mapped
-access. Reach for it when you want the smallest working reference for `m_axi`
-codegen rather than a didactic walkthrough.
+The shared-memory (`shared_mem`) example is the reference for AXI-MM (`m_axi`)
+codegen — multiple buffers and element types read/written over one bundle, with
+the kernel and testbench generated from the Python component.

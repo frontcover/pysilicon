@@ -2,7 +2,7 @@
 Curated schema definitions from the histogram accelerator example.
 
 This file contains the data schemas for the histogram accelerator,
-extracted from examples/histogram/hist_demo.py for use as teaching examples.
+extracted from examples/shared_mem/hist_demo.py for use as teaching examples.
 """
 from __future__ import annotations
 

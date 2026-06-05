@@ -121,9 +121,12 @@ examples/stream_inband/results
 # Generated VCD output (use tests/fixtures/poly/timing/ for committed fixtures)
 examples/stream_inband/vcd/
 
-examples/histogram/include/
-examples/histogram/pysilicon_hist_proj/
-examples/histogram/logs/
+examples/shared_mem/include/
+examples/shared_mem/pysilicon_hist_proj/
+examples/shared_mem/logs/
+examples/shared_mem/gen/
+examples/shared_mem/data/
+examples/shared_mem/results/
 
 examples/conv2d/include/
 examples/conv2d/pysilicon_conv2d_proj/

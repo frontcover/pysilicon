@@ -7,17 +7,20 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
-from examples.histogram import hist_demo
-from examples.histogram.hist_demo import HistError, HistSimResult, HistTest
+from examples.shared_mem import hist_demo
+from examples.shared_mem.hist_demo import HistError, HistSimResult, HistTest
 from pysilicon.toolchain import toolchain
 
 
-HIST_EXAMPLE_DIR = Path(__file__).resolve().parents[2] / "examples" / "histogram"
+HIST_EXAMPLE_DIR = Path(__file__).resolve().parents[2] / "examples" / "shared_mem"
 
 
 def _copy_hist_vitis_resources(dst_dir: Path) -> None:
-    """Copy the canonical histogram Vitis sources into a temporary test directory."""
-    for name in ("hist.cpp", "hist.hpp", "hist_tb.cpp", "run.tcl"):
+    """Copy the histogram Vitis driver + hand-written datapath hooks into a
+    temporary test directory.  The kernel and testbench C++ are generated from
+    hist.py (HistAccel / HistTBHls) into gen/, not copied."""
+    for name in ("run.tcl", "hist_validate_impl.cpp", "hist_compute_impl.cpp",
+                 "hist_respond_impl.tpp"):
         shutil.copy(HIST_EXAMPLE_DIR / name, dst_dir / name)
 
 
@@ -66,10 +69,10 @@ def test_hist_test_gen_test_data_initializes_state_before_simulate() -> None:
 
 
 def test_hist_kernel_only_scans_programmed_bin_edges() -> None:
-    hist_cpp = (HIST_EXAMPLE_DIR / "hist.cpp").read_text(encoding="utf-8")
+    compute_hook = (HIST_EXAMPLE_DIR / "hist_compute_impl.cpp").read_text(encoding="utf-8")
 
-    assert "for (int b = 0; b < nbins - 1; ++b)" in hist_cpp
-    assert "for (int b = 0; b < max_nbins; b++)" not in hist_cpp
+    assert "for (int b = 0; b < nbins - 1; ++b)" in compute_hook
+    assert "for (int b = 0; b < max_nbins; b++)" not in compute_hook
 
 
 def test_hist_test_vitis_stage_range_passes_tcl_args(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

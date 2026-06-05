@@ -9,7 +9,7 @@ has_children: false
 
 The VcdParser class has specific methods for identifying AXI4 memory-mapped signals in a VCD, plotting those signals on a timing diagram, and extracting accepted read and write bursts.
 
-This page uses the [histogram example](../../examples/histogram/) as the reference design. In that example, the `hist` accelerator uses an AXI4 memory-mapped master interface named `m_axi_gmem` to read input samples and bin edges from memory and to write histogram counts back to memory.
+This page uses the [histogram example](../../examples/shared_mem/) as the reference design. In that example, the `hist` accelerator uses an AXI4 memory-mapped master interface named `m_axi_gmem` to read input samples and bin edges from memory and to write histogram counts back to memory.
 
 ## Loading the AXI4 Memory-Mapped Signals
 

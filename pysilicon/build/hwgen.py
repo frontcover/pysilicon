@@ -133,13 +133,43 @@ def _emit_case(stmt: CaseStmt, ctx: CodegenCtx) -> str:
 
 
 def _emit_expr(expr, ctx: CodegenCtx) -> str:
+    from pysilicon.hw.hw_component import HwParamValue
     if isinstance(expr, HwVar):
         return expr.name
     if isinstance(expr, Ref):
         return expr.var.name
     if isinstance(expr, FieldRef):
         return f"{expr.var.name}.{expr.field}"
+    # A HwParam read (e.g. ``self.max_ndata``) lowers to its named C++ constant
+    # (emitted in the kernel header), not its inlined value — must precede the
+    # int branch in _emit_literal since HwParamValue is an int subclass.
+    if isinstance(expr, HwParamValue):
+        return expr.param_name
+    import ast as _ast
+    if isinstance(expr, _ast.AST):
+        return _emit_ast_expr(expr, ctx)
     return _emit_literal(expr)
+
+
+def _emit_ast_expr(node, ctx: CodegenCtx) -> str:
+    """Lower a small AST sub-expression (an unresolved call arg) to C++.
+
+    Handles ``cmd.field`` attribute access, integer constants, and ``+``/``-``/
+    ``*`` arithmetic (e.g. the ``nbins - 1`` edge count)."""
+    import ast as _ast
+    if isinstance(node, _ast.Attribute) and isinstance(node.value, _ast.Name):
+        return f"{node.value.id}.{node.attr}"
+    if isinstance(node, _ast.Name):
+        return node.id
+    if isinstance(node, _ast.Constant):
+        return _emit_literal(node.value)
+    if isinstance(node, _ast.BinOp):
+        op = {_ast.Add: '+', _ast.Sub: '-', _ast.Mult: '*'}.get(type(node.op))
+        if op is not None:
+            return (f"{_emit_ast_expr(node.left, ctx)} {op} "
+                    f"{_emit_ast_expr(node.right, ctx)}")
+    from pysilicon.build.hwcodegen import SynthesisError
+    raise SynthesisError(f"Unsupported expression in m_axi argument: {_ast.dump(node)}")
 
 
 def _emit_stream_get(stmt: StreamGetStmt, ctx: CodegenCtx) -> str:
@@ -193,16 +223,34 @@ def _mm_buffer_max(comp) -> int:
     return int(val)
 
 
+def _mm_buffer_bound(stmt, buf: str, ctx: CodegenCtx) -> str:
+    """Compile-time size of the static local buffer an m_axi read fills.
+
+    Comes from the read's explicit ``max_count=`` argument (decisions 3 & 5):
+    each buffer declares its own bound, so a kernel can read several buffers of
+    different sizes into the same bundle.  Fail loudly when it is missing rather
+    than emit an unsized array — there is no global ``max_n`` fallback.
+    """
+    if stmt.max_expr is None:
+        from pysilicon.build.hwcodegen import SynthesisError
+        raise SynthesisError(
+            f"m_axi read into '{buf}' has no compile-time buffer bound; pass an "
+            f"explicit max_count= (e.g. read_array(ElemT, n, addr, "
+            f"max_count=self.max_ndata))."
+        )
+    return _emit_expr(stmt.max_expr, ctx)
+
+
 def _emit_mm_array_read(stmt: MMArrayReadStmt, ctx: CodegenCtx) -> str:
     """``buf = port.read_array(ElemT, count, addr)`` →
     a static local buffer + an ``<elem>_array_utils::read_array`` burst
-    (mirrors examples/histogram/hist.cpp)."""
+    (mirrors the generated histogram kernel)."""
     port_name = _endpoint_name(stmt.port, ctx)
     bw = int(stmt.port.bitwidth)
     ns = _array_utils_ns(stmt.elem_type)
     elem_cpp = cpp_type(stmt.elem_type)
     buf = stmt.target_var.name
-    bufmax = _mm_buffer_max(ctx.comp)
+    bufmax = _mm_buffer_bound(stmt, buf, ctx)
     count = _emit_expr(stmt.count_expr, ctx)
     addr = _emit_expr(stmt.addr_expr, ctx)
     pad = ctx.pad()
@@ -229,6 +277,52 @@ def _emit_mm_array_write(stmt: MMArrayWriteStmt, ctx: CodegenCtx) -> str:
         f"{src}, {port_name} + memmgr::byte_addr_to_word_index<{bw}>({addr}), "
         f"{count});"
     )
+
+
+def _collect_mm_stmts(tree: HwStmt) -> list:
+    """All ``MMArrayRead/WriteStmt`` reachable from ``tree``, in order."""
+    out: list = []
+
+    def walk(node: HwStmt) -> None:
+        if isinstance(node, (MMArrayReadStmt, MMArrayWriteStmt)):
+            out.append(node)
+        if isinstance(node, SeqStmt):
+            for s in node.stmts:
+                walk(s)
+        elif isinstance(node, WhileStmt):
+            walk(node.body)
+        elif isinstance(node, CaseStmt):
+            walk(node.if_true)
+            if node.if_false is not None:
+                walk(node.if_false)
+
+    walk(tree)
+    return out
+
+
+def _kernel_hwparam_constants(tree: HwStmt) -> dict[str, int]:
+    """Ordered ``{param_name: value}`` for every HwParam read in ``tree`` (e.g.
+    the ``max_count`` bounds), emitted as ``static const int`` in the header so
+    the generated buffers / pragmas reference named constants, not inlined ints.
+    """
+    from pysilicon.hw.hw_component import HwParamValue
+    consts: dict[str, int] = {}
+    for s in _collect_mm_stmts(tree):
+        mx = s.max_expr
+        if isinstance(mx, HwParamValue):
+            consts.setdefault(mx.param_name, int(mx))
+    return consts
+
+
+def _mm_port_depth(port_ep, tree: HwStmt, ctx: CodegenCtx) -> str:
+    """C++ expression for an m_axi port's ``depth`` — the sum of the buffer
+    bounds of every array op on that port (the total region the master sees)."""
+    maxes = [
+        _emit_expr(s.max_expr, ctx)
+        for s in _collect_mm_stmts(tree)
+        if s.port is port_ep and s.max_expr is not None
+    ]
+    return " + ".join(maxes) if maxes else "1"
 
 
 def _discover_mm_masters(comp) -> list[tuple[str, object]]:
@@ -328,6 +422,17 @@ def _emit_function_call(stmt: FunctionStmt, ctx: CodegenCtx) -> str:
     if not stmt.outputs:
         return f"{pad}{qualified}({arg_str});"
     out = stmt.outputs[0]
+    # An array-typed output (a hook that "returns" a buffer) lowers to a static
+    # local buffer the hook fills in place via an appended out-parameter (HLS
+    # can't return arrays by value) — paired with the void+out-param signature.
+    if (isinstance(out.typ, type) and issubclass(out.typ, DataArray)
+            and getattr(out.typ, 'cpp_storage', 'struct') == 'raw'):
+        elem_cpp = cpp_type(out.typ.element_type)
+        size = out.typ._declared_count()
+        return (
+            f"{pad}static {elem_cpp} {out.name}[{size}];\n"
+            f"{pad}{qualified}({arg_str}, {out.name});"
+        )
     cpp_t = (
         out.typ.cpp_class_name()
         if hasattr(out.typ, 'cpp_class_name')
@@ -420,6 +525,13 @@ def cpp_type(typ) -> str:
     # same as EnumField. The plan explicitly bounds enums at 8 bits for v1.
     if isinstance(typ, type) and issubclass(typ, IntEnum):
         return "ap_uint<8>"
+    # Plain Python scalars in hook annotations (e.g. a loop-count ``int``).
+    if typ is int:
+        return "int"
+    if typ is bool:
+        return "bool"
+    if typ is float:
+        return "float"
     raise RuntimeError(f"cpp_type: cannot translate {typ!r}")
 
 
@@ -539,14 +651,16 @@ def kernel_signature(comp, variant_suffix: str = "") -> str:
             )
     # m_axi master ports — appended after streams + regmap fields, in canonical
     # signature order (streams, regmap, m_axi).  Each maps to an ap_uint<bw>
-    # pointer + an m_axi pragma (mirrors examples/histogram/hist.cpp:9).
+    # pointer + an m_axi pragma (mirrors the generated histogram kernel).
     mm_masters = _discover_mm_masters(comp)
     for attr, ep in mm_masters:
         bw = int(ep.bitwidth)
         arg_lines.append(f"    ap_uint<{bw}>* {attr}")
+        # depth is the total region the master sees — a named header constant
+        # summing this port's buffer bounds (see header_to_cpp).
         pragma_lines.append(
             f"#pragma HLS INTERFACE m_axi port={attr} offset=slave "
-            f"bundle=gmem depth={_mm_buffer_max(comp)}"
+            f"bundle=gmem depth={attr}_depth"
         )
     # Control protocol on the return port: s_axilite when a regmap drives
     # control (poly), else ap_ctrl_hs for stream-controlled kernels (histogram /
@@ -618,7 +732,17 @@ def hook_signature(
             gen_args = typing.get_args(ret)
             if len(gen_args) == 3:
                 ret = gen_args[2]
-        ret_cpp = "void" if ret is type(None) else cpp_type(ret)
+        if ret is type(None):
+            ret_cpp = "void"
+        elif (isinstance(ret, type) and issubclass(ret, DataArray)
+                and getattr(ret, 'cpp_storage', 'struct') == 'raw'):
+            # An array return can't be returned by value in HLS — lower it to a
+            # void function with an appended out-parameter the kernel fills.
+            elem_cpp = cpp_type(ret.element_type)
+            args.append(("out", f"{elem_cpp} out[{ret._declared_count()}]"))
+            ret_cpp = "void"
+        else:
+            ret_cpp = cpp_type(ret)
     return ret_cpp, args
 
 
@@ -770,11 +894,16 @@ def _collect_schemas(tree: HwStmt, comp) -> list[type]:
     from pysilicon.hw.interface import StreamIFMaster, StreamIFSlave
 
     def _has_header(typ) -> bool:
-        return (
-            isinstance(typ, type)
-            and issubclass(typ, DataSchema)
-            and not issubclass(typ, (IntField, FloatField))
-        )
+        if not (isinstance(typ, type) and issubclass(typ, DataSchema)):
+            return False
+        if issubclass(typ, (IntField, FloatField)):
+            return False
+        # A typing-only buffer DataArray (used purely to type a hook's array
+        # param/return as ``elem[n]``) has no schema header and contributes no
+        # includes — its array-utils come from the m_axi op that fills it.
+        if getattr(typ, 'cpp_typing_only', False):
+            return False
+        return True
 
     schemas: dict[str, type] = {}
 
@@ -860,7 +989,10 @@ def _collect_hooks_with_params(tree: HwStmt) -> list[tuple[object, list[str]]]:
 
     def visit(node):
         if isinstance(node, FunctionStmt):
-            key = id(node.method)
+            # Dedup by the underlying function, not the bound-method object —
+            # each ``self.hook`` access is a fresh bound method (distinct id), so
+            # a hook called at several sites would otherwise appear repeatedly.
+            key = id(getattr(node.method, '__func__', node.method))
             tparams = hook_template_params(node)
             if key not in seen:
                 seen[key] = (node.method, tparams)
@@ -981,7 +1113,8 @@ def header_to_cpp(
     # m_axi support: the memory manager (byte→word addressing) + the
     # array-utils header for each element type read/written over m_axi
     # (deduped against the utility includes already emitted above).
-    if _discover_mm_masters(default_comp):
+    mm_masters = _discover_mm_masters(default_comp)
+    if mm_masters:
         from pysilicon.hw.arrayutils import _array_utils_include_path
         for inc in ['#include "include/memmgr.hpp"'] + [
             f'#include "{_array_utils_include_path(et)}"'
@@ -989,6 +1122,36 @@ def header_to_cpp(
         ]:
             if inc not in lines:
                 lines.append(inc)
+        # Compile-time bounds: the HwParam buffer maxes read in the kernel, then
+        # each m_axi port's depth = the sum of its buffer bounds.
+        lines.append('')
+        for pname, pval in _kernel_hwparam_constants(tree).items():
+            lines.append(f'static const int {pname} = {pval};')
+        depth_ctx = CodegenCtx(comp=default_comp)
+        for attr, ep in mm_masters:
+            lines.append(
+                f'static const int {attr}_depth = {_mm_port_depth(ep, tree, depth_ctx)};'
+            )
+        # Total m_axi region + interface widths + word typedefs — not used by the
+        # kernel (which inlines its widths), but make the header a drop-in for a
+        # testbench that drives the kernel (it sizes the flat memory array and the
+        # axis/mem word types from these).
+        all_maxes = [
+            _emit_expr(s.max_expr, depth_ctx)
+            for s in _collect_mm_stmts(tree) if s.max_expr is not None
+        ]
+        if all_maxes:
+            lines.append(f'static const int max_mem_words = {" + ".join(all_maxes)};')
+        streams = _discover_stream_endpoints(default_comp)
+        if streams:
+            lines.append(f'static const int stream_dwidth = {int(streams[0][1].bitwidth)};')
+        lines.append(f'static const int mem_dwidth = {int(mm_masters[0][1].bitwidth)};')
+        mem_awidth = getattr(default_comp, 'mem_awidth', None)
+        if mem_awidth is not None:
+            lines.append(f'static const int mem_awidth = {int(mem_awidth)};')
+        if streams:
+            lines.append('using axis_word_t = streamutils::axi4s_word<stream_dwidth>;')
+        lines.append('using mem_word_t = ap_uint<mem_dwidth>;')
 
     for suffix, variant_comp in variants:
         lines.append('')
@@ -1056,7 +1219,7 @@ def kernel_to_cpp(comp_class) -> str:
     header_name = f"{cpp_kernel_name(comp_class)}.hpp"
     parts: list[str] = [f'#include "{header_name}"', ""]
     # byte_addr_to_word_index lives in pysilicon::memmgr; alias it like
-    # examples/histogram/hist.cpp when the kernel has m_axi masters.
+    # the generated histogram kernel when the kernel has m_axi masters.
     default_comp = next(iter(_iter_variants(comp_class)))[1]
     if _discover_mm_masters(default_comp):
         parts.append("namespace memmgr = pysilicon::memmgr;")
@@ -1278,9 +1441,17 @@ def _emit_mem_alloc_array(stmt: MemAllocArrayStmt, ctx: TbCodegenCtx) -> str:
     ns = _array_utils_ns(stmt.elem_type)
     count = _emit_int_expr(stmt.count, ctx)
     widx = f"_{stmt.target_local}_{stmt.target_field}_widx"
+    nwords = f"_{stmt.target_local}_{stmt.target_field}_nwords"
     mem = stmt.mem_local
+    # Clamp the allocation to >= 1 word.  A 0-word region is meaningless and
+    # MemMgr::alloc rejects it, but a runtime count can legitimately be 0 — the
+    # nbins==1 (zero-edge) buffer, or a validation-failure case (ndata<=0 data,
+    # nbins<=0 counts).  This mirrors the SimPy HistController, which allocs
+    # max(nedges, 1) so such cases still get a valid address; the kernel then
+    # reads/writes the runtime count (0 = a no-op burst).
     return (
-        f"{pad}const int {widx} = {mem}_mgr.alloc({ns}::get_nwords<{bw}>({count}));\n"
+        f"{pad}const int {nwords} = {ns}::get_nwords<{bw}>({count});\n"
+        f"{pad}const int {widx} = {mem}_mgr.alloc({nwords} > 0 ? {nwords} : 1);\n"
         f"{pad}{stmt.target_local}.{stmt.target_field} = {widx} * ({bw} / 8);\n"
         f"{pad}{ns}::write_array<{bw}>({stmt.src_local}, {mem} + {widx}, {count});"
     )
@@ -1544,23 +1715,12 @@ def _emit_str_expr(node, ctx: TbCodegenCtx) -> str:
 def _emit_int_expr(node, ctx: TbCodegenCtx) -> str:
     """Emit a TB-mode integer/count expression as C++.
 
-    Handles literals, name references, and ``<schema_local>.<field>``
-    chains so users can write ``count=data_hdr.nsamp`` directly.
+    Delegates to the kernel-side expression lowerer (:func:`_emit_ast_expr`) so a
+    count such as ``nbins - 1`` lowers **identically** in the kernel and the
+    testbench — a single source of truth that keeps them from diverging. Handles
+    literals, names, ``local.field`` chains, and ``+``/``-``/``*`` arithmetic.
     """
-    import ast as _ast
-    if isinstance(node, _ast.Constant) and isinstance(node.value, int):
-        return str(node.value)
-    if isinstance(node, _ast.Name):
-        return node.id
-    if isinstance(node, _ast.Attribute) and isinstance(node.value, _ast.Name):
-        # `schema_local.field` — the C++ struct field of the bound local.
-        return f"{node.value.id}.{node.attr}"
-    if isinstance(node, _ast.Attribute) and isinstance(node.value, _ast.Name) \
-            and node.value.id == 'self':
-        return node.attr
-    raise RuntimeError(
-        f"Cannot lower TB int expression: {_ast.dump(node)}"
-    )
+    return _emit_ast_expr(node, ctx)
 
 
 def _array_utils_ns(elem_type) -> str:
