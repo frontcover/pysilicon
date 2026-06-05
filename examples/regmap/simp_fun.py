@@ -17,7 +17,7 @@ from pysilicon.simulation.simobj import ProcessGen, SimObj
 from pysilicon.simulation.simulation import Simulation
 
 
-S32 = IntField.specialize(bitwidth=32, signed=True)
+Int32 = IntField.specialize(bitwidth=32, signed=True)
 
 DEFAULT_VECTOR = {"x": 5, "a": 3, "b": -4}
 DEFAULT_CASES = [
@@ -72,10 +72,10 @@ class SimpFunComponent(HwComponent):
         # VitisRegMap auto-prepends ap_start (W1S) at 0x00 and ap_done (R)
         # at 0x04; the user only declares the application registers below.
         self.regmap = VitisRegMap({
-            "x": RegField(S32, RegAccess.RW, description="Input operand"),
-            "a": RegField(S32, RegAccess.RW, description="Multiply coefficient"),
-            "b": RegField(S32, RegAccess.RW, description="Bias term"),
-            "y": RegField(S32, RegAccess.R, description="relu(a*x + b)"),
+            "x": RegField(Int32, RegAccess.RW, description="Input operand"),
+            "a": RegField(Int32, RegAccess.RW, description="Multiply coefficient"),
+            "b": RegField(Int32, RegAccess.RW, description="Bias term"),
+            "y": RegField(Int32, RegAccess.R, description="relu(a*x + b)"),
         })
         self.regmap.set("y", 0)
         self.s_lite = VitisRegMapMMIFSlave(
@@ -104,8 +104,8 @@ class SimpFunComponent(HwComponent):
         self._log("kernel_done", 1)
 
     @synthesizable
-    def compute(self, x: S32, a: S32, b: S32) -> S32:
-        return S32(relu_affine(int(x.val), int(a.val), int(b.val)))
+    def compute(self, x: Int32, a: Int32, b: Int32) -> Int32:
+        return Int32(relu_affine(int(x.val), int(a.val), int(b.val)))
 
 
 @dataclass(kw_only=True)

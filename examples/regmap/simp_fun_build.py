@@ -18,7 +18,7 @@ from pysilicon.toolchain import toolchain
 try:
     from examples.regmap.simp_fun import (
         DEFAULT_VECTOR,
-        S32,
+        Int32,
         SimpFunCase,
         SimpFunComponent,
         SimpFunTBHls,
@@ -29,7 +29,7 @@ try:
 except ModuleNotFoundError:
     from simp_fun import (  # type: ignore[no-redef]
         DEFAULT_VECTOR,
-        S32,
+        Int32,
         SimpFunCase,
         SimpFunComponent,
         SimpFunTBHls,
@@ -64,9 +64,9 @@ class BuildInputsStep(BuildStep):
         x_path = out_dir / "x.bin"
         a_path = out_dir / "a.bin"
         b_path = out_dir / "b.bin"
-        S32(int(x)).write_uint32_file(x_path)
-        S32(int(a)).write_uint32_file(a_path)
-        S32(int(b)).write_uint32_file(b_path)
+        Int32(int(x)).write_uint32_file(x_path)
+        Int32(int(a)).write_uint32_file(a_path)
+        Int32(int(b)).write_uint32_file(b_path)
         return {"x_in": x_path, "a_in": a_path, "b_in": b_path, "data_dir": out_dir}
 
 
@@ -86,16 +86,16 @@ class PySimStep(BuildStep):
         return {"log": config.root_dir / log_file}
 
     def run(self, config: BuildConfig, x_in, a_in, b_in, clk_freq, latency_cycles, log_file, **_) -> dict:
-        x = int(S32().read_uint32_file(x_in).val)
-        a = int(S32().read_uint32_file(a_in).val)
-        b = int(S32().read_uint32_file(b_in).val)
+        x = int(Int32().read_uint32_file(x_in).val)
+        a = int(Int32().read_uint32_file(a_in).val)
+        b = int(Int32().read_uint32_file(b_in).val)
         case = SimpFunCase(x=x, a=a, b=b)
         log_path = config.root_dir / log_file
         result = simulate_case(case, clk_freq=clk_freq, latency_cycles=latency_cycles,
                                log_file=log_path)
         sim_dir = config.root_dir / "results" / "sim"
         sim_dir.mkdir(parents=True, exist_ok=True)
-        S32(result.y).write_uint32_file(sim_dir / "y.bin")
+        Int32(result.y).write_uint32_file(sim_dir / "y.bin")
         (sim_dir / "regmap_status.json").write_text(
             json.dumps({"ap_done": int(result.ap_done), "y": int(result.y)}, indent=2),
             encoding="utf-8",
@@ -276,7 +276,7 @@ def build_simp_fun_dag() -> BuildDag:
         golden_dir_artifact="sim_dir",
         actual_dir_artifact="csim_data_dir",
         schemas=[
-            {"filename": "y_data.bin", "golden_filename": "y.bin", "schema": S32},
+            {"filename": "y_data.bin", "golden_filename": "y.bin", "schema": Int32},
         ],
         jsons=[
             {"filename": "regmap_status.json", "compare_fields": ["y"]},

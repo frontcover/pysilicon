@@ -877,10 +877,10 @@ class TestMMIFMasterSchemaHelpers:
 
     def test_write_schema_read_schema(self):
         from pysilicon.hw.dataschema import DataList, IntField
-        U32 = IntField.specialize(bitwidth=32, signed=False)
+        Uint32 = IntField.specialize(bitwidth=32, signed=False)
 
         class TwoWords(DataList):
-            elements = {"a": U32, "b": U32}
+            elements = {"a": Uint32, "b": Uint32}
 
         sim, env, master, mem = self._make_harness()
         result = []

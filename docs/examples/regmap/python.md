@@ -1,7 +1,7 @@
 ---
 title: Python model
 parent: Register Map (simple function)
-nav_order: 1
+nav_order: 2
 has_children: false
 ---
 
@@ -10,6 +10,10 @@ has_children: false
 We first describe how to build a python model for a hardware component with a Vitis Register map.
 
 ## Vitis Register Map
+
+
+
+PySilicon's [`VitisRegMap`](../../guide/interface/regmap.md) class mirrors this layout exactly: the user declares each register as a Python `RegField` with its data schema and access mode (`R`, `W`, `RW`, `W1C`, `W1S`), and PySilicon prepends the same Vitis control registers automatically. The same declaration drives the Python simulation, the generated HLS pragmas, and the host-side offset map.
 
 Vitis HLS automatically generates this AXI-Lite slave whenever a kernel function has `#pragma HLS interface s_axilite` on its scalar arguments and on `return`. The Vitis-generated slave includes:
 
@@ -20,17 +24,17 @@ PySilicon's [`VitisRegMap`](../../guide/interface/regmap.md) class mirrors this 
 
 ## Describing the Register Map in Python
 
-A register map is declared by passing a dict of `RegField` entries to `VitisRegMap`. Each `RegField` carries the field's data schema (here `S32` — a specialised signed 32-bit `IntField`) and its host-side access mode (`R` / `W` / `RW` / `W1C` / `W1S`). Offsets are assigned automatically in declaration order; field names become the keys you use for `get` / `set` everywhere downstream.
+A register map is declared by passing a dict of `RegField` entries to `VitisRegMap`. Each `RegField` carries the field's data schema (here `Int32` — a specialised signed 32-bit `IntField`) and its host-side access mode (`R` / `W` / `RW` / `W1C` / `W1S`). Offsets are assigned automatically in declaration order; field names become the keys you use for `get` / `set` everywhere downstream.
 
 ```python
 # examples/regmap/simp_fun.py
-S32 = IntField.specialize(bitwidth=32, signed=True)
+Int32 = IntField.specialize(bitwidth=32, signed=True)
 
 self.regmap = VitisRegMap({
-    "x": RegField(S32, RegAccess.RW, description="Input operand"),
-    "a": RegField(S32, RegAccess.RW, description="Multiply coefficient"),
-    "b": RegField(S32, RegAccess.RW, description="Bias term"),
-    "y": RegField(S32, RegAccess.R,  description="relu(a*x + b)"),
+    "x": RegField(Int32, RegAccess.RW, description="Input operand"),
+    "a": RegField(Int32, RegAccess.RW, description="Multiply coefficient"),
+    "b": RegField(Int32, RegAccess.RW, description="Bias term"),
+    "y": RegField(Int32, RegAccess.R,  description="relu(a*x + b)"),
 })
 ```
 
@@ -71,8 +75,8 @@ def on_start(self) -> ProcessGen[None]:
     self.regmap.set("y", y)
 
 @synthesizable
-def compute(self, x: S32, a: S32, b: S32) -> S32:
-    return S32(relu_affine(int(x.val), int(a.val), int(b.val)))
+def compute(self, x: Int32, a: Int32, b: Int32) -> Int32:
+    return Int32(relu_affine(int(x.val), int(a.val), int(b.val)))
 ```
 
 The `@synthesizable` decorator marks `compute` as a method whose body will be lowered to C++ by the codegen pipeline (covered on the [synthesis](./synthesis.md) page). `on_start` is sim-only; in the generated kernel it is replaced by Vitis's normal kernel-entry control flow.

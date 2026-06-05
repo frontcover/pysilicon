@@ -1,10 +1,9 @@
 ---
 title: Python Simulation
 parent: Register Map (simple function)
-nav_order: 2
+nav_order: 3
 has_children: false
 ---
-
 # Python simulation
 
 We now show how to simulate the Python model. Python simulation is fast and easy to debug, so we usually perform the simulation in Python before synthesizing and simulating the RTL.
@@ -67,14 +66,14 @@ class BuildInputsStep(BuildStep):
 
 After running the Python-only slice of the DAG, the following artifacts exist on disk:
 
-| Artifact | Path | Producer | Role |
-|---|---|---|---|
-| `x_in` / `a_in` / `b_in` | `data/{x,a,b}.bin` | `BuildInputsStep` | Test vector for one transaction |
-| `sim_dir/y.bin` | `results/sim/y.bin` | `PySimStep` | Kernel output, raw `S32` |
-| `sim_dir/regmap_status.json` | `results/sim/regmap_status.json` | `PySimStep` | `{ap_done, y}` for cross-flow comparison |
-| `sim_summary` | `results/sim_summary.json` | `PySimStep` | Input tuple, expected `y`, observed `y`, pass/fail bit |
-| `log` | `results/sim_log.csv` | `PySimStep` | Timestamped event log (host + kernel) |
-| `py_timing` | `results/py_timing.json` | `ExtractPyTimingStep` | Structured cycle-count measurement |
+| Artifact                       | Path                               | Producer                | Role                                                       |
+| ------------------------------ | ---------------------------------- | ----------------------- | ---------------------------------------------------------- |
+| `x_in` / `a_in` / `b_in` | `data/{x,a,b}.bin`               | `BuildInputsStep`     | Test vector for one transaction                            |
+| `sim_dir/y.bin`              | `results/sim/y.bin`              | `PySimStep`           | Kernel output, raw `Int32`                               |
+| `sim_dir/regmap_status.json` | `results/sim/regmap_status.json` | `PySimStep`           | `{ap_done, y}` for cross-flow comparison                 |
+| `sim_summary`                | `results/sim_summary.json`       | `PySimStep`           | Input tuple, expected `y`, observed `y`, pass/fail bit |
+| `log`                        | `results/sim_log.csv`            | `PySimStep`           | Timestamped event log (host + kernel)                      |
+| `py_timing`                  | `results/py_timing.json`         | `ExtractPyTimingStep` | Structured cycle-count measurement                         |
 
 The two artifacts worth flagging:
 

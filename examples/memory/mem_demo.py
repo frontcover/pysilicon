@@ -47,7 +47,7 @@ from pysilicon.simulation.simobj import ProcessGen, SimObj
 from pysilicon.simulation.simulation import Simulation
 
 
-U32 = IntField.specialize(bitwidth=32, signed=False)
+Uint32 = IntField.specialize(bitwidth=32, signed=False)
 
 
 # ---------------------------------------------------------------------------
@@ -74,13 +74,13 @@ class MemDriver(SimObj):
 
         # --- 2. write a known array (typed) ---
         t0 = self.now
-        yield from self.master.write_array(self.values, U32, addr)
+        yield from self.master.write_array(self.values, Uint32, addr)
         print(f"[{self.name}] write_array({n}) @0x{addr:04x}: "
               f"done at t={self.now:.4f} (dt={self.now - t0:.4f})")
 
         # --- 3. read back and verify ---
         t0 = self.now
-        self.read_back = yield from self.master.read_array(U32, count=n, addr=addr)
+        self.read_back = yield from self.master.read_array(Uint32, count=n, addr=addr)
         print(f"[{self.name}] read_array({n})  @0x{addr:04x}: "
               f"{self.read_back} at t={self.now:.4f} (dt={self.now - t0:.4f})")
         ok_read = np.array_equal(self.read_back, self.values)
@@ -88,12 +88,12 @@ class MemDriver(SimObj):
         # --- 4. modify (+1) and write back ---
         modified = self.read_back + 1
         t0 = self.now
-        yield from self.master.write_array(modified, U32, addr)
+        yield from self.master.write_array(modified, Uint32, addr)
         print(f"[{self.name}] write_array(+1)  @0x{addr:04x}: "
               f"done at t={self.now:.4f} (dt={self.now - t0:.4f})")
 
         # --- 5. read again and verify ---
-        self.modified_back = yield from self.master.read_array(U32, count=n, addr=addr)
+        self.modified_back = yield from self.master.read_array(Uint32, count=n, addr=addr)
         ok_modified = np.array_equal(self.modified_back, self.values + 1)
 
         self.passed = bool(ok_read and ok_modified)

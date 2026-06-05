@@ -37,7 +37,7 @@ class ErrCode(IntEnum):
 
 
 ErrField = EnumField.specialize(enum_type=ErrCode)
-U32      = IntField.specialize(bitwidth=32, signed=False)
+Uint32      = IntField.specialize(bitwidth=32, signed=False)
 U16      = IntField.specialize(bitwidth=16, signed=False)
 F32      = FloatField.specialize(bitwidth=32)
 
@@ -45,7 +45,7 @@ F32      = FloatField.specialize(bitwidth=32)
 class CoeffPair(DataArray):
     """2-element array of 32-bit unsigned ints (2 bus words at 32-bit bus)."""
 
-    element_type = U32
+    element_type = Uint32
     max_shape = (2,)
     static = True
 
@@ -173,13 +173,13 @@ class TestW1CW1SValidation:
         assert rm.nwords_of("trig") == 1
 
     def test_w1c_accepts_single_word(self) -> None:
-        rm = RegMap({"sticky": RegField(U32, RegAccess.W1C)})
+        rm = RegMap({"sticky": RegField(Uint32, RegAccess.W1C)})
         assert rm.nwords_of("sticky") == 1
 
 
 class TestGetSet:
     def test_get_set_int_field(self) -> None:
-        rm = RegMap({"count": RegField(U32, RegAccess.RW)})
+        rm = RegMap({"count": RegField(Uint32, RegAccess.RW)})
         rm.set("count", 42)
         assert int(rm.get("count").val) == 42
 
@@ -200,8 +200,8 @@ class TestGetSet:
         assert list(result.val.flat) == [10, 20]
 
     def test_set_schema_instance_accepted(self) -> None:
-        rm = RegMap({"x": RegField(U32, RegAccess.RW)})
-        rm.set("x", U32(99))
+        rm = RegMap({"x": RegField(Uint32, RegAccess.RW)})
+        rm.set("x", Uint32(99))
         assert int(rm.get("x").val) == 99
 
 
@@ -223,18 +223,18 @@ class TestFieldNameAtOffset:
 
 class TestReadWriteWord:
     def test_read_write_word_owner(self) -> None:
-        rm = RegMap({"x": RegField(U32, RegAccess.RW)})
+        rm = RegMap({"x": RegField(Uint32, RegAccess.RW)})
         rm.write_word("x", 0, 0xABCD, source="owner")
         assert rm.read_word("x", 0) == 0xABCD
 
     def test_w1c_host_clears_bits(self) -> None:
-        rm = RegMap({"sticky": RegField(U32, RegAccess.W1C)})
+        rm = RegMap({"sticky": RegField(Uint32, RegAccess.W1C)})
         rm._buffers["sticky"][0] = 0xFF
         rm.write_word("sticky", 0, 0xF0, source="host")
         assert rm.read_word("sticky", 0) == 0x0F  # 0xFF & ~0xF0
 
     def test_w1c_owner_overwrites(self) -> None:
-        rm = RegMap({"sticky": RegField(U32, RegAccess.W1C)})
+        rm = RegMap({"sticky": RegField(Uint32, RegAccess.W1C)})
         rm._buffers["sticky"][0] = 0xFF
         rm.write_word("sticky", 0, 0x00, source="owner")
         assert rm.read_word("sticky", 0) == 0x00
@@ -247,12 +247,12 @@ class TestReadWriteWord:
 
 class TestSlaveRoundTrip:
     def test_rw_round_trip(self) -> None:
-        rm = RegMap({"x": RegField(U32, RegAccess.RW)})
+        rm = RegMap({"x": RegField(Uint32, RegAccess.RW)})
         h = _SlaveHarness.build(rm)
 
         def proc() -> ProcessGen[None]:
-            yield from h.master.write_schema(U32(0xBEEF), addr=rm.offset_of("x"))
-            val = yield from h.master.read_schema(U32, addr=rm.offset_of("x"))
+            yield from h.master.write_schema(Uint32(0xBEEF), addr=rm.offset_of("x"))
+            val = yield from h.master.read_schema(Uint32, addr=rm.offset_of("x"))
             assert int(val.val) == 0xBEEF
 
         h.run(proc)
@@ -269,23 +269,23 @@ class TestSlaveRoundTrip:
         h.run(proc)
 
     def test_w_only_host_can_write(self) -> None:
-        rm = RegMap({"cfg": RegField(U32, RegAccess.W)})
+        rm = RegMap({"cfg": RegField(Uint32, RegAccess.W)})
         h = _SlaveHarness.build(rm)
 
         def proc() -> ProcessGen[None]:
-            yield from h.master.write_schema(U32(42), addr=rm.offset_of("cfg"))
+            yield from h.master.write_schema(Uint32(42), addr=rm.offset_of("cfg"))
 
         h.run(proc)
         assert rm.read_word("cfg", 0) == 42
 
     def test_slave_w1c(self) -> None:
         """Host writes 0xF0 to register holding 0xFF → 0x0F."""
-        rm = RegMap({"sticky": RegField(U32, RegAccess.W1C)})
+        rm = RegMap({"sticky": RegField(Uint32, RegAccess.W1C)})
         rm._buffers["sticky"][0] = 0xFF
         h = _SlaveHarness.build(rm)
 
         def proc() -> ProcessGen[None]:
-            yield from h.master.write_schema(U32(0xF0), addr=rm.offset_of("sticky"))
+            yield from h.master.write_schema(Uint32(0xF0), addr=rm.offset_of("sticky"))
 
         h.run(proc)
         assert rm.read_word("sticky", 0) == 0x0F
@@ -319,12 +319,12 @@ class TestSlaveRoundTrip:
         h.run(proc)
 
     def test_slave_rejects_host_read_from_w(self) -> None:
-        rm = RegMap({"wo": RegField(U32, RegAccess.W)})
+        rm = RegMap({"wo": RegField(Uint32, RegAccess.W)})
         h = _SlaveHarness.build(rm)
 
         def proc() -> ProcessGen[None]:
             with pytest.raises(RegMapAccessError):
-                yield from h.master.read_schema(U32, addr=rm.offset_of("wo"))
+                yield from h.master.read_schema(Uint32, addr=rm.offset_of("wo"))
 
         h.run(proc)
 
@@ -336,12 +336,12 @@ class TestSlaveRoundTrip:
         def on_w1c(name: str, sub_word: int, raw_val: int) -> None:
             hook_log.append(("post_mask", rm_w1c.read_word(name, sub_word)))
 
-        rm_w1c = RegMap({"sticky": RegField(U32, RegAccess.W1C, on_write=on_w1c)})
+        rm_w1c = RegMap({"sticky": RegField(Uint32, RegAccess.W1C, on_write=on_w1c)})
         rm_w1c._buffers["sticky"][0] = 0xFF
         h1 = _SlaveHarness.build(rm_w1c)
 
         def proc1() -> ProcessGen[None]:
-            yield from h1.master.write_schema(U32(0xF0), addr=rm_w1c.offset_of("sticky"))
+            yield from h1.master.write_schema(Uint32(0xF0), addr=rm_w1c.offset_of("sticky"))
 
         h1.run(proc1)
         assert hook_log[0] == ("post_mask", 0x0F)
@@ -372,7 +372,7 @@ class TestBoundRegMap:
     """
 
     def test_int_field_round_trip_returns_native_int(self) -> None:
-        rm = RegMap({"count": RegField(U32, RegAccess.RW)})
+        rm = RegMap({"count": RegField(Uint32, RegAccess.RW)})
         h = _SlaveHarness.build(rm)
         seen: dict[str, Any] = {}
 
@@ -428,7 +428,7 @@ class TestBoundRegMap:
         assert list(seen["val"].val.flat) == [10, 20]
 
     def test_base_addr_offset_applied(self) -> None:
-        rm = RegMap({"x": RegField(U32, RegAccess.RW)})
+        rm = RegMap({"x": RegField(Uint32, RegAccess.RW)})
         h = _SlaveHarness.build(rm)
 
         def proc_offset() -> ProcessGen[None]:
@@ -441,7 +441,7 @@ class TestBoundRegMap:
         h.run(proc_offset)
 
     def test_start_writes_ap_start_on_vitis_regmap(self) -> None:
-        rm = VitisRegMap({"x": RegField(U32, RegAccess.RW)})
+        rm = VitisRegMap({"x": RegField(Uint32, RegAccess.RW)})
         on_start_fired: list[bool] = []
 
         def on_start() -> ProcessGen[None]:

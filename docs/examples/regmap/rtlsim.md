@@ -1,10 +1,9 @@
 ---
 title: C and RTL Simulation
 parent: Register Map (simple function)
-nav_order: 4
+nav_order: 5
 has_children: false
 ---
-
 # C and RTL Simulation
 
 This page picks up where [Code Generation](./codegen.md) leaves off. The Vitis HLS kernel and testbench C++ exist in `gen/`, the hand-written compute body lives next to them in `simp_fun_compute_impl.cpp`, and the input test vector is on disk from the Python simulation. From here, the build DAG drives Vitis through:
@@ -28,15 +27,15 @@ This executes every step in the DAG from `build_inputs` through `generate_timing
 
 ## Stages after Python simulation
 
-| Step | What it does | Key produces |
-|---|---|---|
-| `csim` | Runs Vitis HLS C-simulation of the generated TB against the generated kernel | `csim_data_dir` (kernel outputs in `data/`) |
-| `validate_csim` | Compares C-sim outputs against the Python sim's `sim_dir` artifacts | `verify_csim.json`, `results/vitis/` |
-| `csynth` | Runs C-synthesis + RTL co-simulation | `report_dir` (Vitis solution directory) |
-| `inspect_synth` | Parses the C-synth XML report for resource use + per-loop pipeline II | `results/loop_df.csv` |
-| `extract_cosim_timing` | Parses the cosim report for the measured per-transaction cycle count | `cosim_timing.json` |
-| `validate_timing` | Compares `py_timing` against `cosim_timing` with a cycle tolerance | `timing_verdict.json` |
-| `generate_timing_diagram` | Renders the side-by-side SVG and a JSON companion describing the events | `timing_diagram.svg`, `timing_diagram.json` |
+| Step                        | What it does                                                                 | Key produces                                    |
+| --------------------------- | ---------------------------------------------------------------------------- | ----------------------------------------------- |
+| `csim`                    | Runs Vitis HLS C-simulation of the generated TB against the generated kernel | `csim_data_dir` (kernel outputs in `data/`) |
+| `validate_csim`           | Compares C-sim outputs against the Python sim's `sim_dir` artifacts        | `verify_csim.json`, `results/vitis/`        |
+| `csynth`                  | Runs C-synthesis + RTL co-simulation                                         | `report_dir` (Vitis solution directory)       |
+| `inspect_synth`           | Parses the C-synth XML report for resource use + per-loop pipeline II        | `results/loop_df.csv`                         |
+| `extract_cosim_timing`    | Parses the cosim report for the measured per-transaction cycle count         | `cosim_timing.json`                           |
+| `validate_timing`         | Compares `py_timing` against `cosim_timing` with a cycle tolerance       | `timing_verdict.json`                         |
+| `generate_timing_diagram` | Renders the side-by-side SVG and a JSON companion describing the events      | `timing_diagram.svg`, `timing_diagram.json` |
 
 Each step is described below in the order it runs.
 
@@ -53,7 +52,7 @@ dag.add(FunctionalVerifyStep(
     golden_dir_artifact="sim_dir",        # from py_sim
     actual_dir_artifact="csim_data_dir",  # from csim
     schemas=[
-        {"filename": "y_data.bin", "golden_filename": "y.bin", "schema": S32},
+        {"filename": "y_data.bin", "golden_filename": "y.bin", "schema": Int32},
     ],
     jsons=[
         {"filename": "regmap_status.json", "compare_fields": ["ap_done", "y"]},

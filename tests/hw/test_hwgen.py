@@ -1516,7 +1516,7 @@ def test_header_omits_streamutils_for_regmap_only_component():
     """
     from pysilicon.build.hwgen import header_to_cpp
 
-    S32 = _IntField.specialize(bitwidth=32, signed=True)
+    Int32 = _IntField.specialize(bitwidth=32, signed=True)
 
     @_dataclass
     class _RegMapOnly(HwComponent):
@@ -1525,8 +1525,8 @@ def test_header_omits_streamutils_for_regmap_only_component():
         def __post_init__(self) -> None:
             super().__post_init__()
             self.regmap = _VitisRegMap({
-                "x": _RegField(S32, _RegAccess.RW),
-                "y": _RegField(S32, _RegAccess.R),
+                "x": _RegField(Int32, _RegAccess.RW),
+                "y": _RegField(Int32, _RegAccess.R),
             })
             self.s_lite = _VitisRegMapMMIFSlave(
                 name=f'{self.name}_s_lite', sim=self.sim, bitwidth=32,

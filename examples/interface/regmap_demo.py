@@ -64,13 +64,13 @@ class DemoError(IntEnum):
 
 
 DemoErrorField = EnumField.specialize(enum_type=DemoError)
-U32            = IntField.specialize(bitwidth=32, signed=False)
+Uint32            = IntField.specialize(bitwidth=32, signed=False)
 
 
 class CoeffPairArray(DataArray):
     """2-element array of 32-bit unsigned ints."""
 
-    element_type = U32
+    element_type = Uint32
     max_shape    = (2,)
     static       = True
 

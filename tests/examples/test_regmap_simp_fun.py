@@ -1,7 +1,7 @@
 import json
 from pathlib import Path
 
-from examples.regmap.simp_fun import DEFAULT_VECTOR, S32, run_functional_cases
+from examples.regmap.simp_fun import DEFAULT_VECTOR, Int32, run_functional_cases
 from examples.regmap.simp_fun_build import build_simp_fun_dag
 from examples.regmap.timing_diagram import write_timing_diagram
 from pysilicon.build.build import BuildConfig
@@ -22,7 +22,7 @@ def test_simp_fun_python_sim_matches_expected_outputs(tmp_path: Path) -> None:
     assert results["py_sim"].success
     assert results["extract_py_timing"].success
 
-    y = int(S32().read_uint32_file(results["py_sim"].path("sim_dir") / "y.bin").val)
+    y = int(Int32().read_uint32_file(results["py_sim"].path("sim_dir") / "y.bin").val)
     summary = json.loads(results["py_sim"].path("sim_summary").read_text(encoding="utf-8"))
     py_timing = json.loads(results["extract_py_timing"].path("py_timing").read_text(encoding="utf-8"))
 
