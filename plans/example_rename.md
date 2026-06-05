@@ -1,168 +1,135 @@
-# Example Rename: pattern-named, teaching-ordered example set
+# Example Overhaul: pattern-named, teaching-ordered example set
 
 ## Goal
 
-Rename the example set from incidental toy names to **pattern names that match
-the intro-hardware teaching progression**, and restructure
-[docs/examples/index.md](../docs/examples/index.md) to (a) list the five examples
-as an ordered progression and (b) state the general PySilicon flow every full
-example follows. Each directory name should foreground the *new concept* the
-example introduces, not the computation it happens to use as a vehicle.
+Restructure the example set around the **intro-hardware teaching progression**:
+pattern-named directories, an ordered `docs/examples/index.md` that states the
+general PySilicon flow, and — crucially — examples *interesting enough that
+students see the point*. The headline shared-memory example becomes the
+**histogram** (richer than the increment toy), upgraded to be **codegen-driven**
+like the rest. Increment is retained as a minimal codegen regression, not a
+headline.
 
-This is a **DRAFT** — the "Open decisions" section below must be resolved before
-execution. Naming (Option B, semantic) is already settled; the structural
-questions (mem_queue promotion, pure_stream scaffolding, internal symbol renames)
-are not.
+This is an **umbrella plan**. The meaty sub-effort — regenerating the histogram
+kernel/TB from a Python `HistAccel` HwComponent — has its own detailed plan:
+[plans/histogram_codegen.md](histogram_codegen.md). This plan owns the renames +
+the docs restructure + sequencing.
 
 ## The five examples (the progression)
 
-| Order | Current | New dir | New concept introduced | Flow coverage today |
+| Order | Vehicle | Dir | New concept introduced | Status |
 |---|---|---|---|---|
-| 1 | `examples/regmap_simp_fun/` | `examples/regmap/` | register-mapped control (AXI4-Lite) | full |
-| 2 | *(none — TBD)* | `examples/pure_stream/` | streaming dataflow: samples in/out, no packet boundary / no TLAST / no control (moving-average filter) | **planned, not built** |
-| 3 | `examples/poly/` | `examples/stream_inband/` | packetization (TLAST) + in-band control on the stream | full |
-| 4 | `examples/increment/` | `examples/shared_mem/` | data in memory (AXI-MM), control over a dedicated stream | full |
-| 5 | `examples/interface/aximm_queue_demo.py` | `examples/mem_queue/` (proposed) | control *also* in memory, via a descriptor queue | **sim-only; codegen is Future** |
+| 1 | simple function | `examples/regmap/` (was `regmap_simp_fun`) | register-mapped control (AXI4-Lite) | rename only |
+| 2 | moving-average filter | `examples/pure_stream/` | streaming dataflow — no packet boundary / no TLAST / no control | **reserved (TBD)** |
+| 3 | polynomial | `examples/stream_inband/` (was `poly`) | packetization (TLAST) + in-band control on the stream | rename only |
+| 4 | **histogram** | `examples/shared_mem/` (was `histogram`) | data in memory (AXI-MM), control over a dedicated stream | rename **+ codegen upgrade** ([histogram_codegen.md](histogram_codegen.md)) |
+| 5 | vector unit | `examples/mem_queue/` | control *also* in memory, via a descriptor queue | **reserved (TBD)** |
 
-Each name = the delta a student just learned. The computation stays the vehicle:
-`stream_inband` is still a polynomial accelerator, `shared_mem` is still the
-increment kernel — the *directory* names the I/O pattern, the *content* keeps its
-mathematical identity.
+**Retained, not headline:** `examples/increment/` stays in place as the *minimal
+m_axi codegen regression* (the smallest vehicle that proves the generated kernel
+path). It is referenced from the index as a "minimal reference," not as one of
+the five pattern examples.
+
+**Settled by review (do not re-litigate):**
+- shared_mem = histogram, codegen-driven; increment kept as regression.
+- The histogram codegen upgrade IS in scope for this effort.
+- `pure_stream` and `mem_queue` are **reserved slots** — listed as planned, not
+  built now. `aximm_queue` stays where it is (`examples/interface/aximm_queue_demo.py`,
+  sim-only); the future `mem_queue` example is a vecunit driven by an AXI-MM
+  descriptor queue, which needs queue HLS codegen first (a separate effort).
 
 ## The general flow (for index.md)
 
-`index.md` should state the canonical PySilicon path every full example walks,
-since that uniformity is the pedagogical point:
+`index.md` states the canonical path every *full* example walks:
 
-1. **Python model** — the golden numerical behavior (numpy / PyTorch).
+1. **Python model** — golden numerical behavior (numpy / PyTorch).
 2. **Python simulation** — the SimPy transactional sim (Components + Interfaces).
 3. **Code generation** — Vitis HLS C++ kernel + testbench emitted from the model.
 4. **C and RTL simulation** — Vitis C-sim, then C-synth + RTL co-simulation.
 5. **Timing extraction** — cycle/burst measurement from cosim, fed back to the
    Python timing model.
 
-Not every example covers all five yet — the index should show a per-example
-coverage marker so the gaps are honest (regmap / stream_inband / shared_mem =
-all five; mem_queue = stages 1–2 only, codegen TBD; pure_stream = planned).
+Per-example coverage markers keep it honest: regmap / stream_inband / shared_mem
+= all five; increment = all five (minimal); mem_queue = stages 1–2 (codegen TBD);
+pure_stream = planned.
 
 ## Scope
 
-**In scope:** directory + doc-folder renames; `docs/examples/index.md` rewrite
-(five-example list + general-flow statement); updating all internal references
-(imports, test paths, doc nav_order/front-matter/links, build-script paths).
+**In scope:** directory + doc-folder renames; the histogram codegen upgrade (via
+the companion plan); `docs/examples/index.md` rewrite; updating all internal
+references (imports, test paths, doc nav_order/front-matter/links, build-script
+and project-dir paths).
 
-**Out of scope:**
-- `mcp/corpus/` — reworked wholesale at the AI-codegen phase; do NOT re-path it
-  now (see the separate corpus note).
-- Building the `pure_stream` example itself (reserve the slot only — see Open
-  decisions).
-- Renaming computation-specific Python symbols (`PolyAccelComponent`,
-  `IncrAccel`, etc.) — see Open decisions; default is to keep them.
+**Out of scope:** `mcp/corpus/` (reworked at the AI-codegen phase — do NOT
+re-path now); building `pure_stream`; building the vecunit `mem_queue`; the
+MemComponent guide-docs page left by the retired `memory_simobj.md`.
 
-## Open decisions (CONFIRM before executing)
+## Open decision (CONFIRM before executing)
 
-1. **`mem_queue` placement.** The queue is currently a sim-only demo file inside
-   `examples/interface/` (alongside `aximm_demo`, `crossbar_demo`, `stream_demo`,
-   …), not a standalone example dir. Options:
-   - **(A, recommended)** Promote it to `examples/mem_queue/` so all five live as
-     sibling pattern-examples. Move `aximm_queue_demo.py` there; update the test
-     path (`tests/examples/test_aximm_queue_demo.py`). The other `interface/`
-     files stay (they're interface-*feature* demos, not pattern examples).
-   - **(B)** Leave it in `interface/`, just rename the file
-     (`aximm_queue_demo.py` → `mem_queue_demo.py`) and reference it from the index
-     without giving it a sibling dir.
-   Recommendation: **A** — the "five parallel examples" framing breaks if one is
-   buried. But it's more churn; your call.
-
-2. **`pure_stream` — reserve vs scaffold.** Just list it in the index as
-   "planned" (no dir), or create an empty `examples/pure_stream/` scaffold now?
-   Recommendation: **reserve only** (listed as TBD/planned, no empty dir — empty
-   dirs are clutter). Build it later as a moving-average filter (no TLAST).
-
-3. **Internal symbol / entry-module renames.** Rename only paths/imports, or also
-   the entry modules (`poly.py` → `stream_inband.py`, `incr.py` → `shared_mem.py`)
-   and class names? Recommendation: **rename dirs + doc folders + cross-references
-   only; keep entry-module filenames and computation-named classes** to bound the
-   churn. Revisit per-example during execution if an import path reads badly.
+**Directory naming for the rich examples — pattern name vs recognizable
+computation name.** The progression argues for pattern-named dirs (`shared_mem`),
+with the doc page titled "Histogram accelerator (shared-memory pattern)." The
+counter-argument: a recognizable name (`histogram`) may motivate students more
+than an abstract one, and `examples/shared_mem/hist.cpp` reads oddly.
+- **(A, recommended)** Pattern-named dirs (`shared_mem`, `stream_inband`,
+  `regmap`); keep computation-named files/symbols inside (`hist.cpp`, `HistAccel`,
+  `PolyAccelComponent`); docs carry both ("Histogram — shared-memory pattern").
+- **(B)** Keep recognizable computation dir names (`histogram`, `poly`), and
+  surface the *pattern* only as a label/tag in the docs + index ordering.
+Pick A or B before Phase 1 — it determines every `git mv`.
 
 ## Working convention
 
-- Use `git mv` for every rename so history follows the files.
-- One commit per example (rename + its reference updates), plus a final commit for
-  the `index.md` rewrite. Single PR, multiple commits.
-- After each commit: `pytest tests/hw/ tests/examples/ -k "not vitis"` green
-  (note, don't fix, the pre-existing `test_dataschema_poly.py` poly.hpp failure —
-  **and watch it specifically**, since renaming `poly` may move what it looks
-  for; update that test's path if the rename is the cause).
-- Pure docs/structure change — no Vitis required.
-- This is its own branch/PR, kept entirely separate from any feature work.
+- `git mv` for every rename so history follows the files.
+- One commit per example (rename + reference updates); the histogram codegen
+  upgrade follows its companion plan's commit structure; a final commit for the
+  `index.md` rewrite. Single PR, multiple commits.
+- After each commit: `pytest tests/hw/ tests/examples/ -k "not vitis"` green.
+  **Watch `test_dataschema_poly.py` specifically** — renaming `poly` may move
+  what it looks for; update its path if so (it currently has a pre-existing
+  poly.hpp failure — distinguish that from a rename-induced break).
+- Vitis-gated steps (the histogram codegen csim/cosim) run under `-m vitis`.
+- Own branch/PR, separate from feature work.
 
 ## Phases
 
 ### Phase 0: Reference sweep (read-only)
+Enumerate every reference to `poly`, `increment`/`incr`, `regmap_simp_fun`/
+`simp_fun`, `histogram`/`hist`, and `aximm_queue` across `examples/`, `tests/`,
+`docs/`, `pysilicon/` (build scripts, `run.tcl`, project dirs like
+`pysilicon_hist_proj`, doc links, `nav_order`). Produce the rename map + blast
+radius. **Skip `mcp/corpus/`.** Resolve the Open decision from the findings.
 
-Enumerate every reference to `poly`, `increment`/`incr`, `regmap_simp_fun`,
-`simp_fun`, and `aximm_queue` across `examples/`, `tests/`, `docs/`, and
-`pysilicon/` (build scripts, `run.tcl`, project-dir names like
-`pysilicon_poly_proj`, doc `[...](...)` links, `nav_order`). Produce the rename
-map and the full blast radius. **Do not touch `mcp/corpus/`.** Resolve the Open
-decisions from this sweep's findings before editing.
-
-### Phase 1: Rename `regmap_simp_fun` → `regmap`
-
-`git mv examples/regmap_simp_fun examples/regmap` and
-`docs/examples/regmap_simp_fun → docs/examples/regmap`; update imports, test
-paths, `run.tcl`/project paths, doc front-matter (title/nav_order) and links.
-
+### Phase 1: `regmap_simp_fun` → `regmap`
+`git mv` example + doc folder; update imports, test paths, `run.tcl`/project
+paths, doc front-matter + links.
 **Commit:** `examples: rename regmap_simp_fun → regmap (AXI4-Lite control pattern)`
 
-### Phase 2: Rename `poly` → `stream_inband`
-
-`git mv examples/poly examples/stream_inband` and `docs/examples/poly →
-docs/examples/stream_inband` (6 doc pages). Update imports, `poly_build.py`
-paths, the `view_timing.ipynb`/`timing_analysis.py` references, and the
-`test_dataschema_poly.py` path if the sweep shows it points at `examples/poly`.
-
+### Phase 2: `poly` → `stream_inband`
+`git mv` example + doc folder (6 pages); update `poly_build.py`,
+`timing_analysis.py`, `view_timing.ipynb`, and `test_dataschema_poly.py` paths.
 **Commit:** `examples: rename poly → stream_inband (in-band stream control pattern)`
 
-### Phase 3: Rename `increment` → `shared_mem`
+### Phase 3: `histogram` → `shared_mem` + codegen upgrade
+`git mv examples/histogram examples/shared_mem` (+ doc folder, new if absent);
+then execute [plans/histogram_codegen.md](histogram_codegen.md) to make it
+codegen-driven (build `HistAccel`, generate kernel/TB, validate against the
+existing hand-written `hist.cpp`/`hist_tb.cpp` + cosim/burst harness). Multiple
+commits per that plan.
+**Commits:** per histogram_codegen.md, prefixed `shared_mem:`
 
-`git mv examples/increment examples/shared_mem`; update imports
-(`incr_build.py`, etc.), test paths (`test_incr_*.py`), `run.tcl`/project paths.
-Create a `docs/examples/shared_mem/` doc page (increment has none today) — at
-least an index page in the regmap/poly doc style.
-
-**Commit:** `examples: rename increment → shared_mem (AXI-MM data + stream control pattern)`
-
-### Phase 4: `mem_queue` (pending Open decision 1)
-
-If (A): `git mv examples/interface/aximm_queue_demo.py
-examples/mem_queue/mem_queue_demo.py` (+ `__init__` if the others have one);
-move the test; add a `docs/examples/mem_queue/` index page. This page **absorbs
-the queue plan's skipped Phase 7 docs** (memory layout, SPSC contract,
-`write`/`get` API, blocking vs non-blocking).
-
-**Commit:** `examples: promote aximm_queue demo → mem_queue example (descriptor-queue pattern)`
-
-### Phase 5: Rewrite `docs/examples/index.md`
-
-List the five examples in progression order with one-line "new concept"
-descriptions and per-example flow-coverage markers; add the general five-stage
-flow statement (Python model → sim → codegen → C/RTL sim → timing). Reserve
-`pure_stream` as a "planned" entry (Open decision 2). Fix the example-section
-nav so the renamed folders sort in teaching order.
-
+### Phase 4: Rewrite `docs/examples/index.md`
+Five examples in progression order with "new concept" one-liners + coverage
+markers; the general five-stage flow statement; reserve `pure_stream` and
+`mem_queue` as planned; note `increment` as the minimal reference; fix the
+example-section nav to sort in teaching order.
 **Commit:** `docs: example index — five-pattern progression + general PySilicon flow`
 
 ## Future / out of scope (capture, don't build)
-
-- **Build `pure_stream`** — a moving-average / FIR filter illustrating
-  boundary-free streaming (no TLAST), full five-stage flow. Slots in at position 2.
-- **`mem_queue` HLS codegen** — the queue is sim-only today; generating its
-  `m_axi` ring `write`/`get` is now unblocked by the increment codegen work but
-  is a separate effort.
-- **`mcp/corpus/` rework** — done at the AI-codegen phase; this rename
-  deliberately skips it.
-- **MemComponent guide docs** — the retired `memory_simobj.md` plan left its
-  optional Phase 3 (a `docs/guide/memory/` SimObj+latency page) unbuilt; not part
-  of this rename, but noted so it isn't lost.
+- **Build `pure_stream`** — moving-average/FIR, boundary-free streaming (no
+  TLAST), full five-stage flow. Position 2.
+- **Build `mem_queue`** — vecunit driven by an AXI-MM descriptor queue. Needs
+  AXI-MM queue HLS codegen (nonexistent; unblocked by the increment codegen work).
+- **`mcp/corpus/` rework** — at the AI-codegen phase.
+- **MemComponent guide docs** — the retired `memory_simobj.md` left a
+  `docs/guide/memory/` SimObj+latency page unbuilt. Not part of this overhaul.
