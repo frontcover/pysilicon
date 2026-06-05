@@ -31,6 +31,7 @@ import numpy.typing as npt
 
 from pysilicon.hw.arrayutils import get_nwords
 from pysilicon.hw.clock import Clock
+from pysilicon.hw.dataschema import DataArray
 from pysilicon.hw.hw_component import HwComponent, HwParam
 from pysilicon.hw.interface import StreamIF, StreamIFMaster, StreamIFSlave
 from pysilicon.hw.memif import DirectMMIF, MMIFMaster
@@ -49,6 +50,37 @@ except ModuleNotFoundError:  # direct execution from the example dir
         Float32, HistCmd, HistError, HistResp, MAX_NDATA, MAX_NBINS,
         MEM_DWIDTH, STREAM_DWIDTH, Uint32Field,
     )
+
+
+# ---------------------------------------------------------------------------
+# Local-buffer types — used only to type the compute hook's array params/return
+# in the generated C++ (``float data[]`` / ``ap_uint<32> counts[]``).  They do
+# not change the SimPy runtime (the hook works on numpy arrays) and are not
+# schema headers; they carry only (element type, compile-time max) for codegen.
+# ---------------------------------------------------------------------------
+
+class HistDataBuf(DataArray):
+    cpp_typing_only = True
+    element_type = Float32
+    static = True
+    max_shape = (MAX_NDATA,)
+    cpp_storage = "raw"
+
+
+class HistEdgeBuf(DataArray):
+    cpp_typing_only = True
+    element_type = Float32
+    static = True
+    max_shape = (MAX_NBINS,)
+    cpp_storage = "raw"
+
+
+class HistCountBuf(DataArray):
+    cpp_typing_only = True
+    element_type = Uint32Field
+    static = True
+    max_shape = (MAX_NBINS,)
+    cpp_storage = "raw"
 
 
 # ---------------------------------------------------------------------------
@@ -136,7 +168,7 @@ class HistAccel(HwComponent):
         yield from self.respond(self.m_out, cmd.tx_id, status)
 
     @synthesizable
-    def validate(self, cmd) -> ProcessGen[HistError]:
+    def validate(self, cmd: HistCmd) -> ProcessGen[HistError]:
         """Bounds + alignment checks (hand-written as ``hist_validate_impl.cpp``).
 
         Returns the :class:`HistError` status; ``NO_ERROR`` means proceed. As a
@@ -158,7 +190,7 @@ class HistAccel(HwComponent):
         yield  # unreachable — makes this a generator
 
     @synthesizable
-    def respond(self, m_out, tx_id, status) -> ProcessGen[None]:
+    def respond(self, m_out: StreamIFMaster, tx_id: int, status: HistError) -> ProcessGen[None]:
         """Build the HistResp and emit it (hand-written as ``hist_respond_impl``).
 
         A hook: codegen emits the call, the
@@ -169,7 +201,7 @@ class HistAccel(HwComponent):
         yield from m_out.write(resp)
 
     @synthesizable
-    def compute(self, data, edges, ndata, nbins) -> ProcessGen[npt.NDArray[np.uint32]]:
+    def compute(self, data: HistDataBuf, edges: HistEdgeBuf, ndata: int, nbins: int) -> ProcessGen[HistCountBuf]:
         """The binning hook (the datapath; hand-written as ``hist_compute_impl.cpp``).
 
         Returns the ``nbins`` counts (the kernel will fill a ``static

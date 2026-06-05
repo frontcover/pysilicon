@@ -279,6 +279,52 @@ def _emit_mm_array_write(stmt: MMArrayWriteStmt, ctx: CodegenCtx) -> str:
     )
 
 
+def _collect_mm_stmts(tree: HwStmt) -> list:
+    """All ``MMArrayRead/WriteStmt`` reachable from ``tree``, in order."""
+    out: list = []
+
+    def walk(node: HwStmt) -> None:
+        if isinstance(node, (MMArrayReadStmt, MMArrayWriteStmt)):
+            out.append(node)
+        if isinstance(node, SeqStmt):
+            for s in node.stmts:
+                walk(s)
+        elif isinstance(node, WhileStmt):
+            walk(node.body)
+        elif isinstance(node, CaseStmt):
+            walk(node.if_true)
+            if node.if_false is not None:
+                walk(node.if_false)
+
+    walk(tree)
+    return out
+
+
+def _kernel_hwparam_constants(tree: HwStmt) -> dict[str, int]:
+    """Ordered ``{param_name: value}`` for every HwParam read in ``tree`` (e.g.
+    the ``max_count`` bounds), emitted as ``static const int`` in the header so
+    the generated buffers / pragmas reference named constants, not inlined ints.
+    """
+    from pysilicon.hw.hw_component import HwParamValue
+    consts: dict[str, int] = {}
+    for s in _collect_mm_stmts(tree):
+        mx = s.max_expr
+        if isinstance(mx, HwParamValue):
+            consts.setdefault(mx.param_name, int(mx))
+    return consts
+
+
+def _mm_port_depth(port_ep, tree: HwStmt, ctx: CodegenCtx) -> str:
+    """C++ expression for an m_axi port's ``depth`` — the sum of the buffer
+    bounds of every array op on that port (the total region the master sees)."""
+    maxes = [
+        _emit_expr(s.max_expr, ctx)
+        for s in _collect_mm_stmts(tree)
+        if s.port is port_ep and s.max_expr is not None
+    ]
+    return " + ".join(maxes) if maxes else "1"
+
+
 def _discover_mm_masters(comp) -> list[tuple[str, object]]:
     """Return ``[(attr_name, endpoint)]`` for each ``MMIFMaster`` on ``comp``."""
     from pysilicon.hw.memif import MMIFMaster
@@ -376,6 +422,17 @@ def _emit_function_call(stmt: FunctionStmt, ctx: CodegenCtx) -> str:
     if not stmt.outputs:
         return f"{pad}{qualified}({arg_str});"
     out = stmt.outputs[0]
+    # An array-typed output (a hook that "returns" a buffer) lowers to a static
+    # local buffer the hook fills in place via an appended out-parameter (HLS
+    # can't return arrays by value) — paired with the void+out-param signature.
+    if (isinstance(out.typ, type) and issubclass(out.typ, DataArray)
+            and getattr(out.typ, 'cpp_storage', 'struct') == 'raw'):
+        elem_cpp = cpp_type(out.typ.element_type)
+        size = out.typ._declared_count()
+        return (
+            f"{pad}static {elem_cpp} {out.name}[{size}];\n"
+            f"{pad}{qualified}({arg_str}, {out.name});"
+        )
     cpp_t = (
         out.typ.cpp_class_name()
         if hasattr(out.typ, 'cpp_class_name')
@@ -468,6 +525,13 @@ def cpp_type(typ) -> str:
     # same as EnumField. The plan explicitly bounds enums at 8 bits for v1.
     if isinstance(typ, type) and issubclass(typ, IntEnum):
         return "ap_uint<8>"
+    # Plain Python scalars in hook annotations (e.g. a loop-count ``int``).
+    if typ is int:
+        return "int"
+    if typ is bool:
+        return "bool"
+    if typ is float:
+        return "float"
     raise RuntimeError(f"cpp_type: cannot translate {typ!r}")
 
 
@@ -592,9 +656,11 @@ def kernel_signature(comp, variant_suffix: str = "") -> str:
     for attr, ep in mm_masters:
         bw = int(ep.bitwidth)
         arg_lines.append(f"    ap_uint<{bw}>* {attr}")
+        # depth is the total region the master sees — a named header constant
+        # summing this port's buffer bounds (see header_to_cpp).
         pragma_lines.append(
             f"#pragma HLS INTERFACE m_axi port={attr} offset=slave "
-            f"bundle=gmem depth={_mm_buffer_max(comp)}"
+            f"bundle=gmem depth={attr}_depth"
         )
     # Control protocol on the return port: s_axilite when a regmap drives
     # control (poly), else ap_ctrl_hs for stream-controlled kernels (histogram /
@@ -666,7 +732,17 @@ def hook_signature(
             gen_args = typing.get_args(ret)
             if len(gen_args) == 3:
                 ret = gen_args[2]
-        ret_cpp = "void" if ret is type(None) else cpp_type(ret)
+        if ret is type(None):
+            ret_cpp = "void"
+        elif (isinstance(ret, type) and issubclass(ret, DataArray)
+                and getattr(ret, 'cpp_storage', 'struct') == 'raw'):
+            # An array return can't be returned by value in HLS — lower it to a
+            # void function with an appended out-parameter the kernel fills.
+            elem_cpp = cpp_type(ret.element_type)
+            args.append(("out", f"{elem_cpp} out[{ret._declared_count()}]"))
+            ret_cpp = "void"
+        else:
+            ret_cpp = cpp_type(ret)
     return ret_cpp, args
 
 
@@ -818,11 +894,16 @@ def _collect_schemas(tree: HwStmt, comp) -> list[type]:
     from pysilicon.hw.interface import StreamIFMaster, StreamIFSlave
 
     def _has_header(typ) -> bool:
-        return (
-            isinstance(typ, type)
-            and issubclass(typ, DataSchema)
-            and not issubclass(typ, (IntField, FloatField))
-        )
+        if not (isinstance(typ, type) and issubclass(typ, DataSchema)):
+            return False
+        if issubclass(typ, (IntField, FloatField)):
+            return False
+        # A typing-only buffer DataArray (used purely to type a hook's array
+        # param/return as ``elem[n]``) has no schema header and contributes no
+        # includes — its array-utils come from the m_axi op that fills it.
+        if getattr(typ, 'cpp_typing_only', False):
+            return False
+        return True
 
     schemas: dict[str, type] = {}
 
@@ -908,7 +989,10 @@ def _collect_hooks_with_params(tree: HwStmt) -> list[tuple[object, list[str]]]:
 
     def visit(node):
         if isinstance(node, FunctionStmt):
-            key = id(node.method)
+            # Dedup by the underlying function, not the bound-method object —
+            # each ``self.hook`` access is a fresh bound method (distinct id), so
+            # a hook called at several sites would otherwise appear repeatedly.
+            key = id(getattr(node.method, '__func__', node.method))
             tparams = hook_template_params(node)
             if key not in seen:
                 seen[key] = (node.method, tparams)
@@ -1029,7 +1113,8 @@ def header_to_cpp(
     # m_axi support: the memory manager (byte→word addressing) + the
     # array-utils header for each element type read/written over m_axi
     # (deduped against the utility includes already emitted above).
-    if _discover_mm_masters(default_comp):
+    mm_masters = _discover_mm_masters(default_comp)
+    if mm_masters:
         from pysilicon.hw.arrayutils import _array_utils_include_path
         for inc in ['#include "include/memmgr.hpp"'] + [
             f'#include "{_array_utils_include_path(et)}"'
@@ -1037,6 +1122,16 @@ def header_to_cpp(
         ]:
             if inc not in lines:
                 lines.append(inc)
+        # Compile-time bounds: the HwParam buffer maxes read in the kernel, then
+        # each m_axi port's depth = the sum of its buffer bounds.
+        lines.append('')
+        for pname, pval in _kernel_hwparam_constants(tree).items():
+            lines.append(f'static const int {pname} = {pval};')
+        depth_ctx = CodegenCtx(comp=default_comp)
+        for attr, ep in mm_masters:
+            lines.append(
+                f'static const int {attr}_depth = {_mm_port_depth(ep, tree, depth_ctx)};'
+            )
 
     for suffix, variant_comp in variants:
         lines.append('')

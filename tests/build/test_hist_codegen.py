@@ -94,6 +94,49 @@ def test_counts_write_lowers_to_uint32_array_utils():
             "cmd.nbins);") in cpp
 
 
+def test_kernel_signature_and_pragmas():
+    """Full kernel signature: stream + m_axi ports, ap_ctrl_hs, depth constant."""
+    from pysilicon.build.hwgen import kernel_to_cpp
+    cpp = kernel_to_cpp(HistAccel)
+    assert "ap_uint<32>* m_mem" in cpp
+    assert ("#pragma HLS INTERFACE m_axi port=m_mem offset=slave "
+            "bundle=gmem depth=m_mem_depth") in cpp
+    assert "#pragma HLS INTERFACE ap_ctrl_hs port=return" in cpp
+
+
+def test_kernel_lowers_hooks_and_three_array_ops():
+    """The body factors the datapath into validate/compute/respond hooks and
+    lowers the three array ops to the right typed array_utils bursts."""
+    from pysilicon.build.hwgen import kernel_to_cpp
+    cpp = kernel_to_cpp(HistAccel)
+    assert "ap_uint<8> status = hist_impl::validate(cmd);" in cpp
+    assert "static float data[max_ndata];" in cpp
+    assert "static float edges[max_nbins];" in cpp
+    assert "static ap_uint<32> counts[32];" in cpp
+    # compute returns an array → declared buffer + out-parameter call.
+    assert "hist_impl::compute(data, edges, cmd.ndata, cmd.nbins, counts);" in cpp
+    assert "float32_array_utils::read_array<32>(" in cpp
+    assert "uint32_array_utils::write_array<32>(" in cpp
+    assert "hist_impl::respond(m_out, cmd.tx_id, status);" in cpp
+
+
+def test_header_constants_and_hook_decls():
+    """Header emits the HwParam buffer bounds, the per-port depth, and the hook
+    forward declarations (compute's array return becomes a void out-param)."""
+    from pysilicon.build.hwgen import header_to_cpp
+    hpp = header_to_cpp(HistAccel)
+    assert "static const int max_ndata = 1024;" in hpp
+    assert "static const int max_nbins = 32;" in hpp
+    assert "static const int m_mem_depth = max_ndata + max_nbins + max_nbins;" in hpp
+    assert "ap_uint<8> validate(HistCmd cmd);" in hpp
+    assert ("void compute(float data[1024], float edges[32], int ndata, "
+            "int nbins, ap_uint<32> out[32]);") in hpp
+    # respond is templated and #include'd once (deduped across its two call sites).
+    assert hpp.count('#include "hist_respond_impl.tpp"') == 1
+    # typing-only buffer DataArrays contribute no struct header includes.
+    assert "hist_data_buf" not in hpp
+
+
 def test_missing_max_count_fails_loudly():
     """A read with no max_count= has no resolvable buffer bound — fail loudly
     rather than emit an unsized array (no global max_n fallback)."""
