@@ -17,12 +17,16 @@ import numpy as np
 import numpy.testing as npt
 import pytest
 
+import inspect
+
 from pysilicon.hw.aximm_queue import (
     AXIMMQueue,
     AXIMMQueueLayout,
     _split,
 )
 from pysilicon.hw.clock import Clock
+from pysilicon.hw.dataschema import DataList, IntField
+from pysilicon.hw.interface import StreamIFSlave
 from pysilicon.hw.memif import (
     AXIMMCrossBarIF,
     DirectMMIF,
@@ -31,6 +35,18 @@ from pysilicon.hw.memif import (
 )
 from pysilicon.hw.memory import MemComponent
 from pysilicon.simulation.simulation import Simulation
+
+
+# A 2-field struct used by the typed-access tests; each field is one 32-bit
+# word, so a Pair occupies elem_words == 2 at mem_bw == 32.
+_U32 = IntField.specialize(bitwidth=32, signed=False)
+
+
+class Pair(DataList):
+    elements = {
+        "a": {"schema": _U32, "description": "first word"},
+        "b": {"schema": _U32, "description": "second word"},
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -318,7 +334,7 @@ class TestBlocking:
         def proc():
             yield from q.reset()
             yield from q.write(np.array([1, 2, 3], dtype=np.uint32))
-            got = yield from q.get(3)
+            got = yield from q.get(count=3)
             result["got"] = np.array(got)
 
         sim.env.process(proc())
@@ -332,7 +348,7 @@ class TestBlocking:
 
         def proc():
             yield from q.reset()
-            got = yield from q.get(0)
+            got = yield from q.get(count=0)
             result["got"] = np.array(got)
 
         sim.env.process(proc())
@@ -361,7 +377,7 @@ class TestConcurrentSPSC:
                 yield from pq.write(data[i:i + 4], poll_interval=1.0)
 
         def consumer():
-            got = yield from cq.get(N, poll_interval=1.0)
+            got = yield from cq.get(count=N, poll_interval=1.0)
             result["got"] = np.array(got)
 
         sim.env.process(producer())
@@ -388,7 +404,7 @@ class TestConcurrentSPSC:
                 yield from pq.write(data[i:i + 5], poll_interval=0.5)
 
         def consumer():
-            got = yield from cq.get(N, poll_interval=0.5)
+            got = yield from cq.get(count=N, poll_interval=0.5)
             result["got"] = np.array(got)
 
         sim.env.process(producer())
@@ -414,10 +430,149 @@ class TestConcurrentSPSC:
             yield from pq.write(data, poll_interval=1.0)
 
         def consumer():
-            got = yield from cq.get(N, poll_interval=1.0)
+            got = yield from cq.get(count=N, poll_interval=1.0)
             result["got"] = np.array(got)
 
         sim.env.process(producer())
         sim.env.process(consumer())
         sim.env.run()
         npt.assert_array_equal(result["got"], data)
+
+
+# ---------------------------------------------------------------------------
+# Multi-word slots (elem_words > 1), raw words
+# ---------------------------------------------------------------------------
+
+class TestMultiWordSlots:
+    def test_elem_words_4_wrap_and_fifo(self):
+        """A 4-word-per-slot ring preserves FIFO and integrity across the wrap.
+
+        capacity 4 (usable 3); repeatedly write 3 slots / get 3 slots forces the
+        slot pointers past the end so the wrap split (decision 10) is exercised
+        with multi-word slots.
+        """
+        sim, q = _make_queue_direct(capacity=4, elem_words=4)
+        out = []
+
+        def proc():
+            yield from q.reset()
+            nxt = 0
+            for _ in range(8):
+                words = np.arange(nxt, nxt + 3 * 4, dtype=np.uint32)  # 3 slots
+                ok = yield from q.try_write(words)
+                assert ok
+                got = yield from q.try_get(3)
+                out.append(np.array(got))
+                nxt += 3 * 4
+
+        sim.env.process(proc())
+        sim.env.run()
+        npt.assert_array_equal(np.concatenate(out), np.arange(8 * 3 * 4))
+
+    def test_blocking_get_raw_by_nwords_max(self):
+        """The raw path also accepts nwords_max (a word cap), like the stream."""
+        sim, q = _make_queue_direct(capacity=8, elem_words=2)
+        result = {}
+
+        def proc():
+            yield from q.reset()
+            yield from q.write(np.arange(6, dtype=np.uint32))  # 3 slots
+            got = yield from q.get(nwords_max=6)               # 6 words = 3 slots
+            result["got"] = np.array(got)
+
+        sim.env.process(proc())
+        sim.env.run()
+        npt.assert_array_equal(result["got"], np.arange(6))
+
+
+# ---------------------------------------------------------------------------
+# Typed write/get (stream signature, decision 6)
+# ---------------------------------------------------------------------------
+
+class TestTyped:
+    def test_typed_roundtrip_count(self):
+        """write(element_type=Pair) then get(Pair, count=N) round-trips fields."""
+        sim, q = _make_queue_direct(capacity=8, elem_words=2)   # Pair = 2 words
+        pairs = [Pair(a=i, b=i + 100) for i in range(5)]
+        result = {}
+
+        def proc():
+            yield from q.reset()
+            yield from q.write(pairs, Pair)
+            got = yield from q.get(Pair, count=5)
+            # The count path returns a DataArray; .val is a list of dict rows.
+            result["pairs"] = [(int(r["a"]), int(r["b"])) for r in got.val]
+
+        sim.env.process(proc())
+        sim.env.run()
+        assert result["pairs"] == [(i, i + 100) for i in range(5)]
+
+    def test_typed_single_instance(self):
+        """get(Pair) with no count returns one deserialized Pair instance."""
+        sim, q = _make_queue_direct(capacity=8, elem_words=2)
+        result = {}
+
+        def proc():
+            yield from q.reset()
+            yield from q.write([Pair(a=7, b=9)], Pair)
+            got = yield from q.get(Pair)
+            result["pair"] = (int(got.a), int(got.b))
+
+        sim.env.process(proc())
+        sim.env.run()
+        assert result["pair"] == (7, 9)
+
+    def test_typed_wrap_around(self):
+        """Typed access survives the ring wrap (multi-word slots)."""
+        sim, q = _make_queue_direct(capacity=4, elem_words=2)   # usable 3 slots
+        out = []
+
+        def proc():
+            yield from q.reset()
+            nxt = 0
+            for _ in range(6):
+                batch = [Pair(a=nxt + j, b=nxt + j + 1000) for j in range(3)]
+                yield from q.write(batch, Pair)
+                got = yield from q.get(Pair, count=3)
+                out.extend((int(r["a"]), int(r["b"])) for r in got.val)
+                nxt += 3
+
+        sim.env.process(proc())
+        sim.env.run()
+        expected = [(n, n + 1000) for n in range(6 * 3)]
+        assert out == expected
+
+    def test_get_signature_matches_stream(self):
+        """The dequeue signature reuses StreamIFSlave.get exactly (decision 6)."""
+        q_params = inspect.signature(AXIMMQueue.get).parameters
+        s_params = inspect.signature(StreamIFSlave.get).parameters
+        # Every stream parameter (schema_type, count, nwords_max) is present with
+        # the same kind on the queue; the queue only adds poll_interval.
+        for name in ("schema_type", "count", "nwords_max"):
+            assert name in q_params, f"queue get is missing {name}"
+            assert q_params[name].kind == s_params[name].kind
+        assert set(s_params) - {"self"} <= set(q_params)
+        assert "poll_interval" in q_params
+
+    def test_typed_elem_words_mismatch_raises(self):
+        """Typed access against a layout whose elem_words disagrees with the
+        schema raises a clear error (decision 11, typed layer)."""
+        sim, q = _make_queue_direct(capacity=8, elem_words=1)   # Pair needs 2
+
+        def write_proc():
+            yield from q.reset()
+            yield from q.write([Pair(a=1, b=2)], Pair)
+
+        sim.env.process(write_proc())
+        with pytest.raises(ValueError, match="elem_words"):
+            sim.env.run()
+
+        sim2, q2 = _make_queue_direct(capacity=8, elem_words=1)
+
+        def get_proc():
+            yield from q2.reset()
+            yield from q2.get(Pair, count=1)
+
+        sim2.env.process(get_proc())
+        with pytest.raises(ValueError, match="elem_words"):
+            sim2.env.run()
