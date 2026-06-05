@@ -244,7 +244,7 @@ def _mm_buffer_bound(stmt, buf: str, ctx: CodegenCtx) -> str:
 def _emit_mm_array_read(stmt: MMArrayReadStmt, ctx: CodegenCtx) -> str:
     """``buf = port.read_array(ElemT, count, addr)`` →
     a static local buffer + an ``<elem>_array_utils::read_array`` burst
-    (mirrors examples/shared_mem/hist.cpp)."""
+    (mirrors the generated histogram kernel)."""
     port_name = _endpoint_name(stmt.port, ctx)
     bw = int(stmt.port.bitwidth)
     ns = _array_utils_ns(stmt.elem_type)
@@ -651,7 +651,7 @@ def kernel_signature(comp, variant_suffix: str = "") -> str:
             )
     # m_axi master ports — appended after streams + regmap fields, in canonical
     # signature order (streams, regmap, m_axi).  Each maps to an ap_uint<bw>
-    # pointer + an m_axi pragma (mirrors examples/shared_mem/hist.cpp:9).
+    # pointer + an m_axi pragma (mirrors the generated histogram kernel).
     mm_masters = _discover_mm_masters(comp)
     for attr, ep in mm_masters:
         bw = int(ep.bitwidth)
@@ -1219,7 +1219,7 @@ def kernel_to_cpp(comp_class) -> str:
     header_name = f"{cpp_kernel_name(comp_class)}.hpp"
     parts: list[str] = [f'#include "{header_name}"', ""]
     # byte_addr_to_word_index lives in pysilicon::memmgr; alias it like
-    # examples/shared_mem/hist.cpp when the kernel has m_axi masters.
+    # the generated histogram kernel when the kernel has m_axi masters.
     default_comp = next(iter(_iter_variants(comp_class)))[1]
     if _discover_mm_masters(default_comp):
         parts.append("namespace memmgr = pysilicon::memmgr;")

@@ -5,7 +5,7 @@ the **generated** kernel (``gen/hist.cpp`` / ``gen/hist.hpp``) from the Python
 ``HistAccel``, writes per-case input vectors, and exposes the golden expectation
 (status + counts) — the pieces the C-sim test drives.  The generated kernel and
 generated testbench (``gen/hist_tb.cpp`` from ``HistTBHls``) are compiled by
-``run_gen.tcl`` against the hand-written datapath hooks.
+``run.tcl`` against the hand-written datapath hooks.
 """
 from __future__ import annotations
 
@@ -90,7 +90,7 @@ class HistCase:
 
     @property
     def expected_status(self) -> HistError:
-        # Mirrors HistAccel.validate (and the hand-written hist.cpp).
+        # Mirrors HistAccel.validate (the kernel's validation logic).
         if self.ndata <= 0 or self.ndata > MAX_NDATA:
             return HistError.INVALID_NDATA
         if self.nbins <= 0 or self.nbins > MAX_NBINS:
@@ -137,12 +137,12 @@ class HistCase:
 #
 # The validation case is ndata==0 (INVALID_NDATA), NOT nbins==0.  The generated
 # TB reads `count = nbins - 1` edges unconditionally (it mirrors the kernel's
-# guard-free read; the extractor can't lower the `if nbins>1` guard the robust
-# hist_csim_tb.cpp uses).  For nbins==0 that count is -1, which the file read
-# rejects, and nbins>max_nbins would overrun the fixed edges[max_nbins] buffer —
-# so an nbins-based failure isn't drivable through the generated TB.  ndata==0
-# still exercises the >=1 alloc clamp (data count is 0); the counts-alloc clamp
-# is the same emitted expression, confirmed by inspecting gen/hist_tb.cpp.
+# guard-free read; the extractor can't lower an `if nbins>1` guard).  For
+# nbins==0 that count is -1, which the file read rejects, and nbins>max_nbins
+# would overrun the fixed edges[max_nbins] buffer — so an nbins-based failure
+# isn't drivable through the generated TB.  ndata==0 still exercises the >=1
+# alloc clamp (data count is 0); the counts-alloc clamp is the same emitted
+# expression (see CODEGEN_NOTES.md).
 CSIM_CASES = [
     HistCase(ndata=37, nbins=1),
     HistCase(ndata=37, nbins=6),

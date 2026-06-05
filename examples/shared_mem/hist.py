@@ -102,7 +102,7 @@ def golden_counts(
     """Reference histogram: ``bin = #{edges <= sample}`` then count per bin.
 
     Identical to :meth:`HistogramAccel.compute_hist`'s core and to the
-    hand-written ``hist.cpp`` inner loop (``searchsorted(..., side="right")``).
+    ``compute`` hook's inner loop (``searchsorted(..., side="right")``).
     """
     d = np.asarray(data, dtype=np.float32)
     e = np.asarray(bin_edges, dtype=np.float32)
@@ -116,14 +116,13 @@ def golden_counts(
 
 @dataclass
 class HistAccel(HwComponent):
-    """Synthesizable histogram kernel — the codegen source for ``hist.cpp``.
+    """Synthesizable histogram kernel — the codegen source for the generated kernel (``gen/hist.cpp``).
 
     ``run_proc`` is the kernel body (stream-controlled, so the codegen root is
     ``run_proc``): read one :class:`HistCmd`, validate it into a status, read the
     data + bin edges from memory over ``m_mem``, bin them in the ``compute`` hook,
-    write the counts back, and emit one :class:`HistResp`. It is written to stay
-    structurally parallel to the hand-written ``hist.cpp`` so the codegen diff is
-    legible (decision 4).
+    write the counts back, and emit one :class:`HistResp`. It is written to read
+    cleanly as the source the generated kernel is lowered from (decision 4).
     """
 
     cpp_kernel_name: ClassVar[str | None] = "hist"

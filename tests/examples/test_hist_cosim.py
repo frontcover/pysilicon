@@ -19,7 +19,7 @@ from pysilicon.toolchain import toolchain
 
 SHARED_DIR = Path(__file__).resolve().parents[2] / "examples" / "shared_mem"
 _RESOURCES = (
-    "run_gen.tcl",
+    "run.tcl",
     "hist_validate_impl.cpp",
     "hist_compute_impl.cpp",
     "hist_respond_impl.tpp",
@@ -47,7 +47,7 @@ def test_generated_hist_cosim_and_bursts(tmp_path):
     # csim -> csynth -> cosim with port tracing (so a VCD can be generated).
     try:
         toolchain.run_vitis_hls(
-            tmp_path / "run_gen.tcl", work_dir=tmp_path, capture_output=True,
+            tmp_path / "run.tcl", work_dir=tmp_path, capture_output=True,
             env={
                 "PYSILICON_HIST_START_AT": "csim",
                 "PYSILICON_HIST_THROUGH": "cosim",

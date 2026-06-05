@@ -1,7 +1,7 @@
 // Hand-written binning hook for the shared_mem (histogram) example.
 //
-// This is the datapath, lifted verbatim from the inner loop of the hand-written
-// hist.cpp (the diff target): zero the counts, then for each sample find its bin
+// This is the datapath the HistAccel.compute hook describes: zero the counts,
+// then for each sample find its bin
 // (number of edges it meets or exceeds) and increment that count.  HLS can't
 // return an array by value, so the kernel declares the static count buffer and
 // passes it as the `out` out-parameter; this hook fills it in place.

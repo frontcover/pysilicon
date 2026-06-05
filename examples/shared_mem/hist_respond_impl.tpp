@@ -1,9 +1,9 @@
 // Hand-written response hook for the shared_mem (histogram) example.
 //
-// Mirrors the response writes in the hand-written hist.cpp (the diff target):
+// Mirrors HistAccel.respond:
 // build a HistResp echoing the transaction id with the given status and emit it
 // on the output AXI4-Stream with TLAST.  Templated on the stream width, so it is
-// #include'd from hist.hpp (like poly's templated hooks).
+// #include'd from the generated header (like poly's templated hooks).
 #include "include/hist_resp.h"
 
 namespace hist_impl {

@@ -159,7 +159,9 @@ def test_missing_max_count_fails_loudly():
 def _gen_tb() -> str:
     from examples.shared_mem.hist import HistTBHls
     from pysilicon.build.hwgen import tb_files_to_str
-    return tb_files_to_str(HistTBHls)["hist_tb.cpp"]
+    files = tb_files_to_str(HistTBHls)
+    assert len(files) == 1
+    return next(iter(files.values()))
 
 
 def test_tb_int_expr_reuses_kernel_lowerer():

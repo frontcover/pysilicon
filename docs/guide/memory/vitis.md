@@ -25,7 +25,7 @@ An AXI master port gives the kernel read/write access to a flat, byte-addressed 
 The kernel receives a pointer to the base of the memory:
 
 ```cpp
-// From hist.cpp / hist.hpp
+// From the generated kernel (gen/hist.cpp / gen/hist.hpp)
 using mem_word_t = ap_uint<mem_dwidth>;
 
 void hist(hls::stream<axis_word_t>& in_stream,
@@ -40,7 +40,7 @@ Even though the hardware interface is byte-addressed (AXI4), the C++ pointer is 
 The `HistCmd` descriptor stores three byte addresses — one for each memory region:
 
 ```cpp
-// From hist.cpp
+// From the generated kernel (gen/hist.cpp)
 const int ndata  = static_cast<int>(cmd.ndata);
 const int nbins  = static_cast<int>(cmd.nbins);
 
@@ -54,7 +54,7 @@ These addresses are the values produced by `Memory.alloc()` on the Python side (
 Before using any address, the kernel checks that it is aligned to the word boundary:
 
 ```cpp
-// From hist.cpp
+// From the generated kernel (gen/hist.cpp)
 if (!memmgr::is_word_aligned<mem_dwidth>(cmd.data_addr)   ||
     !memmgr::is_word_aligned<mem_dwidth>(cmd.bin_edges_addr) ||
     !memmgr::is_word_aligned<mem_dwidth>(cmd.cnt_addr)) {
@@ -71,7 +71,7 @@ if (!memmgr::is_word_aligned<mem_dwidth>(cmd.data_addr)   ||
 After the alignment check, each byte address is converted to a word index:
 
 ```cpp
-// From hist.cpp
+// From the generated kernel (gen/hist.cpp)
 const int data_word_idx  = memmgr::byte_addr_to_word_index<mem_dwidth>(cmd.data_addr);
 const int edge_word_idx  = memmgr::byte_addr_to_word_index<mem_dwidth>(cmd.bin_edges_addr);
 const int count_word_idx = memmgr::byte_addr_to_word_index<mem_dwidth>(cmd.cnt_addr);
@@ -84,7 +84,7 @@ const int count_word_idx = memmgr::byte_addr_to_word_index<mem_dwidth>(cmd.cnt_a
 With the word indices in hand, the kernel uses the generated array utilities to read data from and write data to the AXI memory port:
 
 ```cpp
-// From hist.cpp
+// From the generated kernel (gen/hist.cpp)
 // Read input data and bin edges into local buffers
 float32_array_utils::read_array<mem_dwidth>(mem + data_word_idx, data_buf, ndata);
 if (nbins > 1) {
@@ -133,7 +133,7 @@ The key difference from the AXI master style:
 
 ## C++ testbench mirroring the Python flow
 
-The C++ testbench (`hist_tb.cpp`) mirrors the Python `simulate()` method exactly so that the same addresses are valid on both sides.
+The generated C++ testbench (`gen/hist_tb.cpp`) mirrors the Python `simulate()` method exactly so that the same addresses are valid on both sides.
 
 ### Python side (`hist_demo.py`)
 
@@ -155,7 +155,7 @@ cmd.bin_edges_addr = edge_addr
 cmd.cnt_addr       = count_addr
 ```
 
-### C++ testbench side (`hist_tb.cpp`)
+### C++ testbench side (`gen/hist_tb.cpp`)
 
 ```cpp
 // Flat memory buffer

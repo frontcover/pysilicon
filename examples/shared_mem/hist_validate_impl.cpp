@@ -1,6 +1,6 @@
 // Hand-written validation hook for the shared_mem (histogram) example.
 //
-// Mirrors the validation block of the hand-written hist.cpp (the diff target):
+// Mirrors HistAccel.validate:
 // bounds-check ndata/nbins against the compile-time maxes and require the three
 // buffer addresses to be word-aligned, selecting a HistError status.  Codegen
 // emits the call (`ap_uint<8> status = hist_impl::validate(cmd);`) and the

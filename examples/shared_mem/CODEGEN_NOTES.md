@@ -1,50 +1,43 @@
-# shared_mem (histogram) codegen — diff vs hand-written `hist.cpp`/`hist.hpp`
+# shared_mem (histogram) codegen notes
 
-Phase 3 generates `gen/hist.cpp` + `gen/hist.hpp` from the Python `HistAccel`
-(`python -c "from hist import HistAccel; ..."` or the build DAG). The
-hand-written `hist.cpp`/`hist.hpp` stay the **diff targets** until Phase 6 cosim
-passes; they are not yet retired.
+All C++ for this example is generated from `hist.py`: the kernel + header
+(`gen/hist.cpp` / `gen/hist.hpp`) from `HistAccel`, and the testbench
+(`gen/hist_tb.cpp`) from `HistTBHls`. `generate_vitis_sources` (in
+`shared_mem_build.py`) emits the Vitis include headers and these files; `run.tcl`
+compiles them against the hand-written datapath hooks. There are no hand-written
+kernel/testbench files — `hist.py` is the source of truth.
 
-## What matches (the I/O scaffolding codegen owns)
+## Kernel (`gen/hist.cpp` / `gen/hist.hpp`)
 
-- Kernel signature: `void hist(in_stream, out_stream, mem)` — two AXI4-Stream
-  ports + one `m_axi` pointer; `m_axi` pragma `offset=slave bundle=gmem`, plus
-  `ap_ctrl_hs port=return`.
-- The three array ops lower identically: `float32_array_utils::read_array<32>` of
-  data and edges, `uint32_array_utils::write_array<32>` of counts, each through
-  `memmgr::byte_addr_to_word_index<32>(cmd.<addr>)`.
-- Local buffers `static float data[...]`, `static float edges[...]`,
-  `static ap_uint<32> counts[...]`.
-
-## Expected differences (legible, by design)
-
-- **Datapath is factored into hand-written hooks.** The generated kernel calls
-  `hist_impl::validate(cmd)`, `hist_impl::compute(..., counts)`,
-  `hist_impl::respond(m_out, tx_id, status)`; the hand-written `hist.cpp` inlines
-  the bounds/alignment checks, the binning loop, and the response writes. The
-  hooks (`hist_validate_impl.cpp`, `hist_compute_impl.cpp`,
-  `hist_respond_impl.tpp`) encode the **same** logic the inline `hist.cpp` does —
-  they are the datapath, so the diff is where a logic mismatch would show first.
-- **Compute returns an array.** `counts = compute(...)` lowers to a declared
-  `static ap_uint<32> counts[...]` + a void call passing `counts` as the trailing
-  out-parameter (HLS can't return arrays by value).
-- **Naming.** Generated uses the Python endpoint/param names (`s_in`/`m_out`/
-  `m_mem`, buffers `data`/`edges`/`counts`) vs the hand-written `in_stream`/
-  `out_stream`/`mem`, `data_buf`/`edge_buf`/`count_buf`. The literal widths are
-  inlined (`<32>`) rather than via `mem_dwidth`; the depth is a summed constant
-  `m_mem_depth = max_ndata + max_nbins + max_nbins` vs `max_mem_words`.
-- **Header.** Generated uses `#pragma once`; constants are the buffer bounds it
-  actually references (`max_ndata`, `max_nbins`, `m_mem_depth`). The edges/counts
-  buffers are sized `max_nbins`/`32` (≥ the `nbins-1`/`nbins` runtime counts);
-  the hand-written edge buffer is `max_nbins-1`. All bounds are safe upper limits.
+- **Signature / pragmas:** `void hist(s_in, m_out, m_mem)` — two AXI4-Stream
+  ports + one `m_axi` pointer; `m_axi` pragma `offset=slave bundle=gmem
+  depth=...`, plus `ap_ctrl_hs port=return`.
+- **Three array ops** lower to typed bursts: `float32_array_utils::read_array<32>`
+  of data and edges, `uint32_array_utils::write_array<32>` of counts, each via
+  `memmgr::byte_addr_to_word_index<32>(cmd.<addr>)`, into `static float data[...]`,
+  `static float edges[...]`, `static ap_uint<32> counts[...]`.
+- **Datapath is factored into hand-written hooks** — `hist_impl::validate(cmd)`,
+  `hist_impl::compute(..., counts)`, `hist_impl::respond(m_out, tx_id, status)`
+  (`hist_validate_impl.cpp`, `hist_compute_impl.cpp`, `hist_respond_impl.tpp`).
+  These encode the bounds/alignment checks, the binning loop, and the response
+  writes — the datapath the Python `forward`/`@synthesizable` hooks describe.
+- **Compute returns an array:** `counts = compute(...)` lowers to a declared
+  `static ap_uint<32> counts[...]` + a `void` call passing `counts` as the
+  trailing out-parameter (HLS can't return arrays by value).
+- **Header constants:** the HwParam buffer bounds (`max_ndata`, `max_nbins`), the
+  per-port `m_mem_depth`, plus `max_mem_words` and the interface widths /
+  `axis_word_t` / `mem_word_t` typedefs the testbench needs (emitted only when an
+  `m_axi` master is present, so other examples are unaffected).
 - **Edges read is unconditional** (count `nbins-1`, which is `0` when `nbins==1`)
   rather than guarded by `if (nbins > 1)` — the extractor can't lower a `>`
   branch, and a zero-length burst is a no-op.
 
-Functional equivalence is proven by Phase 4 (C-sim vs the `HistogramAccel`
-golden) and Phase 6 (cosim + burst).
+Functional equivalence to the `HistogramAccel` numpy golden is proven
+empirically: C-sim (`test_hist_csim.py`) across nbins==1 / nbins>1 / a
+validation-failure case, and RTL cosim + multi-buffer burst extraction
+(`test_hist_cosim.py`).
 
-## Generated testbench (`gen/hist_tb.cpp` from `HistTBHls`)
+## Testbench (`gen/hist_tb.cpp` from `HistTBHls`)
 
 The TB codegen lowers the same way the kernel does: counts like `nbins - 1` go
 through the shared `_emit_ast_expr` lowerer (single source of truth), and each
@@ -56,8 +49,8 @@ through the shared `_emit_ast_expr` lowerer (single source of truth), and each
 The C-sim/cosim coverage uses **`ndata == 0`** (INVALID_NDATA) as the
 validation-failure case, **not `nbins == 0`**. The generated TB reads
 `count = nbins - 1` edges *unconditionally* (it mirrors the kernel's guard-free
-read; the extractor only lowers `==`/`!=` `CaseStmt`s, not the `if (nbins > 1)`
-guard the hand-written `hist_csim_tb.cpp` uses). So:
+read; the extractor only lowers `==`/`!=` `CaseStmt`s, not an `if (nbins > 1)`
+guard). So:
 
 - `nbins == 0` → edges count `-1`, which the file reader rejects (`n0 must be
   non-negative`).
