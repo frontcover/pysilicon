@@ -25,23 +25,20 @@ This module exposes two classes:
 ``AXIMMQueueLayout``
     The memory map.  Owns all address math given ``mem_bw``, ``capacity`` and
     ``elem_words``.
-``MMMemory``
-    A reusable word-addressed RAM ``SimObj`` backing an MM slave (a cleaned-up,
-    generalized version of the ``MemBank`` defined locally in
-    ``examples/interface/aximm_demo.py``).  Lives here (rather than in
-    ``memif.py``) so the queue's dependency on a concrete memory model stays
-    local; any MM slave with read/write callbacks works — ``MMMemory`` is just
-    the convenient default.
+``AXIMMQueue``
+    The proxy a master uses to ``write``/``get`` the ring.  Storage-agnostic —
+    it only issues ``MMIFMaster`` transactions — so it works over any MM slave;
+    :class:`~pysilicon.hw.memory.MemComponent` is the canonical backing store.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass, field
-from typing import ClassVar
+from dataclasses import dataclass
+from typing import Any, ClassVar
 
 import numpy as np
 
-from pysilicon.hw.memif import MMIFMaster, MMIFSlave, Words
-from pysilicon.simulation.simobj import ProcessGen, SimObj
+from pysilicon.hw.memif import MMIFMaster, Words
+from pysilicon.simulation.simobj import ProcessGen
 
 
 # ---------------------------------------------------------------------------
@@ -128,69 +125,6 @@ class AXIMMQueueLayout:
     def total_bytes(self) -> int:
         """Size of the whole region, for ``assign_address_ranges``."""
         return self.control_bytes + self.capacity * self.elem_words * self.word_bytes
-
-
-# ---------------------------------------------------------------------------
-# Reusable memory slave
-# ---------------------------------------------------------------------------
-
-@dataclass
-class MMMemory(SimObj):
-    """Word-addressed RAM backing an MM slave (generalized aximm_demo MemBank).
-
-    Backed by a dict keyed by byte address.  In the FULL protocol the slave
-    callback receives the whole burst at the starting ``local_addr`` and is
-    responsible for striding words within it; the stride per word is
-    ``bitwidth // 8`` bytes, never a hard-coded 4.
-
-    Parameters
-    ----------
-    bitwidth : int
-        Data word width in bits.  Must match the queue layout's ``mem_bw`` and
-        the interconnect ``bitwidth``.
-    access_latency : float
-        Simulated read access time (seconds).  Writes are non-blocking.
-    """
-
-    bitwidth: int = 32
-    access_latency: float = 0.0
-
-    slave_ep: MMIFSlave = field(init=False)
-
-    def __init_subclass__(cls, **kwargs):
-        super().__init_subclass__(**kwargs)
-
-    def __post_init__(self) -> None:
-        super().__post_init__()
-        self._mem: dict[int, int] = {}
-        self.slave_ep = MMIFSlave(
-            sim=self.sim,
-            bitwidth=self.bitwidth,
-            rx_write_proc=self.rx_write,
-            rx_read_proc=self.rx_read,
-        )
-
-    @property
-    def _word_bytes(self) -> int:
-        return self.bitwidth // 8
-
-    def rx_write(self, words: Words, local_addr: int) -> ProcessGen[None]:
-        word_bytes = self._word_bytes
-        for i, w in enumerate(words):
-            self._mem[local_addr + i * word_bytes] = int(w)
-        yield self.timeout(0)   # write is non-blocking for the caller
-
-    def rx_read(self, nwords: int, local_addr: int) -> ProcessGen[Words]:
-        if self.access_latency > 0:
-            yield self.timeout(self.access_latency)
-        else:
-            yield self.timeout(0)
-        word_bytes = self._word_bytes
-        dtype = np.uint32 if self.bitwidth <= 32 else np.uint64
-        return np.array(
-            [self._mem.get(local_addr + i * word_bytes, 0) for i in range(nwords)],
-            dtype=dtype,
-        )
 
 
 # ---------------------------------------------------------------------------
@@ -348,38 +282,45 @@ class AXIMMQueue:
         return np.concatenate(chunks) if len(chunks) > 1 else chunks[0]
 
     # ------------------------------------------------------------------
-    # Blocking public API (decision 8) — poll the try_* primitives.
+    # Blocking public API (decisions 6 & 8) — poll the try_* primitives.
     # ------------------------------------------------------------------
 
-    def write(
-        self, words: Words, poll_interval: float = DEFAULT_POLL_INTERVAL
-    ) -> ProcessGen[None]:
-        """Enqueue *words* as one atomic batch, blocking until it fits.
+    def _check_schema_elem_words(self, schema_type: type) -> int:
+        """Validate a schema's word footprint matches the layout's elem_words.
 
-        The batch is enqueued all-or-nothing, so it must fit in the usable depth
-        (``capacity - 1`` slots); a producer that wants to stream more than that
-        chunks the data into multiple ``write`` calls.  Polls :meth:`try_write`,
-        sleeping *poll_interval* simulation seconds between attempts; the loop is
-        cancelled by simulation end like any other SimObj process.
+        Typed access only makes sense when one element occupies exactly one slot
+        (``elem_words`` words); otherwise the slot addressing and the schema
+        disagree and every transfer would be misaligned (decision 11, applied to
+        the typed layer).
         """
-        nslots = len(words) // self.layout.elem_words
-        if nslots > self.layout.capacity - 1:
+        nwpe = schema_type.nwords_per_inst(self.layout.mem_bw)
+        if nwpe != self.layout.elem_words:
             raise ValueError(
-                f"write: batch of {nslots} slots can never fit in usable depth "
-                f"{self.layout.capacity - 1}; chunk the data into smaller writes"
+                f"{schema_type.__name__} occupies {nwpe} words per element at "
+                f"mem_bw={self.layout.mem_bw}, but the layout's elem_words is "
+                f"{self.layout.elem_words}"
             )
-        while not (yield from self.try_write(words)):
-            yield self.master.timeout(poll_interval)
+        return nwpe
 
-    def get(
-        self, nslots: int, poll_interval: float = DEFAULT_POLL_INTERVAL
-    ) -> ProcessGen[Words]:
-        """Dequeue exactly *nslots* slots, blocking until they are available.
+    def _write_raw(self, words: Words, poll_interval: float) -> ProcessGen[None]:
+        """Stream *words* into the ring in pieces of at most the usable depth.
 
-        Polls :meth:`try_get`, sleeping *poll_interval* simulation seconds when
-        the queue is empty; the loop is cancelled by simulation end like any
-        other SimObj process.
+        Blocks as the consumer drains; mirrors :meth:`_get_raw_slots`.  There is
+        no size guard — an array larger than the queue is fed through in chunks.
         """
+        ew = self.layout.elem_words
+        chunk_words = (self.layout.capacity - 1) * ew   # max words per attempt
+        n = len(words)
+        off = 0
+        while off < n:
+            piece = words[off:off + chunk_words]
+            if (yield from self.try_write(piece)):
+                off += len(piece)
+            else:
+                yield self.master.timeout(poll_interval)
+
+    def _get_raw_slots(self, nslots: int, poll_interval: float) -> ProcessGen[Words]:
+        """Dequeue exactly *nslots* slots (blocking), returning the raw words."""
         ew = self.layout.elem_words
         out: list[Words] = []
         collected = 0
@@ -390,4 +331,87 @@ class AXIMMQueue:
             else:
                 out.append(chunk)
                 collected += len(chunk) // ew
+        if not out:
+            # nslots == 0 (or nothing collected): return an empty array rather
+            # than indexing out[0] on an empty list.
+            return np.empty(0, dtype=self._dtype)
         return np.concatenate(out) if len(out) > 1 else out[0]
+
+    def write(
+        self,
+        data: Any,
+        element_type: type | None = None,
+        *,
+        poll_interval: float = DEFAULT_POLL_INTERVAL,
+    ) -> ProcessGen[None]:
+        """Enqueue *data*, blocking until the whole batch is in (decision 8).
+
+        With ``element_type=None`` *data* is a raw word array.  With
+        *element_type* given, *data* is an array / iterable of elements that is
+        serialized (``elem_words`` words each) before enqueue — the layout's
+        ``elem_words`` must equal ``element_type.nwords_per_inst(mem_bw)``.
+
+        Either way the words are streamed through in pieces of at most the usable
+        depth (``capacity - 1`` slots), blocking as the consumer drains, until
+        every word is enqueued; there is no size guard.  The atomic single-shot
+        enqueue stays available as :meth:`try_write`.
+        """
+        if element_type is None:
+            words = data
+        else:
+            self._check_schema_elem_words(element_type)
+            from pysilicon.hw.arrayutils import write_array
+            words = write_array(data, elem_type=element_type, word_bw=self.layout.mem_bw)
+        yield from self._write_raw(words, poll_interval)
+
+    def get(
+        self,
+        schema_type: type | None = None,
+        count: int | None = None,
+        *,
+        nwords_max: int | None = None,
+        poll_interval: float = DEFAULT_POLL_INTERVAL,
+    ) -> ProcessGen[Any]:
+        """Dequeue from the ring, blocking until the data is available.
+
+        Reuses the stream queue's signature exactly (decision 6;
+        :meth:`~pysilicon.hw.interface.StreamIFSlave.get`).
+
+        Raw path (``schema_type=None``) returns a NumPy word array; pass exactly
+        one of *count* (number of slots) or *nwords_max* (number of words, a
+        multiple of ``elem_words``) to say how much to dequeue.
+
+        Typed path (*schema_type* given) sets the element footprint from
+        ``schema_type.nwords_per_inst(mem_bw)`` (which must equal the layout's
+        ``elem_words``), dequeues, and deserializes: with *count* it returns a
+        ``count``-element :class:`~pysilicon.hw.dataschema.DataArray` (mirroring
+        ``StreamIFSlave.get``); without *count*, a single deserialized instance
+        (one slot).
+        """
+        ew = self.layout.elem_words
+        if schema_type is None:
+            if count is not None and nwords_max is not None:
+                raise ValueError("get: pass at most one of count / nwords_max")
+            if count is not None:
+                nslots = int(count)
+            elif nwords_max is not None:
+                if int(nwords_max) % ew != 0:
+                    raise ValueError(
+                        f"get: nwords_max={nwords_max} is not a multiple of "
+                        f"elem_words={ew}"
+                    )
+                nslots = int(nwords_max) // ew
+            else:
+                raise ValueError("get: raw path requires count or nwords_max")
+            return (yield from self._get_raw_slots(nslots, poll_interval))
+
+        # Typed path.
+        self._check_schema_elem_words(schema_type)
+        nslots = int(count) if count is not None else 1
+        raw = yield from self._get_raw_slots(nslots, poll_interval)
+        if count is not None:
+            from pysilicon.hw.arrayutils import read_array
+            return read_array(
+                raw, elem_type=schema_type, word_bw=self.layout.mem_bw, shape=int(count)
+            )
+        return schema_type().deserialize(raw, word_bw=self.layout.mem_bw)
