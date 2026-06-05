@@ -126,6 +126,7 @@ class HwStmtExtractor:
         Subtrees of ``@sim_only`` call statements are skipped entirely so the
         rule doesn't apply to their arguments either.
         """
+        from pysilicon.hw.hw_component import HwParamValue
         from pysilicon.hw.interface import InterfaceEndpoint
         from pysilicon.hw.regmap import RegMap
 
@@ -163,7 +164,7 @@ class HwStmtExtractor:
                 if obj is not None and (
                     getattr(obj, '_is_sim_only', False)
                     or getattr(obj, '_is_synthesizable', False)
-                    or isinstance(obj, (InterfaceEndpoint, RegMap))
+                    or isinstance(obj, (InterfaceEndpoint, RegMap, HwParamValue))
                 ):
                     return
                 lineno = getattr(node, 'lineno', '?')
@@ -999,8 +1000,9 @@ class HwStmtExtractor:
         self._require_synthesizable(method, call_node)
         assert method is not None
         inputs = self._resolve_call_args(call_node)
+        kwargs = self._resolve_call_kwargs(call_node)
         outputs = self._make_output_vars(targets)
-        stmt = self._make_call_stmt(method, inputs, outputs)
+        stmt = self._make_call_stmt(method, inputs, outputs, kwargs)
         for v in outputs:
             v.producer = stmt
             self._scope[v.name] = v
@@ -1019,24 +1021,47 @@ class HwStmtExtractor:
         self._require_synthesizable(method, parent)
         assert method is not None
         inputs = self._resolve_call_args(call_node)
-        return self._make_call_stmt(method, inputs, [])
+        kwargs = self._resolve_call_kwargs(call_node)
+        return self._make_call_stmt(method, inputs, [], kwargs)
 
     def _make_call_stmt(
         self,
         method: object,
         inputs: list,
         outputs: list[HwVar],
+        kwargs: dict | None = None,
     ) -> HwStmt:
+        kwargs = kwargs or {}
         stmt_class = getattr(method, '_stmt_class', None)
         if stmt_class is not None:
-            return stmt_class(method=method, inputs=inputs, outputs=outputs)
+            return stmt_class(method=method, inputs=inputs, outputs=outputs, kwargs=kwargs)
         synth_fn = getattr(method, '_synth_fn', None)
         if synth_fn is not None:
-            return SynthCallStmt(method=method, inputs=inputs, outputs=outputs)
+            return SynthCallStmt(method=method, inputs=inputs, outputs=outputs, kwargs=kwargs)
         impl_file = getattr(method, '_impl_file', None)
         return FunctionStmt(
-            method=method, inputs=inputs, outputs=outputs, impl_file=impl_file,
+            method=method, inputs=inputs, outputs=outputs, kwargs=kwargs,
+            impl_file=impl_file,
         )
+
+    def _resolve_call_kwargs(self, call_node: ast.Call) -> dict:
+        """Resolve keyword args (by name) the same way as positional args.
+
+        Codegen-relevant keywords (e.g. ``max_count`` on m_axi array ops) are
+        captured so a statement can project them by name."""
+        result: dict = {}
+        for kw in call_node.keywords:
+            if kw.arg is None:   # **kwargs splat — not synthesizable
+                continue
+            arg = kw.value
+            if isinstance(arg, ast.Name) and arg.id in self._scope:
+                result[kw.arg] = self._scope[arg.id]
+            elif isinstance(arg, ast.Attribute):
+                obj = self._resolve_obj(arg)
+                result[kw.arg] = obj if obj is not None else arg
+            else:
+                result[kw.arg] = arg
+        return result
 
     # ------------------------------------------------------------------
     # Resolution helpers

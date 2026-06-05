@@ -108,46 +108,65 @@ class HistAccel(HwComponent):
     def run_proc(self) -> ProcessGen[None]:
         """Kernel body (single ap_ctrl_hs invocation).
 
-        The validation branches lower to an early-return status path (decision
-        4); the three array ops lower to ``array_utils`` reads/writes against the
-        one ``m_mem`` bundle at the three command addresses (decisions 1–3).
+        ``validate`` returns a status; a non-NO_ERROR status takes the early-
+        return path (an ``!=`` against a constant, which the extractor lowers
+        directly, decision 4). The three array ops then read/write against the
+        one ``m_mem`` bundle at the three command addresses, with per-buffer
+        compile-time bounds via ``max_count`` (decisions 1–3). The edges read is
+        unconditional — when ``nbins == 1`` its runtime count is ``0`` (a no-op
+        burst), avoiding a ``>`` branch the extractor can't lower.
         """
         cmd: HistCmd = yield from self.s_in.get(HistCmd)
-        resp = HistResp()
-        resp.tx_id = cmd.tx_id
 
+        status = yield from self.validate(cmd)
+        if status != HistError.NO_ERROR:
+            yield from self.respond(self.m_out, cmd.tx_id, status)
+            return
+
+        data = yield from self.m_mem.read_array(
+            Float32, cmd.ndata, cmd.data_addr, max_count=self.max_ndata)
+        edges = yield from self.m_mem.read_array(
+            Float32, cmd.nbins - 1, cmd.bin_edges_addr, max_count=self.max_nbins)
+
+        counts = yield from self.compute(data, edges, cmd.ndata, cmd.nbins)
+        yield from self.m_mem.write_array(
+            counts, Uint32Field, cmd.cnt_addr, cmd.nbins, max_count=self.max_nbins)
+
+        # status is NO_ERROR on the success path — reuse it for the response.
+        yield from self.respond(self.m_out, cmd.tx_id, status)
+
+    @synthesizable
+    def validate(self, cmd) -> ProcessGen[HistError]:
+        """Bounds + alignment checks (hand-written as ``hist_validate_impl.cpp``).
+
+        Returns the :class:`HistError` status; ``NO_ERROR`` means proceed. As a
+        ``@synthesizable`` hook its body is *not* extracted (the C++ is
+        hand-written and references the ``max_ndata``/``max_nbins`` constants),
+        so it may freely read the HwParams here for the SimPy model."""
         ndata = int(cmd.ndata)
         nbins = int(cmd.nbins)
-
-        # --- validation → status (before any memory op) ---
-        if ndata <= 0 or ndata > self.max_ndata:
-            resp.status = HistError.INVALID_NDATA
-            yield from self.m_out.write(resp)
-            return
-        if nbins <= 0 or nbins > self.max_nbins:
-            resp.status = HistError.INVALID_NBINS
-            yield from self.m_out.write(resp)
-            return
         word_bytes = self.mem_bw // 8
+        if ndata <= 0 or ndata > self.max_ndata:
+            return HistError.INVALID_NDATA
+        if nbins <= 0 or nbins > self.max_nbins:
+            return HistError.INVALID_NBINS
         if (int(cmd.data_addr) % word_bytes
                 or int(cmd.bin_edges_addr) % word_bytes
                 or int(cmd.cnt_addr) % word_bytes):
-            resp.status = HistError.ADDRESS_ERROR
-            yield from self.m_out.write(resp)
-            return
+            return HistError.ADDRESS_ERROR
+        return HistError.NO_ERROR
+        yield  # unreachable — makes this a generator
 
-        # --- read inputs (data + edges), bin, write counts ---
-        data = yield from self.m_mem.read_array(Float32, ndata, cmd.data_addr)
-        if nbins > 1:
-            edges = yield from self.m_mem.read_array(Float32, nbins - 1, cmd.bin_edges_addr)
-        else:
-            edges = np.array([], dtype=np.float32)
+    @synthesizable
+    def respond(self, m_out, tx_id, status) -> ProcessGen[None]:
+        """Build the HistResp and emit it (hand-written as ``hist_respond_impl``).
 
-        counts = yield from self.compute(data, edges, ndata, nbins)
-        yield from self.m_mem.write_array(counts, Uint32Field, cmd.cnt_addr, nbins)
-
-        resp.status = HistError.NO_ERROR
-        yield from self.m_out.write(resp)
+        A hook (like increment's ``respond``): codegen emits the call, the
+        hand-written C++ constructs the response and writes the AXI4-Stream."""
+        resp = HistResp()
+        resp.tx_id = tx_id
+        resp.status = status
+        yield from m_out.write(resp)
 
     @synthesizable
     def compute(self, data, edges, ndata, nbins) -> ProcessGen[npt.NDArray[np.uint32]]:

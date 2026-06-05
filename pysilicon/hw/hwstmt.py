@@ -94,6 +94,7 @@ class SynthCallStmt(HwStmt):
     method: object              # bound callable with _is_synthesizable=True
     inputs: list               # HwVar | InterfaceEndpoint | ast node
     outputs: list[HwVar]
+    kwargs: dict = field(default_factory=dict)  # resolved keyword args by name
 
 
 class MMArrayReadStmt(SynthCallStmt):
@@ -123,6 +124,11 @@ class MMArrayReadStmt(SynthCallStmt):
     @property
     def addr_expr(self):
         return self.inputs[2] if len(self.inputs) > 2 else None
+
+    @property
+    def max_expr(self):
+        """The ``max_count=`` compile-time buffer bound (None if omitted)."""
+        return self.kwargs.get('max_count')
 
     @property
     def target_var(self) -> "HwVar | None":
@@ -161,6 +167,11 @@ class MMArrayWriteStmt(SynthCallStmt):
     @property
     def count_expr(self):
         return self.inputs[3] if len(self.inputs) > 3 else None
+
+    @property
+    def max_expr(self):
+        """The ``max_count=`` compile-time buffer bound (None if omitted)."""
+        return self.kwargs.get('max_count')
 
     def __repr__(self) -> str:
         src = getattr(self.source_expr, 'name', '?')

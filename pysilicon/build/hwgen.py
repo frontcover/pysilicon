@@ -133,13 +133,43 @@ def _emit_case(stmt: CaseStmt, ctx: CodegenCtx) -> str:
 
 
 def _emit_expr(expr, ctx: CodegenCtx) -> str:
+    from pysilicon.hw.hw_component import HwParamValue
     if isinstance(expr, HwVar):
         return expr.name
     if isinstance(expr, Ref):
         return expr.var.name
     if isinstance(expr, FieldRef):
         return f"{expr.var.name}.{expr.field}"
+    # A HwParam read (e.g. ``self.max_ndata``) lowers to its named C++ constant
+    # (emitted in the kernel header), not its inlined value — must precede the
+    # int branch in _emit_literal since HwParamValue is an int subclass.
+    if isinstance(expr, HwParamValue):
+        return expr.param_name
+    import ast as _ast
+    if isinstance(expr, _ast.AST):
+        return _emit_ast_expr(expr, ctx)
     return _emit_literal(expr)
+
+
+def _emit_ast_expr(node, ctx: CodegenCtx) -> str:
+    """Lower a small AST sub-expression (an unresolved call arg) to C++.
+
+    Handles ``cmd.field`` attribute access, integer constants, and ``+``/``-``/
+    ``*`` arithmetic (e.g. the ``nbins - 1`` edge count)."""
+    import ast as _ast
+    if isinstance(node, _ast.Attribute) and isinstance(node.value, _ast.Name):
+        return f"{node.value.id}.{node.attr}"
+    if isinstance(node, _ast.Name):
+        return node.id
+    if isinstance(node, _ast.Constant):
+        return _emit_literal(node.value)
+    if isinstance(node, _ast.BinOp):
+        op = {_ast.Add: '+', _ast.Sub: '-', _ast.Mult: '*'}.get(type(node.op))
+        if op is not None:
+            return (f"{_emit_ast_expr(node.left, ctx)} {op} "
+                    f"{_emit_ast_expr(node.right, ctx)}")
+    from pysilicon.build.hwcodegen import SynthesisError
+    raise SynthesisError(f"Unsupported expression in m_axi argument: {_ast.dump(node)}")
 
 
 def _emit_stream_get(stmt: StreamGetStmt, ctx: CodegenCtx) -> str:
@@ -193,6 +223,24 @@ def _mm_buffer_max(comp) -> int:
     return int(val)
 
 
+def _mm_buffer_bound(stmt, buf: str, ctx: CodegenCtx) -> str:
+    """Compile-time size of the static local buffer an m_axi read fills.
+
+    Comes from the read's explicit ``max_count=`` argument (decisions 3 & 5):
+    each buffer declares its own bound, so a kernel can read several buffers of
+    different sizes into the same bundle.  Fail loudly when it is missing rather
+    than emit an unsized array — there is no global ``max_n`` fallback.
+    """
+    if stmt.max_expr is None:
+        from pysilicon.build.hwcodegen import SynthesisError
+        raise SynthesisError(
+            f"m_axi read into '{buf}' has no compile-time buffer bound; pass an "
+            f"explicit max_count= (e.g. read_array(ElemT, n, addr, "
+            f"max_count=self.max_ndata))."
+        )
+    return _emit_expr(stmt.max_expr, ctx)
+
+
 def _emit_mm_array_read(stmt: MMArrayReadStmt, ctx: CodegenCtx) -> str:
     """``buf = port.read_array(ElemT, count, addr)`` →
     a static local buffer + an ``<elem>_array_utils::read_array`` burst
@@ -202,7 +250,7 @@ def _emit_mm_array_read(stmt: MMArrayReadStmt, ctx: CodegenCtx) -> str:
     ns = _array_utils_ns(stmt.elem_type)
     elem_cpp = cpp_type(stmt.elem_type)
     buf = stmt.target_var.name
-    bufmax = _mm_buffer_max(ctx.comp)
+    bufmax = _mm_buffer_bound(stmt, buf, ctx)
     count = _emit_expr(stmt.count_expr, ctx)
     addr = _emit_expr(stmt.addr_expr, ctx)
     pad = ctx.pad()
