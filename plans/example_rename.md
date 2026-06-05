@@ -25,13 +25,16 @@ the docs restructure + sequencing.
 | 4 | **histogram** | `examples/shared_mem/` (was `histogram`) | data in memory (AXI-MM), control over a dedicated stream | rename **+ codegen upgrade** ([histogram_codegen.md](histogram_codegen.md)) |
 | 5 | vector unit | `examples/mem_queue/` | control *also* in memory, via a descriptor queue | **reserved (TBD)** |
 
-**Retained, not headline:** `examples/increment/` stays in place as the *minimal
-m_axi codegen regression* (the smallest vehicle that proves the generated kernel
-path). It is referenced from the index as a "minimal reference," not as one of
-the five pattern examples.
+**Increment dropped (update):** `examples/increment/` was the scaffolding toy
+that de-risked the m_axi codegen path. With `shared_mem` (histogram) now
+codegen-driven, it strictly subsumes increment's coverage (multi-buffer ⊇
+single-buffer, float+uint ⊇ uint-only, validation ⊇ trivial-status), and the
+clean multi-buffer lowering has no single-`max_n` codepath to keep increment
+working — so increment was removed (see the histogram_codegen effort). The
+`shared_mem` example is the m_axi codegen reference.
 
 **Settled by review (do not re-litigate):**
-- shared_mem = histogram, codegen-driven; increment kept as regression.
+- shared_mem = histogram, codegen-driven; increment dropped (subsumed).
 - The histogram codegen upgrade IS in scope for this effort.
 - `pure_stream` and `mem_queue` are **reserved slots** — listed as planned, not
   built now. `aximm_queue` stays where it is (`examples/interface/aximm_queue_demo.py`,
@@ -55,8 +58,7 @@ the five pattern examples.
    Python timing model.
 
 Per-example coverage markers keep it honest: regmap / stream_inband / shared_mem
-= all five; increment = all five (minimal); mem_queue = stages 1–2 (codegen TBD);
-pure_stream = planned.
+= all five; mem_queue = stages 1–2 (codegen TBD); pure_stream = planned.
 
 ## Scope
 
@@ -112,8 +114,7 @@ commits per that plan.
 ### Phase 4: Rewrite `docs/examples/index.md`
 Five examples in progression order with "new concept" one-liners + coverage
 markers; the general five-stage flow statement; reserve `pure_stream` and
-`mem_queue` as planned; note `increment` as the minimal reference; fix the
-example-section nav to sort in teaching order.
+`mem_queue` as planned; fix the example-section nav to sort in teaching order.
 **Commit:** `docs: example index — five-pattern progression + general PySilicon flow`
 
 ## Future / out of scope (capture, don't build)

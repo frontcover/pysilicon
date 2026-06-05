@@ -30,6 +30,5 @@ This makes it the first example to exercise, over one `m_axi` bundle:
 
 Like the other full examples it walks all five stages — Python model → SimPy
 simulation → code generation → C and RTL simulation → timing extraction — with
-the kernel and testbench generated from the Python `HistAccel` component. The
-minimal `m_axi` codegen reference is
-[`examples/increment/`](https://github.com/sdrangan/pysilicon/tree/main/examples/increment).
+the kernel and testbench generated from the Python `HistAccel` component. It is
+the reference design for AXI-MM (`m_axi`) codegen.

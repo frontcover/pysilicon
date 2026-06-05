@@ -210,8 +210,9 @@ class MMIFMaster(InterfaceEndpoint):
 
         *max_count* is a codegen-only compile-time bound: it sizes the static
         local buffer the generated kernel writes from (``static <ctype>
-        buf[max_count]``).  Ignored in simulation; when omitted the codegen falls
-        back to the component's ``max_n`` HwParam.
+        buf[max_count]``).  Ignored in simulation; required for an
+        m_axi buffered read at codegen time — the generated kernel fails loudly
+        without it (each buffer declares its own bound; there is no fallback).
 
         Accepts a ``np.ndarray`` (fast path for scalar ``FloatField`` /
         ``IntField`` types) or an iterable of schema instances / raw values.
@@ -253,8 +254,9 @@ class MMIFMaster(InterfaceEndpoint):
 
         *max_count* is a codegen-only compile-time bound: it sizes the static
         local buffer the generated kernel reads into (``static <ctype>
-        buf[max_count]``).  Ignored in simulation; when omitted the codegen falls
-        back to the component's ``max_n`` HwParam.
+        buf[max_count]``).  Ignored in simulation; required for an
+        m_axi buffered read at codegen time — the generated kernel fails loudly
+        without it (each buffer declares its own bound; there is no fallback).
 
         Returns a ``np.ndarray`` for scalar ``FloatField`` / ``IntField`` types,
         or a ``list`` of deserialized instances for composite types.

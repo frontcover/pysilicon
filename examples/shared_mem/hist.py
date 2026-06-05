@@ -2,8 +2,8 @@
 hist.py — histogram accelerator as a synthesizable ``HwComponent`` (the codegen
 source for the ``shared_mem`` example).
 
-This mirrors ``examples/increment/incr.py`` but exercises the *real* m_axi
-surface the increment toy was built to de-risk:
+It is the reference design for AXI-MM (``m_axi``) codegen, exercising the full
+multi-buffer surface:
 
 * **three distinct buffers** at independent ``MemAddr`` fields — float input
   ``data``, float ``bin_edges``, uint32 ``counts``;
@@ -19,7 +19,7 @@ is the numpy golden it is validated against.
 
 Control is AXI-Stream + ``ap_ctrl_hs`` (the command rides ``s_in``, the response
 rides ``m_out``); the data lives in memory over ``m_mem``. The codegen root is
-``run_proc`` (stream-controlled, no regmap), as in increment.
+``run_proc`` (stream-controlled, no regmap).
 """
 from __future__ import annotations
 
@@ -77,7 +77,7 @@ def golden_counts(
 
 @dataclass
 class HistAccel(HwComponent):
-    """Synthesizable histogram kernel (mirrors :class:`IncrAccel`).
+    """Synthesizable histogram kernel — the codegen source for ``hist.cpp``.
 
     ``run_proc`` is the kernel body (stream-controlled, so the codegen root is
     ``run_proc``): read one :class:`HistCmd`, validate it into a status, read the
@@ -161,7 +161,7 @@ class HistAccel(HwComponent):
     def respond(self, m_out, tx_id, status) -> ProcessGen[None]:
         """Build the HistResp and emit it (hand-written as ``hist_respond_impl``).
 
-        A hook (like increment's ``respond``): codegen emits the call, the
+        A hook: codegen emits the call, the
         hand-written C++ constructs the response and writes the AXI4-Stream."""
         resp = HistResp()
         resp.tx_id = tx_id
@@ -182,7 +182,7 @@ class HistAccel(HwComponent):
 
 
 # ---------------------------------------------------------------------------
-# SimPy controller (timing-accurate testbench, mirrors IncrController)
+# SimPy controller (timing-accurate testbench driver)
 # ---------------------------------------------------------------------------
 
 @dataclass(kw_only=True)
