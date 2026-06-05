@@ -43,3 +43,35 @@ passes; they are not yet retired.
 
 Functional equivalence is proven by Phase 4 (C-sim vs the `HistogramAccel`
 golden) and Phase 6 (cosim + burst).
+
+## Generated testbench (`gen/hist_tb.cpp` from `HistTBHls`)
+
+The TB codegen lowers the same way the kernel does: counts like `nbins - 1` go
+through the shared `_emit_ast_expr` lowerer (single source of truth), and each
+`MemMgr::alloc` is clamped to `>= 1` word (a 0-word region is meaningless and
+`alloc` rejects it; mirrors the SimPy `HistController`'s `max(nedges, 1)`).
+
+### Known limitation — nbins-based validation isn't drivable through the generated TB
+
+The C-sim/cosim coverage uses **`ndata == 0`** (INVALID_NDATA) as the
+validation-failure case, **not `nbins == 0`**. The generated TB reads
+`count = nbins - 1` edges *unconditionally* (it mirrors the kernel's guard-free
+read; the extractor only lowers `==`/`!=` `CaseStmt`s, not the `if (nbins > 1)`
+guard the hand-written `hist_csim_tb.cpp` uses). So:
+
+- `nbins == 0` → edges count `-1`, which the file reader rejects (`n0 must be
+  non-negative`).
+- `nbins > max_nbins` → overruns the fixed `edges[max_nbins]` TB buffer.
+
+`ndata == 0` cleanly exercises the validate→status / early-return / error-response
+path and the `>= 1` alloc clamp (data count is 0). The **counts**-alloc clamp is
+the same emitted expression (asserted by `test_tb_allocs_clamp_to_one_word`), it
+just isn't hit at runtime through this TB.
+
+**Future option (deferred, not a now-task):** the real fix is general `>`/`>=`
+guard lowering — the deferred condition-IR work — which would let the TB express
+`if (nbins > 1)`. A narrower stopgap would be to lower a clamped count like
+`max(nbins - 1, 0)` so the edges read is always non-negative; that alone would
+make `nbins == 0` drivable (the kernel rejects it before any real read anyway).
+Neither is needed to prove the validation→status codegen path, which `ndata == 0`
+already covers.
