@@ -37,6 +37,11 @@ the five pattern examples.
   built now. `aximm_queue` stays where it is (`examples/interface/aximm_queue_demo.py`,
   sim-only); the future `mem_queue` example is a vecunit driven by an AXI-MM
   descriptor queue, which needs queue HLS codegen first (a separate effort).
+- **Pattern-named directories** (`regmap`, `stream_inband`, `shared_mem`), not
+  computation names. Computation-named files/symbols stay *inside*
+  (`hist.cpp`, `HistAccel`, `PolyAccelComponent`); each doc page carries both —
+  e.g. "Histogram accelerator — shared-memory pattern." The dir names the
+  pattern; the content keeps its mathematical identity.
 
 ## The general flow (for index.md)
 
@@ -63,20 +68,6 @@ and project-dir paths).
 **Out of scope:** `mcp/corpus/` (reworked at the AI-codegen phase — do NOT
 re-path now); building `pure_stream`; building the vecunit `mem_queue`; the
 MemComponent guide-docs page left by the retired `memory_simobj.md`.
-
-## Open decision (CONFIRM before executing)
-
-**Directory naming for the rich examples — pattern name vs recognizable
-computation name.** The progression argues for pattern-named dirs (`shared_mem`),
-with the doc page titled "Histogram accelerator (shared-memory pattern)." The
-counter-argument: a recognizable name (`histogram`) may motivate students more
-than an abstract one, and `examples/shared_mem/hist.cpp` reads oddly.
-- **(A, recommended)** Pattern-named dirs (`shared_mem`, `stream_inband`,
-  `regmap`); keep computation-named files/symbols inside (`hist.cpp`, `HistAccel`,
-  `PolyAccelComponent`); docs carry both ("Histogram — shared-memory pattern").
-- **(B)** Keep recognizable computation dir names (`histogram`, `poly`), and
-  surface the *pattern* only as a label/tag in the docs + index ordering.
-Pick A or B before Phase 1 — it determines every `git mv`.
 
 ## Working convention
 
