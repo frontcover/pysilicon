@@ -7,12 +7,12 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 
-from examples.histogram import hist_demo
-from examples.histogram.hist_demo import HistError, HistSimResult, HistTest
+from examples.shared_mem import hist_demo
+from examples.shared_mem.hist_demo import HistError, HistSimResult, HistTest
 from pysilicon.toolchain import toolchain
 
 
-HIST_EXAMPLE_DIR = Path(__file__).resolve().parents[2] / "examples" / "histogram"
+HIST_EXAMPLE_DIR = Path(__file__).resolve().parents[2] / "examples" / "shared_mem"
 
 
 def _copy_hist_vitis_resources(dst_dir: Path) -> None:

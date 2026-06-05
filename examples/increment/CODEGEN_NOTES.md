@@ -1,6 +1,6 @@
 # incr codegen — diff notes vs the histogram
 
-The increment toy's generated `m_axi` kernel is a smaller `examples/histogram/hist.cpp`.
+The increment toy's generated `m_axi` kernel is a smaller `examples/shared_mem/hist.cpp`.
 Each codegen phase is diffed against the corresponding hand-written histogram file.
 
 ## Phase 3 — kernel (`gen/incr.cpp` / `gen/incr.hpp`) vs `hist.cpp` / `hist.hpp`

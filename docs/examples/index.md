@@ -43,7 +43,7 @@ base case.
 | 1 | [`regmap`](./regmap/) | simple function | register-mapped control (AXI4-Lite) | stages 1–5 | available |
 | 2 | `pure_stream` | moving-average filter | streaming dataflow — no packet boundary, no TLAST, no control | planned | reserved (not built yet) |
 | 3 | [`stream_inband`](./stream_inband/) | polynomial | packetization (TLAST) + in-band control on the stream | stages 1–5 | available |
-| 4 | `shared_mem` | histogram | data in memory (AXI-MM), control over a dedicated stream | stages 1–5 | dir still `examples/histogram/`; codegen upgrade pending |
+| 4 | [`shared_mem`](./shared_mem/) | histogram | data in memory (AXI-MM), control over a dedicated stream | stages 1–5 | available; codegen upgrade in progress |
 | 5 | `mem_queue` | vector unit | control *also* in memory, via a descriptor queue | stages 1–2 (codegen TBD) | reserved (not built yet) |
 
 ## Minimal codegen reference

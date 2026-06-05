@@ -7,7 +7,7 @@ has_children: false
 
 # Using Memory in Python
 
-This page shows how to create and use a `Memory` object in Python. The [histogram example](../../../examples/histogram/hist_demo.py) provides the running example throughout.
+This page shows how to create and use a `Memory` object in Python. The [histogram example](../../../examples/shared_mem/hist_demo.py) provides the running example throughout.
 
 ## Creating a `Memory` object
 

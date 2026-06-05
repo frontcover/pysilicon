@@ -1,6 +1,6 @@
 """Phase 3 tests: m_axi kernel codegen for the increment toy.
 
-Diff target: examples/histogram/hist.cpp (signature, m_axi pragma,
+Diff target: examples/shared_mem/hist.cpp (signature, m_axi pragma,
 byte_addr_to_word_index, array_utils read/write).
 """
 from __future__ import annotations

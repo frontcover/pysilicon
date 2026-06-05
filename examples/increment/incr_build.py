@@ -31,7 +31,7 @@ DEFAULT_MAX_BURST_LENGTH = 16
 
 
 # ---------------------------------------------------------------------------
-# AXI-MM burst expectation (mirrors examples/histogram/hist_demo.py)
+# AXI-MM burst expectation (mirrors examples/shared_mem/hist_demo.py)
 # ---------------------------------------------------------------------------
 
 def _detect_axi_max_burst_lengths(example_dir: Path) -> tuple[int, int]:

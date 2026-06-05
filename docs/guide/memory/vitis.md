@@ -12,7 +12,7 @@ This page explains how the PySilicon memory model maps to HLS/Vitis memory inter
 - **AXI master (`m_axi`)** — byte-addressed, used for off-chip DDR or PYNQ buffers.
 - **Local array / BRAM-like** — word-indexed, used for on-chip storage or direct BRAM ports.
 
-The [histogram example](../../../examples/histogram/) is the main reference throughout.
+The [histogram example](../../../examples/shared_mem/) is the main reference throughout.
 
 ## AXI master interface (`m_axi`)
 
