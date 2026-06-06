@@ -2,7 +2,7 @@
 title: Shared Memory (histogram)
 parent: Examples
 nav_order: 4
-has_children: false
+has_children: true
 ---
 
 # Shared Memory (histogram)
@@ -32,3 +32,20 @@ Like the other full examples it walks all five stages — Python model → SimPy
 simulation → code generation → C and RTL simulation → timing extraction — with
 the kernel and testbench generated from the Python `HistAccel` component. It is
 the reference design for AXI-MM (`m_axi`) codegen.
+
+## Walkthrough
+
+1. [Understanding AXI Memory-Mapped](aximm.md) — what `m_axi` is (burst
+   transfers, byte-addressed pointers into shared DRAM), and the shared-memory
+   architecture: bulk data in memory, command/response on a dedicated stream.
+2. [Python model](python.md) — the `HistAccel` component, the `HistCmd` /
+   `HistResp` / `HistError` schemas, and the `MMIFMaster` (`read_array` /
+   `write_array`) interface.
+3. [Python simulation](pysim.md) — the SimPy harness (`HistController` +
+   `MemComponent`) and parity against the numpy golden.
+4. [Code generation](codegen.md) — lowering `HistAccel` / `HistTBHls` to the
+   multi-buffer m_axi Vitis HLS kernel and testbench.
+5. [C and RTL simulation](rtlsim.md) — the four-case C-sim coverage, C-synthesis,
+   RTL co-simulation, and multi-buffer burst extraction.
+6. [Viewing timing and bursts](timing.md) — the committed timing/burst figures
+   and the workflow for refreshing them.
