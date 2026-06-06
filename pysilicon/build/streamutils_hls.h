@@ -2,6 +2,7 @@
 #define STREAMUTILS_HLS_H
 
 #include <ap_int.h>
+#include <ap_fixed.h>
 #include <cstdint>
 #include <hls_stream.h>
 #if __has_include(<hls_axi_stream.h>)
@@ -50,6 +51,29 @@ namespace streamutils {
         } converter;
         converter.u_val = u;
         return converter.f_val;
+    }
+
+    /**
+     * Reinterprets the raw bits of an ap_fixed/ap_ufixed value as an unsigned
+     * integer of the same width (the .range() bit pattern) — a bit-reinterpret,
+     * NOT a value conversion. Templated on the fixed-point type T (uses T::width),
+     * so one helper serves any ap_fixed<W,I,Q,O> / ap_ufixed<...>.
+     */
+    template<typename T>
+    inline ap_uint<T::width> fixed_to_bits(T x) {
+        return x.range(T::width - 1, 0);
+    }
+
+    /**
+     * Inverse of fixed_to_bits: builds an ap_fixed/ap_ufixed value from its raw
+     * W-bit pattern (bit-reinterpret, not value conversion). This is what restores
+     * a fixed-point value from a bitstream word.
+     */
+    template<typename T>
+    inline T bits_to_fixed(ap_uint<T::width> bits) {
+        T x;
+        x.range(T::width - 1, 0) = bits;
+        return x;
     }
 
     /**

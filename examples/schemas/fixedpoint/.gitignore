@@ -1,0 +1,9 @@
+gen/
+results/
+pysilicon_*_proj/
+*.log
+in_a.txt
+in_b.txt
+in_values.txt
+out_bits.txt
+kernel.cpp
