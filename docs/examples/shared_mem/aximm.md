@@ -76,7 +76,7 @@ Everything the kernel needs to find its data is packed into the **command
 descriptor** it reads off the input stream:
 
 ```python
-# examples/shared_mem/hist_demo.py — HistCmd
+# examples/shared_mem/hist.py — HistCmd
 class HistCmd(DataList):
     """Command descriptor for the histogram accelerator."""
     elements = {

@@ -13,7 +13,7 @@ on a stream; here we write the Python that says *how* — the command/response
 schemas, the kernel's three ports, and the `run_proc` body that validates,
 reads, computes, and writes back. Every excerpt is from
 [`examples/shared_mem/hist.py`](../../../examples/shared_mem/hist.py) and
-[`hist_demo.py`](../../../examples/shared_mem/hist_demo.py).
+[`hist.py`](../../../examples/shared_mem/hist.py).
 
 ## The command and response schemas
 
@@ -23,7 +23,7 @@ that serialize to the stream words — so the same field layout drives the SimPy
 model, the generated C++ struct, and the host.
 
 ```python
-# examples/shared_mem/hist_demo.py
+# examples/shared_mem/hist.py
 TxIdField   = IntField.specialize(bitwidth=16, signed=False)
 NdataField  = IntField.specialize(bitwidth=32, signed=False)
 NbinField   = IntField.specialize(bitwidth=32, signed=False)
@@ -36,7 +36,7 @@ The command carries the three buffer addresses and the two sizes; the response
 echoes the transaction id and reports a status:
 
 ```python
-# examples/shared_mem/hist_demo.py
+# examples/shared_mem/hist.py
 class HistCmd(DataList):
     elements = {
         "tx_id":          {"schema": TxIdField},
@@ -58,7 +58,7 @@ The status is a typed enum, not a bare integer — `HistError` names the four
 outcomes the host can distinguish:
 
 ```python
-# examples/shared_mem/hist_demo.py
+# examples/shared_mem/hist.py
 class HistError(IntEnum):
     NO_ERROR      = 0
     INVALID_NDATA = 1

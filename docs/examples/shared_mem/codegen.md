@@ -18,11 +18,11 @@ between generated and hand-written code.
 
 For the histogram example the generation is a small helper,
 `generate_vitis_sources`, in
-[`shared_mem_build.py`](../../../examples/shared_mem/shared_mem_build.py). It
+[`hist_build.py`](../../../examples/shared_mem/hist_build.py). It
 writes the support headers, then lowers the kernel and the testbench:
 
 ```python
-# examples/shared_mem/shared_mem_build.py — generate_vitis_sources
+# examples/shared_mem/hist_build.py — generate_vitis_sources
 (gen / "hist.cpp").write_text(kernel_to_cpp(HistAccel))
 (gen / "hist.hpp").write_text(header_to_cpp(HistAccel))
 for fname, content in tb_files_to_str(HistTBHls).items():
@@ -200,7 +200,7 @@ The generation needs no Vitis — it is pure Python:
 
 ```bash
 cd examples/shared_mem
-python -c "from shared_mem_build import generate_vitis_sources; generate_vitis_sources('.')"
+python -c "from hist_build import generate_vitis_sources; generate_vitis_sources('.')"
 ls gen/        # hist.cpp  hist.hpp  hist_tb.cpp
 ```
 

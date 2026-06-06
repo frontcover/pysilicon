@@ -135,7 +135,7 @@ The key difference from the AXI master style:
 
 The generated C++ testbench (`gen/hist_tb.cpp`) mirrors the Python `simulate()` method exactly so that the same addresses are valid on both sides.
 
-### Python side (`hist_demo.py`)
+### Python side (`hist_build.py`)
 
 ```python
 # Byte-addressed memory matching the AXI interface
