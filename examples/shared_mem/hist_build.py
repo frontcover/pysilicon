@@ -24,18 +24,40 @@ import numpy as np
 from pysilicon.build.build import BuildConfig, BuildDag, BuildStep, SourceStep
 from pysilicon.build.cli import run_dag_cli
 
+from pysilicon.toolchain import toolchain
+
 try:
     from examples.shared_mem.hist import run_sim
+    from examples.shared_mem.hist_demo import HistTest
     from examples.shared_mem.shared_mem_build import (
-        HistCase, generate_vitis_sources,
+        CSIM_CASES, HistCase, generate_vitis_sources,
     )
 except ModuleNotFoundError:  # direct execution from the example dir
     from hist import run_sim  # type: ignore[no-redef]
+    from hist_demo import HistTest  # type: ignore[no-redef]
     from shared_mem_build import (  # type: ignore[no-redef]
-        HistCase, generate_vitis_sources,
+        CSIM_CASES, HistCase, generate_vitis_sources,
     )
 
 _SOURCE_DIR = Path(__file__).resolve().parent
+
+
+def _run_tcl(config: BuildConfig, *, start_at: str, through: str,
+             trace_level: str, live_output: bool) -> None:
+    """Drive run.tcl over a stage range, matching HistTest.test_vitis's env."""
+    toolchain.run_vitis_hls(
+        config.root_dir / "run.tcl", work_dir=config.root_dir,
+        capture_output=not live_output,
+        env={
+            "PYSILICON_HIST_START_AT": start_at,
+            "PYSILICON_HIST_THROUGH": through,
+            "PYSILICON_HIST_TRACE_LEVEL": trace_level,
+        },
+    )
+
+
+def _vcd_trace(trace_level: str) -> str:
+    return trace_level if trace_level in ("port", "all") else "*"
 
 # The default reference vector (the cosim/burst vector). The 4-case csim coverage
 # sweep lives in CSIM_CASES and is driven by the csim step (added in a later phase).
@@ -123,14 +145,131 @@ class PySimStep(BuildStep):
         return {"sim_summary": out}
 
 
+@dataclass(kw_only=True)
+class CsimStep(BuildStep):
+    """Vitis C-simulation across the 4-case coverage set, each checked against the
+    numpy golden (nbins==1, two normal cases, and a validation-failure case — see
+    CSIM_CASES). Restores the reference vector afterwards for the cosim stage."""
+
+    description = "Vitis C-sim across the CSIM_CASES coverage set (vs the numpy golden)."
+    consumes = ["kernel_cpp", "tb_cpp", "include_dir", "run_tcl"]
+    produces = {"csim_verdict": Path("results/csim_verdict.json")}
+    params = {"ndata": DEFAULT_NDATA, "nbins": DEFAULT_NBINS, "seed": DEFAULT_SEED,
+              "live_output": False}
+
+    def run(self, config: BuildConfig, ndata, nbins, seed, live_output, **_) -> dict[str, Any]:
+        data_dir = config.root_dir / "data"
+        cases = []
+        for case in CSIM_CASES:
+            data, edges = case.write_inputs(data_dir)
+            _run_tcl(config, start_at="csim", through="csim",
+                     trace_level="none", live_output=live_output)
+            ok, detail = case.check_outputs(data_dir, data, edges)
+            cases.append({"ndata": case.ndata, "nbins": case.nbins,
+                          "passed": ok, "detail": detail})
+            if not ok:
+                raise RuntimeError(
+                    f"C-sim mismatch ndata={case.ndata} nbins={case.nbins}: {detail}")
+        # Leave the reference vector in data/ for the cosim stage.
+        HistCase(ndata=ndata, nbins=nbins, seed=seed).write_inputs(data_dir)
+        out = config.root_dir / "results" / "csim_verdict.json"
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(json.dumps({"cases": cases, "passed": True}, indent=2),
+                       encoding="utf-8")
+        return {"csim_verdict": out}
+
+
+@dataclass(kw_only=True)
+class CosimStep(BuildStep):
+    """C-synth + RTL co-simulation of the reference vector (one run.tcl invocation,
+    START_AT=csim THROUGH=cosim — the proven test_hist_cosim flow), checked against
+    the golden. Gated on csim passing."""
+
+    description = "Vitis C-synth + RTL co-simulation of the reference vector."
+    consumes = ["kernel_cpp", "tb_cpp", "include_dir", "run_tcl", "csim_verdict"]
+    produces = {"cosim_dir": Path("pysilicon_hist_proj")}
+    params = {"ndata": DEFAULT_NDATA, "nbins": DEFAULT_NBINS, "seed": DEFAULT_SEED,
+              "trace_level": "port", "live_output": False}
+
+    def run(self, config: BuildConfig, ndata, nbins, seed, trace_level,
+            live_output, **_) -> dict[str, Any]:
+        data_dir = config.root_dir / "data"
+        case = HistCase(ndata=ndata, nbins=nbins, seed=seed)
+        data, edges = case.write_inputs(data_dir)
+        _run_tcl(config, start_at="csim", through="cosim",
+                 trace_level=_vcd_trace(trace_level), live_output=live_output)
+        ok, detail = case.check_outputs(data_dir, data, edges)
+        if not ok:
+            raise RuntimeError(f"Cosim output mismatch (reference vector): {detail}")
+        return {"cosim_dir": config.root_dir / "pysilicon_hist_proj"}
+
+
+@dataclass(kw_only=True)
+class GenerateVcdStep(BuildStep):
+    """Re-run the synthesized RTL to write the port-level VCD (Vivado/xsim)."""
+
+    description = "Re-run the RTL sim to write the port-level VCD."
+    consumes = ["cosim_dir"]
+    produces = {"vcd": Path("vcd/dump.vcd")}
+    params = {"ndata": DEFAULT_NDATA, "nbins": DEFAULT_NBINS, "trace_level": "port"}
+
+    def run(self, config: BuildConfig, ndata, nbins, trace_level, **_) -> dict[str, Any]:
+        ht = HistTest(example_dir=config.root_dir, ndata=ndata, nbins=nbins)
+        vcd = ht.generate_vcd(trace_level=_vcd_trace(trace_level))
+        return {"vcd": Path(vcd)}
+
+
+@dataclass(kw_only=True)
+class ExtractBurstsStep(BuildStep):
+    """Extract the multi-buffer AXI-MM burst report from the VCD and validate the
+    layout against the expected allocation (data + bin_edges reads, counts write)."""
+
+    description = "Extract + validate the multi-buffer AXI-MM burst report."
+    consumes = ["vcd"]
+    produces = {"burst_info": Path("vcd/burst_info.json")}
+    params = {"ndata": DEFAULT_NDATA, "nbins": DEFAULT_NBINS}
+
+    def run(self, config: BuildConfig, ndata, nbins, vcd, **_) -> dict[str, Any]:
+        ht = HistTest(example_dir=config.root_dir, ndata=ndata, nbins=nbins)
+        ht.simulate()
+        report = ht.extract_bursts(vcd_path=vcd)
+        if not report.get("validated"):
+            raise RuntimeError("AXI-MM burst layout did not validate against the golden.")
+        return {"burst_info": config.root_dir / "vcd" / "burst_info.json"}
+
+
+@dataclass(kw_only=True)
+class ExtractCosimTimingStep(BuildStep):
+    """Extract the measured per-transaction cycle latency from the cosim report."""
+
+    description = "Extract the measured cosim transaction latency."
+    consumes = ["cosim_dir"]
+    produces = {"cosim_timing": Path("results/cosim_timing.json")}
+
+    def run(self, config: BuildConfig, **_) -> dict[str, Any]:
+        from pysilicon.utils.cosimparse import CosimReportParser
+        sol = config.root_dir / "pysilicon_hist_proj" / "solution1"
+        cycles = CosimReportParser(sol_path=sol, top="hist").get_transaction_cycles()
+        out = config.root_dir / "results" / "cosim_timing.json"
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(json.dumps({"transaction_cycles": cycles}, indent=2),
+                       encoding="utf-8")
+        return {"cosim_timing": out}
+
+
 def build_hist_dag() -> BuildDag:
-    """Assemble the histogram BuildDag (non-Vitis front, for now)."""
+    """Assemble the unified histogram BuildDag."""
     dag = BuildDag()
     dag.add(SourceStep(artifact="hist_source", path=_SOURCE_DIR / "hist.py"))
     dag.add(SourceStep(artifact="run_tcl", path=_SOURCE_DIR / "run.tcl"))
     dag.add(GenSourcesStep(name="gen_sources"))
     dag.add(BuildInputsStep(name="build_inputs"))
     dag.add(PySimStep(name="py_sim"))
+    dag.add(CsimStep(name="csim"))
+    dag.add(CosimStep(name="cosim"))
+    dag.add(GenerateVcdStep(name="generate_vcd"))
+    dag.add(ExtractBurstsStep(name="extract_bursts"))
+    dag.add(ExtractCosimTimingStep(name="extract_cosim_timing"))
     return dag
 
 
