@@ -35,6 +35,14 @@ exclude:
   - vendor/
   - node_modules/
 
-
-
+# examples/ stays served (above) so generated reports + source files remain
+# linkable, but the example dirs' own markdown (README.md, CODEGEN_NOTES.md, …) is
+# developer notes, not site content — keep every examples/*.md out of the nav tree
+# and search. (docs/examples/ is a different path and is unaffected.)
+defaults:
+  - scope:
+      path: "examples"
+    values:
+      nav_exclude: true
+      search_exclude: true
 
