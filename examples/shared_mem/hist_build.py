@@ -32,11 +32,17 @@ try:
     from examples.shared_mem.shared_mem_build import (
         CSIM_CASES, HistCase, generate_vitis_sources,
     )
+    from examples.shared_mem.shared_mem_figures import (
+        GenerateBurstDiagramStep, GenerateTimingDiagramStep, SyncDocsFiguresStep,
+    )
 except ModuleNotFoundError:  # direct execution from the example dir
     from hist import run_sim  # type: ignore[no-redef]
     from hist_demo import HistTest  # type: ignore[no-redef]
     from shared_mem_build import (  # type: ignore[no-redef]
         CSIM_CASES, HistCase, generate_vitis_sources,
+    )
+    from shared_mem_figures import (  # type: ignore[no-redef]
+        GenerateBurstDiagramStep, GenerateTimingDiagramStep, SyncDocsFiguresStep,
     )
 
 _SOURCE_DIR = Path(__file__).resolve().parent
@@ -270,6 +276,13 @@ def build_hist_dag() -> BuildDag:
     dag.add(GenerateVcdStep(name="generate_vcd"))
     dag.add(ExtractBurstsStep(name="extract_bursts"))
     dag.add(ExtractCosimTimingStep(name="extract_cosim_timing"))
+    # Figure steps — an independent branch: they render from vcd/burst_info.json,
+    # regenerated from the committed vcd/dump.vcd (ensure_burst_info), so a docs
+    # refresh (`--through sync_docs_figures`) needs no Vitis even though the full
+    # Vitis pipeline lives in the same DAG.
+    dag.add(GenerateBurstDiagramStep(name="generate_burst_diagram"))
+    dag.add(GenerateTimingDiagramStep(name="generate_timing_diagram"))
+    dag.add(SyncDocsFiguresStep(name="sync_docs_figures"))
     return dag
 
 
