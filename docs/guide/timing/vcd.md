@@ -121,7 +121,7 @@ open_vcd
 log_vcd -r /
 ```
 
-    If the original co-simulation used `trace_level port`, the generated Tcl already contains a filtered `log_wave [get_objects -filter ...]` command. In that case `xsim_vcd.py` reuses the same object selection for `log_vcd` instead of emitting the invalid command `log_vcd port`. This is why standalone commands such as `python hist_demo.py --generate-vcd --trace-level port` now produce a smaller port-only VCD successfully.
+    If the original co-simulation used `trace_level port`, the generated Tcl already contains a filtered `log_wave [get_objects -filter ...]` command. In that case `xsim_vcd.py` reuses the same object selection for `log_vcd` instead of emitting the invalid command `log_vcd port`. This is why standalone commands such as `python hist_build.py --through generate_vcd --trace-level port` now produce a smaller port-only VCD successfully.
 
 3. Near the end of the Tcl file, it changes:
 

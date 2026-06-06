@@ -3,7 +3,7 @@
 All C++ for this example is generated from `hist.py`: the kernel + header
 (`gen/hist.cpp` / `gen/hist.hpp`) from `HistAccel`, and the testbench
 (`gen/hist_tb.cpp`) from `HistTBHls`. `generate_vitis_sources` (in
-`shared_mem_build.py`) emits the Vitis include headers and these files; `run.tcl`
+`hist_build.py`) emits the Vitis include headers and these files; `run.tcl`
 compiles them against the hand-written datapath hooks. There are no hand-written
 kernel/testbench files — `hist.py` is the source of truth.
 

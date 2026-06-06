@@ -17,7 +17,7 @@ reviewable ``git diff``.
 
 Run it with::
 
-    python shared_mem_build.py --through sync_docs_figures
+    python hist_build.py --through sync_docs_figures
 """
 from __future__ import annotations
 
@@ -76,12 +76,15 @@ def ensure_burst_info(example_dir: Path, *, ndata: int = 37, nbins: int = 6) -> 
     if not dump_vcd.exists():
         raise FileNotFoundError(
             f"Neither {burst_info} nor {dump_vcd} exists; run the cosim flow "
-            "(python hist_demo.py --through extract_bursts --trace_level port) first."
+            "(python hist_build.py --through extract_bursts --trace-level port) first."
         )
+    # Lazy import (function-level) of the burst-extraction harness from hist_build,
+    # which avoids a module-level cycle (hist_build imports the figure step classes
+    # from this module).
     try:
-        from examples.shared_mem.hist_demo import HistTest
+        from examples.shared_mem.hist_build import HistTest
     except ModuleNotFoundError:
-        from hist_demo import HistTest  # type: ignore[no-redef]
+        from hist_build import HistTest  # type: ignore[no-redef]
     ht = HistTest(example_dir=example_dir, ndata=ndata, nbins=nbins)
     ht.simulate()
     ht.extract_bursts(vcd_path=dump_vcd)

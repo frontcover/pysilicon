@@ -26,23 +26,25 @@ Python model did, *and* the RTL waveform shows the three buffers moving over one
 
 ## Two ways to run it
 
-The flow has the standard stages, named the same on both entry points:
-
-```python
-# examples/shared_mem/hist_demo.py
-STAGES = ("csim", "csynth", "cosim", "generate_vcd", "extract_bursts")
-```
-
-The **CLI** drives the whole pipeline through `HistTest.test_vitis`:
+The flow is a `BuildDag` of dataclass `BuildStep`s (`hist_build.py`), driven by
+the same regmap-style CLI (`run_dag_cli`) the other examples use:
 
 ```bash
 cd examples/shared_mem
-python hist_demo.py --through cosim                       # csim -> csynth -> cosim
-python hist_demo.py --through extract_bursts --trace_level port
+python hist_build.py --through cosim            # gen_sources -> ... -> csim -> cosim
+python hist_build.py --through extract_bursts --trace-level port
+python hist_build.py --list-steps               # the full ordered step list
 ```
 
-The **pytest** path runs the same Vitis stages but as gated tests — the
-`-m vitis` marker so they only run where Vitis is installed:
+`--through STEP` runs the DAG up to and including that step (skipping anything
+already fresh). The build steps are `gen_sources` → `build_inputs` → `py_sim` →
+`csim` → `cosim` → `generate_vcd` → `extract_bursts` (plus the
+[committed-figure](timing.md) steps). The Vitis stages all share `run.tcl`,
+which compiles `gen/hist.cpp` + `gen/hist_tb.cpp` against the three hand-written
+hooks.
+
+The **pytest** path runs the Vitis stages as gated tests — the `-m vitis` marker
+so they only run where Vitis is installed:
 
 ```bash
 pytest -m vitis tests/examples/test_hist_csim.py    # the four-case C-sim
@@ -60,7 +62,7 @@ the interesting behavior is at the edges. `test_hist_csim.py` runs the generated
 kernel through C-sim on four vectors:
 
 ```python
-# examples/shared_mem/shared_mem_build.py — CSIM_CASES
+# examples/shared_mem/hist_build.py — CSIM_CASES
 CSIM_CASES = [
     HistCase(ndata=37, nbins=1),    # one bin: the nbins-1 = 0 edges read is a no-op
     HistCase(ndata=37, nbins=6),    # normal multi-bin binning

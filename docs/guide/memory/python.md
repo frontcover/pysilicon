@@ -7,7 +7,7 @@ has_children: false
 
 # Using Memory in Python
 
-This page shows how to create and use a `Memory` object in Python. The [histogram example](../../../examples/shared_mem/hist_demo.py) provides the running example throughout.
+This page shows how to create and use a `Memory` object in Python. The [histogram example](../../../examples/shared_mem/hist_build.py) provides the running example throughout.
 
 ## Creating a `Memory` object
 
@@ -24,7 +24,7 @@ mem = Memory(
 The histogram demo uses exactly this configuration:
 
 ```python
-# From hist_demo.py
+# From hist_build.py
 MEM_DWIDTH = 32
 MEM_AWIDTH = 64
 MEM_AUNIT  = AddrUnit.byte
@@ -59,7 +59,7 @@ Allocation uses first-fit placement: the new segment is placed immediately after
 The histogram demo allocates three regions — input data, bin edges, and output counts:
 
 ```python
-# From hist_demo.py (HistTest.simulate)
+# From hist_build.py (HistTest.simulate)
 nwords_data   = get_nwords(elem_type=Float32, word_bw=mem.word_size, shape=data.shape)
 nwords_edges  = get_nwords(elem_type=Float32, word_bw=mem.word_size, shape=bin_edges.shape)
 nwords_counts = get_nwords(elem_type=Uint32Field, word_bw=mem.word_size, shape=nbins)
@@ -88,7 +88,7 @@ mem.write(data_addr, packed)
 The histogram demo writes both inputs:
 
 ```python
-# From hist_demo.py (HistTest.simulate)
+# From hist_build.py (HistTest.simulate)
 mem.write(
     data_addr,
     write_array(data, elem_type=Float32, word_bw=mem.word_size),
@@ -110,7 +110,7 @@ words = mem.read(addr, nwords=nwords_data)
 The histogram demo reads back the output counts after the accelerator model has run:
 
 ```python
-# From hist_demo.py (HistTest.simulate)
+# From hist_build.py (HistTest.simulate)
 count_words = mem.read(
     count_addr,
     nwords=get_nwords(elem_type=Uint32Field, word_bw=mem.word_size, shape=nbins),
@@ -135,7 +135,7 @@ counts = read_array(
 The full read-back sequence in the histogram demo:
 
 ```python
-# From hist_demo.py (HistTest.simulate)
+# From hist_build.py (HistTest.simulate)
 count_words = mem.read(
     count_addr,
     nwords=get_nwords(elem_type=Uint32Field, word_bw=mem.word_size, shape=nbins),

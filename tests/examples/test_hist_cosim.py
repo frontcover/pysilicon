@@ -14,7 +14,7 @@ from pathlib import Path
 
 import pytest
 
-from examples.shared_mem.shared_mem_build import HistCase, generate_vitis_sources
+from examples.shared_mem.hist_build import HistCase, generate_vitis_sources
 from pysilicon.toolchain import toolchain
 
 SHARED_DIR = Path(__file__).resolve().parents[2] / "examples" / "shared_mem"
@@ -31,7 +31,7 @@ def test_generated_hist_cosim_and_bursts(tmp_path):
     """RTL cosim of the generated artifacts matches the golden; the burst report
     shows two read regions (data, bin_edges) and one write region (counts) with
     sizes matching the test vector."""
-    from examples.shared_mem.hist_demo import HistTest
+    from examples.shared_mem.hist_build import HistTest
 
     if not toolchain.find_vitis_path():
         pytest.skip("Vitis installation not found; skipping generated hist cosim.")

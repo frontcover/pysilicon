@@ -78,11 +78,11 @@ copy is a normal `git diff` you choose to commit.
 
 ## Refreshing the figures
 
-The whole workflow runs from `shared_mem_build.py`:
+The whole workflow runs from `hist_build.py`:
 
 ```bash
 cd examples/shared_mem
-python shared_mem_build.py --through sync_docs_figures
+python hist_build.py --through sync_docs_figures
 ```
 
 That renders both SVGs from `vcd/burst_info.json` and syncs them into `images/`.
@@ -94,8 +94,8 @@ To refresh against *new* hardware behavior — after changing the kernel, the
 buffer sizes, or the test vector — regenerate the cosim artifacts first, then sync:
 
 ```bash
-python hist_demo.py --through extract_bursts --trace_level port  # new dump.vcd + burst_info.json (needs Vitis)
-python shared_mem_build.py --through sync_docs_figures           # re-render + sync
+python hist_build.py --through extract_bursts --trace-level port  # new dump.vcd + burst_info.json (needs Vitis)
+python hist_build.py --through sync_docs_figures           # re-render + sync
 git diff docs/examples/shared_mem/images/                        # review, then commit
 ```
 
