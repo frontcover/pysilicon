@@ -17,7 +17,7 @@ reviewable ``git diff``.
 
 Run it with::
 
-    python shared_mem_build.py --through sync_docs_figures
+    python hist_build.py --through sync_docs_figures
 """
 from __future__ import annotations
 

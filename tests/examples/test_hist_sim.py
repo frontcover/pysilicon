@@ -61,8 +61,9 @@ def test_address_error_status():
     assert res.status == HistError.ADDRESS_ERROR
 
 
-# --- folded from the retired test_hist_demo.py (golden parity, gen_test_data,
-# --- kernel bin-scan, _burst_to_jsonable); the mocked test_vitis tests were dropped.
+# Folded build-harness coverage (golden parity, gen_test_data, kernel bin-scan,
+# _burst_to_jsonable); the mocked stage-runner orchestration tests were dropped
+# in the build refactor.
 
 @pytest.mark.parametrize("mem_dwidth", [32, 64, 128])
 def test_hist_test_simulate_matches_expected_counts(mem_dwidth: int) -> None:

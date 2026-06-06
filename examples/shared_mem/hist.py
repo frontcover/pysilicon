@@ -12,10 +12,10 @@ multi-buffer surface:
 * **validation → status** — ``ndata``/``nbins``/address checks select a
   :class:`HistError` into the response before any memory access.
 
-Schemas, the numpy golden (:class:`HistogramAccel`), and the cosim/burst harness
-(``HistTest``) live in :mod:`hist_demo`; this module adds only the synthesizable
-component + a SimPy harness. ``HistAccel`` is the codegen source; ``HistogramAccel``
-is the numpy golden it is validated against.
+The schemas, the numpy golden (:class:`HistogramAccel`), the synthesizable
+component, and a SimPy harness all live in this module; the cosim/burst harness
+(``HistTest``) and the build DAG live in :mod:`hist_build`. ``HistAccel`` is the
+codegen source; ``HistogramAccel`` is the numpy golden it is validated against.
 
 Control is AXI-Stream + ``ap_ctrl_hs`` (the command rides ``s_in``, the response
 rides ``m_out``); the data lives in memory over ``m_mem``. The codegen root is
@@ -45,7 +45,7 @@ from pysilicon.simulation.simulation import Simulation
 # ---------------------------------------------------------------------------
 # Data model — schemas, type fields, constants, and the numpy golden
 # (the data-model home for the example, matching simp_fun.py; hist_build.py
-# and hist_demo.py import these from here).
+# imports these from here).
 # ---------------------------------------------------------------------------
 INCLUDE_DIR = "include"
 
