@@ -4,9 +4,14 @@ Covers specialization/cpp_type, Vitis-matching defaults, quantization-on-assignm
 (delegated to fixputils), and that the reused IntField W-bit serialization
 round-trips the stored bits exactly — including inside a DataList struct.
 """
+import tempfile
+from pathlib import Path
+
 import numpy as np
 import pytest
 
+from pysilicon.build.build import BuildConfig
+from pysilicon.hw.arrayutils import gen_array_utils, read_array, write_array
 from pysilicon.hw.dataschema import DataList, IntField
 from pysilicon.hw.fixpoint import FixedField
 from pysilicon.utils import fixputils
@@ -96,3 +101,33 @@ def test_import_location():
     # re-export — keeps the import one-way / cycle-free).
     import pysilicon.hw.dataschema as ds
     assert not hasattr(ds, "FixedField")
+
+
+# --- Phase 3: codegen lowering (non-Vitis: assert the generated C++ text) ------
+def test_codegen_array_lowers_to_ap_fixed():
+    Q8_4 = FixedField.specialize(8, 4, include_dir="include")
+    with tempfile.TemporaryDirectory() as td:
+        cfg = BuildConfig(root_dir=Path(td))
+        hdr = gen_array_utils(Q8_4, [32], cfg=cfg, streamutils_dir="include")
+        txt = hdr.read_text(encoding="utf-8")
+    assert "using value_type = ap_fixed<8, 4, AP_TRN, AP_WRAP>;" in txt
+    # value<->bits is a bit-reinterpret via the streamutils helpers, not a value cast.
+    assert "streamutils::fixed_to_bits<ap_fixed<8, 4, AP_TRN, AP_WRAP>>" in txt
+    assert "streamutils::bits_to_fixed<ap_fixed<8, 4, AP_TRN, AP_WRAP>>" in txt
+
+
+def test_codegen_unsigned_lowers_to_ap_ufixed():
+    U8_4 = FixedField.specialize(8, 4, signed=False, include_dir="include")
+    with tempfile.TemporaryDirectory() as td:
+        cfg = BuildConfig(root_dir=Path(td))
+        hdr = gen_array_utils(U8_4, [32], cfg=cfg, streamutils_dir="include")
+        txt = hdr.read_text(encoding="utf-8")
+    assert "using value_type = ap_ufixed<8, 4, AP_TRN, AP_WRAP>;" in txt
+
+
+def test_python_array_serialization_round_trip():
+    Q = FixedField.specialize(8, 4)   # representable values survive exactly
+    data = np.array([0.0, 1.5, -2.0, 0.0625, -0.0625, 7.9375, -8.0], dtype=np.float64)
+    w = write_array(data, elem_type=Q, word_bw=32)
+    got = np.asarray(read_array(w, elem_type=Q, word_bw=32, shape=len(data)))
+    np.testing.assert_array_equal(got, data)

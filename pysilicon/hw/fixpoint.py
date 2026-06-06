@@ -116,3 +116,19 @@ class FixedField(IntField):
         cls = self.__class__
         stored = fixputils.truncate(int(field_bits), cls.bitwidth, cls.signed)
         return fixputils.to_float(int(stored), cls.bitwidth, cls.int_bits)
+
+    # --- C++ codegen: ap_fixed <-> ap_uint<W> word payload is a *bit-reinterpret*
+    # (.range()), not a value cast — unlike ap_int. Route through the streamutils
+    # fixed_to_bits / bits_to_fixed helpers (the same shape FloatField uses for its
+    # float<->uint reinterpret). The W-bit payload itself is identical to IntField.
+    @classmethod
+    def to_uint_expr(cls, value_expr: str) -> str:
+        return f"streamutils::fixed_to_bits<{cls.cpp_type}>({value_expr})"
+
+    @classmethod
+    def to_uint_value_expr(cls, value_expr: str) -> str:
+        return f"streamutils::fixed_to_bits<{cls.cpp_type}>({value_expr})"
+
+    @classmethod
+    def from_uint_expr(cls, uint_expr: str) -> str:
+        return f"streamutils::bits_to_fixed<{cls.cpp_type}>({uint_expr})"
