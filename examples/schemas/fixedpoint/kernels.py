@@ -32,6 +32,28 @@ static std::vector<unsigned long long> read_bits(const char* path) {
 """
 
 
+def render_quantize_real(type_t: str, wt: int) -> str:
+    """``y = (double)d`` — quantize a real into the target type (reads doubles).
+
+    Loads real data into a format; the only lossy step is the rounding the mode
+    selects (the input doubles are exactly representable)."""
+    return f"""#include <ap_fixed.h>
+#include <ap_int.h>
+#include <fstream>
+
+int main(int argc, char** argv) {{
+    std::ifstream fin(argv[1]);
+    std::ofstream out(argv[3]);
+    double d;
+    while (fin >> d) {{
+        {type_t} y = d;
+        out << (unsigned long long)y.range({wt} - 1, 0) << "\\n";
+    }}
+    return 0;
+}}
+"""
+
+
 def render_binop(op: str, type_a: str, wa: int, type_b: str, wb: int,
                  type_t: str, wt: int) -> str:
     """``y = a <op> b`` (full precision) quantized to the target type."""
