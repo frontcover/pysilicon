@@ -1,0 +1,5 @@
+gen/
+results/
+pysilicon_*_proj/
+*.log
+out_bits.txt
