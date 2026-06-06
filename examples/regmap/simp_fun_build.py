@@ -1,16 +1,15 @@
 from __future__ import annotations
 
-import argparse
 import csv
 import hashlib
 import json
-import time as _time
 from dataclasses import dataclass
 from pathlib import Path
 
 import numpy as np
 
 from pysilicon.build.build import BuildConfig, BuildDag, BuildStep, SourceStep
+from pysilicon.build.cli import run_dag_cli
 from pysilicon.build.cosim_steps import ExtractCosimTimingStep, ValidateTimingStep
 from pysilicon.build.hwcodegen_steps import HlsCodegenStep
 from pysilicon.build.verify_steps import FunctionalVerifyStep
@@ -352,111 +351,28 @@ def build_simp_fun_dag() -> BuildDag:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Run the regmap example.")
-    parser.add_argument("--through", metavar="STEP", default="extract_py_timing",
-                        help="Run the DAG up to and including this step.")
-    parser.add_argument("--list-steps", action="store_true",
-                        help="Print all step names in execution order and exit.")
-    parser.add_argument("--list-steps-verbose", action="store_true",
-                        help="Print step names with descriptions and artifacts.")
-    parser.add_argument("--list-artifacts", action="store_true",
-                        help="Print all artifacts with their producer and file path.")
-    parser.add_argument("--status", action="store_true",
-                        help="Print pre-build freshness status and exit.")
-    parser.add_argument("--x", type=int, default=DEFAULT_VECTOR["x"])
-    parser.add_argument("--a", type=int, default=DEFAULT_VECTOR["a"])
-    parser.add_argument("--b", type=int, default=DEFAULT_VECTOR["b"])
-    parser.add_argument("--clk-freq", type=float, default=100e6,
-                        metavar="HZ", help="Target clock frequency in Hz.")
-    parser.add_argument("--latency-cycles", type=int, default=4)
-    parser.add_argument("--log", metavar="FILE", default="results/sim_log.csv",
-                        help="Log filename relative to the build root.")
-    parser.add_argument("--live-output", action="store_true")
-    parser.add_argument("--force", action="store_true",
-                        help="Force all steps to rebuild.")
-    parser.add_argument("--force-step", metavar="STEP", action="append", default=[],
-                        help="Force a specific step to rebuild (repeatable).")
-    args = parser.parse_args()
-
-    dag = build_simp_fun_dag()
-
-    if args.list_steps:
-        for name in dag.step_names():
-            print(name)
-        return
-
-    if args.list_steps_verbose:
-        for step in dag.steps():
-            consumes = ", ".join(step.consumes) if step.consumes else "(none)"
-            produces = ", ".join(step.produces) if step.produces else "(none)"
-            print(f"{step.name}")
-            if step.description:
-                print(f"    {step.description}")
-            print(f"    consumes: {consumes}")
-            print(f"    produces: {produces}")
-        return
-
-    config = BuildConfig(
+    run_dag_cli(
+        build_simp_fun_dag,
+        description="Run the regmap example.",
+        default_through="extract_py_timing",
         root_dir=_SOURCE_DIR,
-        params={
-            "x": args.x,
-            "a": args.a,
-            "b": args.b,
-            "clk_freq": args.clk_freq,
-            "latency_cycles": args.latency_cycles,
-            "log_file": args.log,
-            "live_output": args.live_output,
+        extra_args=[
+            (("--x",), {"type": int, "default": DEFAULT_VECTOR["x"]}),
+            (("--a",), {"type": int, "default": DEFAULT_VECTOR["a"]}),
+            (("--b",), {"type": int, "default": DEFAULT_VECTOR["b"]}),
+            (("--clk-freq",), {"type": float, "default": 100e6, "metavar": "HZ",
+                               "help": "Target clock frequency in Hz."}),
+            (("--latency-cycles",), {"type": int, "default": 4}),
+            (("--log",), {"metavar": "FILE", "default": "results/sim_log.csv",
+                          "help": "Log filename relative to the build root."}),
+            (("--live-output",), {"action": "store_true"}),
+        ],
+        params_from_args=lambda a: {
+            "x": a.x, "a": a.a, "b": a.b, "clk_freq": a.clk_freq,
+            "latency_cycles": a.latency_cycles, "log_file": a.log,
+            "live_output": a.live_output,
         },
     )
-
-    if args.list_artifacts:
-        all_paths = dag.artifact_paths(config)
-        for artifact, step_name in dag.artifact_owners().items():
-            p = all_paths.get(artifact)
-            if p is not None:
-                try:
-                    display = p.relative_to(config.root_dir)
-                except ValueError:
-                    display = p
-                print(f"  {artifact:<24} {step_name:<26} {display}")
-            else:
-                print(f"  {artifact:<24} {step_name:<26} (object)")
-        return
-
-    if args.status:
-        now = _time.time()
-        for entry in dag.results_status(config):
-            age = f"{(now - entry['mtime']) / 3600:.1f}h ago" if entry["mtime"] else "—"
-            exists_mark = "✓" if entry["exists"] else "✗"
-            stale_note = (f"  STALE ({', '.join(entry['stale_because'])} newer)"
-                          if entry["stale"] else "")
-            print(f"  {entry['artifact']:<16} {entry['produced_by']:<22} "
-                  f"{exists_mark}  {age:<12}{stale_note}")
-        return
-
-    force: bool | list[str] = True if args.force else (args.force_step or False)
-
-    def on_step_begin(step, will_run, paths):
-        print(f"{step.name}:")
-        for artifact, p in paths.items():
-            try:
-                display = p.relative_to(config.root_dir)
-            except ValueError:
-                display = p
-            print(f"    {display}")
-        if will_run:
-            print("    RUNNING...")
-
-    def on_step_end(step, result):
-        if not result.success:
-            print(f"    FAILED: {result.message}")
-        elif result.skipped:
-            print("    UP-TO-DATE")
-        else:
-            print("    PASSED")
-
-    dag.run(config, through=args.through, force=force,
-            on_step_begin=on_step_begin, on_step_end=on_step_end)
 
 
 if __name__ == "__main__":
