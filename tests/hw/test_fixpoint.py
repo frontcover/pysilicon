@@ -136,3 +136,33 @@ def test_derived_over_64_raises():
 def test_import_location():
     import pysilicon.hw.dataschema as ds
     assert not hasattr(ds, "FixedField")            # imported from pysilicon.hw.fixpoint
+
+
+# --- Phase 3: codegen (non-Vitis: assert the generated C++ text) --------------
+def test_codegen_array_uses_ap_fixed_bit_helpers():
+    import tempfile
+    from pathlib import Path
+
+    from pysilicon.build.build import BuildConfig
+    from pysilicon.hw.arrayutils import gen_array_utils
+    Q = FixedField.specialize(8, 4, include_dir="include")
+    with tempfile.TemporaryDirectory() as td:
+        hdr = gen_array_utils(Q, [32], cfg=BuildConfig(root_dir=Path(td)), streamutils_dir="include")
+        txt = hdr.read_text(encoding="utf-8")
+    assert "using value_type = ap_fixed<8, 4, AP_TRN, AP_WRAP>;" in txt
+    assert "streamutils::fixed_to_bits<ap_fixed<8, 4, AP_TRN, AP_WRAP>>" in txt
+    assert "streamutils::bits_to_fixed<ap_fixed<8, 4, AP_TRN, AP_WRAP>>" in txt
+
+
+def test_arith_kernel_renderers():
+    from examples.schemas.fixedpoint.kernels import render_binop, render_dot, render_requant
+    binop = render_binop("*", "ap_fixed<8, 4, AP_TRN, AP_WRAP>", 8,
+                         "ap_fixed<8, 4, AP_TRN, AP_WRAP>", 8,
+                         "ap_fixed<16, 8, AP_RND, AP_SAT>", 16)
+    assert "y = a * b;" in binop and "y.range(16 - 1, 0)" in binop
+    assert "ap_fixed<16, 8, AP_RND, AP_SAT> y" in binop
+    requant = render_requant("ap_fixed<16, 8, AP_TRN, AP_WRAP>", 16, "ap_fixed<8, 4, AP_RND, AP_WRAP>", 8)
+    assert "y = x;" in requant
+    dot = render_dot("ap_fixed<8, 4, AP_TRN, AP_WRAP>", 8, "ap_fixed<8, 4, AP_TRN, AP_WRAP>", 8,
+                     "ap_fixed<22, 14, AP_TRN, AP_WRAP>", "ap_fixed<8, 4, AP_TRN, AP_WRAP>", 8)
+    assert "acc += a * b;" in dot and "ap_fixed<22, 14, AP_TRN, AP_WRAP> acc = 0;" in dot

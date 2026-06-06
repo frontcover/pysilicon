@@ -108,6 +108,21 @@ class FixedField(IntField):
         """The real value ``stored · 2^-F`` (scalar view)."""
         return fixputils.to_float(self.val, type(self).get_format())
 
+    # --- C++ codegen: ap_fixed <-> ap_uint<W> word payload is a bit-reinterpret
+    # (.range()), not a value cast — routed through the streamutils helpers (same
+    # shape FloatField uses). The stored W-bit payload is identical to IntField.
+    @classmethod
+    def to_uint_expr(cls, value_expr: str) -> str:
+        return f"streamutils::fixed_to_bits<{cls.cpp_type}>({value_expr})"
+
+    @classmethod
+    def to_uint_value_expr(cls, value_expr: str) -> str:
+        return f"streamutils::fixed_to_bits<{cls.cpp_type}>({value_expr})"
+
+    @classmethod
+    def from_uint_expr(cls, uint_expr: str) -> str:
+        return f"streamutils::bits_to_fixed<{cls.cpp_type}>({uint_expr})"
+
 
 # --- helpers ------------------------------------------------------------------
 def _fmt(da: DataArray) -> Format:
