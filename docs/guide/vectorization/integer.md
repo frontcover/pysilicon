@@ -31,7 +31,7 @@ y = a * b + c
 np.asarray(y)                                            # array([ 19, -29, -38,  11])
 ```
 
-This is the integer case of [`examples/basic_vec`](../../examples/) — one
+This is the integer case of [`examples/basic_vec`](../../examples/basic_vec/) — one
 elementwise MAC, no per-element Python loop.
 
 ## Growth-aware result widths
@@ -99,4 +99,3 @@ ia([1]) * u                              # NotImplementedError: mixed signed/uns
 - [Fixed-point vectorization](./fixed.md) — the same growth-then-`quantize` story
   with a binary point.
 - [Fields](../schema/fields.md) — `IntField` and the scalar field types.
-</content>

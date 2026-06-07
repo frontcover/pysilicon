@@ -123,10 +123,8 @@ simulation fast. The operators just add the bit-growth bookkeeping on top.
 
 - [FixedField](../schema/fixpoint.md) — the fixed-point *type* (the `ap_fixed`
   model, `QMode`/`OMode`, defaults-match-Vitis).
-- [`examples/basic_vec`](../../examples/) — the worked front-door: one MAC,
+- [`examples/basic_vec`](../../examples/basic_vec/) — the worked front-door: one MAC,
   `y = a*b + c`, computed with these operators and checked **bit-exact against
   Vitis** for int / float / fixed.
 - [Timing Analysis](../timing/) — where cycle/throughput modeling lives (the
   separate, non-functional concern).
-</content>
-</invoke>
