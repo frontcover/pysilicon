@@ -12,6 +12,7 @@ search_enabled: true
 markdown: kramdown
 kramdown:
   input: GFM
+  hard_wrap: false   # reflow single newlines in paragraphs (hard-wrapped source -> flowing text)
 
 # Optional: GitHub repo link
 github_repo_url: "https://github.com/sdrangan/waveflow"

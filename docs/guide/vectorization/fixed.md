@@ -1,20 +1,27 @@
 ---
-title: Fixed-point vectors & arithmetic
-parent: Data Schemas
-nav_order: 6
+title: Fixed-point vectorization
+parent: Vectorization
+nav_order: 4
 has_children: false
 ---
 
-# Fixed-Point Vectors and Arithmetic
+# Fixed-Point Vectorization
 
-Fixed-point arrays use [`DataArray[FixedField]`](./dataarrays.md) — the same
+This is the [vectorization](./index.md) story for fixed-point — the **compute**.
+The fixed-point *type* itself (the `ap_fixed` model, `QMode`/`OMode`, the
+defaults-match-Vitis contract) lives on the
+[FixedField type page](../schema/fixpoint.md); read that first if you haven't.
+
+Fixed-point arrays use [`DataArray[FixedField]`](../schema/dataarrays.md) — the same
 numpy-backed array schema as every other element type, so they get flat storage,
-array access, and codegen for free. Vector operations are **free functions** in
+array access, and codegen for free. This is the case that most needs the
+[type-preserving operators](./index.md#the-two-paths): fixed-point grows bits and
+rounds on assignment, so working through `.val` by hand is easy to get wrong. The
+operators (`*`, `+`, `-`) are sugar over the **free functions** in
 [`waveflow/hw/fixpoint.py`](../../../waveflow/hw/fixpoint.py) (not methods — the
 container stays a plain container): `mult`, `add`, `sub`, `shift`, `fixed_sum`, and
 `quantize`. They run entirely in the **integer domain** and match the Vitis `ap_fixed`
-datapath bit-for-bit. See the [FixedField type page](./fixpoint.md) for the format
-itself.
+datapath bit-for-bit.
 
 ## Arrays of fixed-point values
 
@@ -60,6 +67,26 @@ to_real(mult(a, b))                    # array([ 3., -3., -0.5])  -- exact
 # bring a product back to a working format (this is where rounding/overflow happen):
 quantize(mult(a, b), Q8_4)             # DataArray[ap_fixed<8, 4>]
 ```
+
+### Operator form (the primary spelling)
+
+The [operators](./index.md#2-type-preserving-operators--ab--c-then-quantize) are
+sugar over these functions, so a multiply-add reads like the math — and like the
+HLS `ap_fixed<...> y = a*b + c;` it mirrors. The intermediates grow to full
+precision; the single `quantize` is the only rounding:
+
+```python
+from waveflow.hw.fixpoint import quantize, to_real
+
+c = from_real([0.5, 0.25, -0.5], Q8_4)
+
+full = a * b + c                       # ap_fixed<17, 9>  -- full precision, no loss
+y    = quantize(full, Q8_4)            # ap_fixed<8, 4>   -- the one explicit rounding
+to_real(y)                             # array([ 3.5 , -2.75, -1.  ])
+```
+
+This is exactly the fixed case of [`examples/basic_vec`](../../examples/basic_vec/), checked
+bit-for-bit against a Vitis kernel.
 
 ## Single 64-bit dtype, fail-fast above it
 
@@ -129,6 +156,9 @@ asserts the bits match the Python ops — run `pytest -m vitis -k fixedpoint`.
 
 ## See also
 
-- [Fixed-point (FixedField)](./fixpoint.md) — the format, `QMode`/`OMode`, the
-  defaults-match-Vitis contract.
-- [Data arrays](./dataarrays.md) — the `DataArray` container these build on.
+- [Fixed-point (FixedField)](../schema/fixpoint.md) — the fixed-point *type*: the
+  format, `QMode`/`OMode`, the defaults-match-Vitis contract.
+- [Vectorization overview](./index.md) — the two paths and when to use each.
+- [Integer vectorization](./integer.md) — the same growth-then-`quantize` story
+  without a binary point.
+- [Data arrays](../schema/dataarrays.md) — the `DataArray` container these build on.

@@ -1,7 +1,7 @@
 ---
 title: Register Map (simple function)
 parent: Examples
-nav_order: 1
+nav_order: 2
 has_children: true
 ---
 # Register Map Interface for a Simple Function
