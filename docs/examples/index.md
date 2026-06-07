@@ -7,11 +7,41 @@ has_children: true
 
 # Examples
 
-Waveflow's examples are a **teaching progression**: each one introduces a single
-new hardware-interface concept on top of the previous, using a small computation
-as its vehicle. Every directory is named for the **pattern** it teaches; the
-computation keeps its own identity in the files inside (e.g. `stream_inband/`
-holds the polynomial accelerator in `poly.py`).
+Waveflow's examples are a **teaching progression**, and they come in **two
+families**. You learn to *represent and compute on data* first, then how to *move
+that data between modules* over real hardware protocols:
+
+1. **Data & schema patterns** — how a design's numbers are typed, stored, and
+   computed on, kept **vectorized** (numpy arrays end to end) so functional
+   simulation is fast *and* bit-exact. Start here.
+2. **Interface patterns** — how a host and an accelerator exchange that data over
+   the AXI-* protocols, one new interface concept per example.
+
+The rationale is bottom-up: the interface examples *carry* schema-typed data across
+their ports, so it pays to understand the data layer before the protocols that
+transport it. Every directory is named for the **pattern** it teaches; the
+computation keeps its own identity in the files inside (e.g. `stream_inband/` holds
+the polynomial accelerator in `poly.py`).
+
+## Family 1 — data & schema patterns
+
+These teach the [data schema](../guide/schema/) and
+[vectorization](../guide/vectorization/) layers: typed fields, numpy-backed arrays,
+and the type-preserving operators, all proven **bit-exact** against Vitis.
+
+| Example | Vehicle | What it teaches | Status |
+|---|---|---|---|
+| [`basic_vec`](./basic_vec/) | one MAC (`a*b + c`) | vectorized golden vs vectorized Vitis, bit-exact for int / float / fixed — the [vectorization](../guide/vectorization/) front-door | available |
+| `schemas/fixedpoint` | edge-value sweep | the rigorous fixed-point conformance harness (all `QMode`/`OMode` × widths) behind [FixedField](../guide/schema/fixpoint.md) | available (code) |
+
+`basic_vec` is the teaching front-door (minimal, readable); `schemas/fixedpoint` is
+the exhaustive proof. They share the same conformance machinery.
+
+## Family 2 — interface patterns
+
+These move more of the host↔accelerator contract off the control plane and into
+shared structures at each step, one new interface concept at a time. They are the
+full five-stage flow below.
 
 ## The general Waveflow flow
 
@@ -30,7 +60,7 @@ stages, each derived from the one before:
 
 The *Flow coverage* column below cites these stage numbers.
 
-## The five patterns
+## The five interface patterns
 
 The progression moves more of the host↔accelerator contract off the control
 plane and into shared structures at each step: from **all control in registers**,
