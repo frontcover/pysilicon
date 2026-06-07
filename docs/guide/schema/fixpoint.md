@@ -10,8 +10,10 @@ has_children: false
 `FixedField` is a **Vitis-bit-exact** fixed-point scalar type. It maps to Vitis HLS
 `ap_fixed<W, I, Q, O>` (or `ap_ufixed<...>`) and its Python value model reproduces the
 hardware **bit-for-bit** — for quantization *and* arithmetic. It is defined in
-[`waveflow/hw/fixpoint.py`](../../../waveflow/hw/fixpoint.py); vector operations are
-covered on the [Fixed-point vectors & arithmetic](./fixp_vector.md) page.
+[`waveflow/hw/fixpoint.py`](../../../waveflow/hw/fixpoint.py); vector operations (the
+**compute**) are covered on the
+[Fixed-point vectorization](../vectorization/fixed.md) page in the
+[Vectorization](../vectorization/) section.
 
 ## The `ap_fixed` model
 
@@ -56,8 +58,8 @@ class:
 `AP_TRN`, and `AP_WRAP` — exactly Vitis's `ap_fixed` defaults — so
 `FixedField.specialize(W, I)` already matches the default hardware type.
 
-A single `FixedField` is a scalar; arrays use `DataArray[FixedField]` (see the
-[vector page](./fixp_vector.md)).
+A single `FixedField` is a scalar; arrays use `DataArray[FixedField]` (see
+[Fixed-point vectorization](../vectorization/fixed.md)).
 
 ## Quantization (`QMode`) and overflow (`OMode`) modes
 
@@ -114,6 +116,7 @@ comparison is never loosened. Run it with `pytest -m vitis -k fixedpoint`.
 
 ## See also
 
-- [Fixed-point vectors & arithmetic](./fixp_vector.md) — `DataArray[FixedField]`,
-  `mult`/`add`/`quantize`, result-format propagation, and a worked FIR.
+- [Fixed-point vectorization](../vectorization/fixed.md) — the compute:
+  `DataArray[FixedField]`, the `a*b + c` operators / `mult`/`add`/`quantize`,
+  result-format propagation, and a worked FIR.
 - [Data Fields and Lists](./datalists.md) — the `IntField` base and serialization.

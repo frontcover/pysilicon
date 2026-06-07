@@ -11,6 +11,7 @@ Welcome to Waveflow.  This folder will have guides to use the Waveflow functiona
 
 - [Installation](./installation/)
 - [Data Schemas](./schema)
+- [Vectorization](./vectorization/)
 - [Memory Modeling](./memory/)
 - [Timing Analysis Tools](./timing)
 - [Hardware Interfaces](./interface/overview.md)
