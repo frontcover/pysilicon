@@ -26,6 +26,8 @@ from typing import Any, ClassVar, TypeAlias
 import numpy as np
 from numpy.typing import NDArray
 
+from pysilicon.utils.fixputils import MAX_WIDTH
+
 Words: TypeAlias = NDArray[np.uint32] | NDArray[np.uint64]
 
 from pysilicon.build.build import Buildable, BuildConfig, BuildResult
@@ -2595,6 +2597,20 @@ class DataArray(DataSchema):
             f"{type(self).__name__}(element_type={elem_name}, shape={np.asarray(self.val).shape})"
         )
 
+    # --- type-preserving arithmetic operators (sugar; full-precision, no loss) ---
+    # `+`/`-`/`*` over two DataArrays return a new DataArray whose element format is
+    # *derived* (full precision): int grows (a*b -> Wa+Wb, a+b -> max+1), fixed reuses
+    # FixedField's derivation, float is numpy passthrough. Rounding stays an explicit
+    # quantize(); `.val` stays the numpy escape hatch. See _datarray_binop.
+    def __mul__(self, other: Any) -> "DataArray":
+        return _datarray_binop(self, other, "mul")
+
+    def __add__(self, other: Any) -> "DataArray":
+        return _datarray_binop(self, other, "add")
+
+    def __sub__(self, other: Any) -> "DataArray":
+        return _datarray_binop(self, other, "sub")
+
     @classmethod
     def _normalized_shape(cls) -> tuple[int, ...]:
         shape = tuple(int(dim) for dim in cls.max_shape)
@@ -4230,3 +4246,72 @@ __all__ = [
     "DataList",
     "DataArray",
 ]
+
+
+# ---------------------------------------------------------------------------
+# DataArray arithmetic operators (sugar over the per-type functions)
+# ---------------------------------------------------------------------------
+def _wrap_datarray(val: Any, elem: type[DataSchema]) -> DataArray:
+    """Wrap a numpy array + element type into a fresh DataArray[elem]."""
+    arr = np.asarray(val)
+    shape = arr.shape if arr.shape else (1,)
+    return DataArray.specialize(elem, max_shape=tuple(shape))(arr.reshape(shape))
+
+
+def _elem_kind(elem: type[DataSchema]) -> str:
+    if hasattr(elem, "get_format"):                 # FixedField (duck-typed; avoids a cycle)
+        return "fixed"
+    if isinstance(elem, type) and issubclass(elem, IntField):
+        return "int"
+    if isinstance(elem, type) and issubclass(elem, FloatField):
+        return "float"
+    return "other"
+
+
+def _int_binop(a: DataArray, b: DataArray, op: str) -> DataArray:
+    ea, eb = a.element_type, b.element_type
+    if bool(ea.signed) != bool(eb.signed):
+        raise NotImplementedError(
+            "mixed signed/unsigned integer arithmetic is not supported in v1 (numpy would "
+            "coerce int64/uint64 to float64); use a common signedness first.")
+    Wa, Wb = ea.get_bitwidth(), eb.get_bitwidth()
+    if op == "mul":
+        Wr, signed_r = Wa + Wb, bool(ea.signed)
+    else:                                            # add / sub: +1 carry bit
+        Wr = max(Wa, Wb) + 1
+        signed_r = True if op == "sub" else bool(ea.signed)   # subtraction may go negative
+    if Wr > MAX_WIDTH:
+        raise NotImplementedError(
+            f"integer {op} result width {Wr} exceeds the {MAX_WIDTH}-bit limit "
+            "(numpy would silently wrap); wide (>64-bit) support is Future.")
+    dtype = np.int64 if signed_r else np.uint64
+    av = np.asarray(a.val).astype(dtype)
+    bv = np.asarray(b.val).astype(dtype)
+    out = av * bv if op == "mul" else (av + bv if op == "add" else av - bv)
+    return _wrap_datarray(out, IntField.specialize(Wr, signed_r))
+
+
+def _float_binop(a: DataArray, b: DataArray, op: str) -> DataArray:
+    av, bv = np.asarray(a.val), np.asarray(b.val)
+    out = av * bv if op == "mul" else (av + bv if op == "add" else av - bv)
+    bw = 64 if out.dtype == np.float64 else 32       # numpy passthrough; no growth
+    return _wrap_datarray(out, FloatField.specialize(bw))
+
+
+def _datarray_binop(a: DataArray, b: Any, op: str) -> DataArray:
+    if not isinstance(b, DataArray):
+        raise TypeError(
+            f"DataArray '{op}' needs both operands to be DataArray (got {type(b).__name__}); "
+            "scalar/array operands are not supported in v1 — use .val for raw numpy.")
+    ka, kb = _elem_kind(a.element_type), _elem_kind(b.element_type)
+    if ka != kb or ka == "other":
+        raise TypeError(
+            f"cannot apply '{op}' to {a.element_type.__name__} and {b.element_type.__name__} "
+            "arrays (operands must be the same numeric kind: int, fixed, or float).")
+    if ka == "fixed":
+        # sugar over the existing FixedField functions; lazy import avoids a module cycle
+        from pysilicon.hw.fixpoint import add as _fadd, mult as _fmult, sub as _fsub
+        return {"mul": _fmult, "add": _fadd, "sub": _fsub}[op](a, b)
+    if ka == "int":
+        return _int_binop(a, b, op)
+    return _float_binop(a, b, op)
