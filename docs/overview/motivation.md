@@ -83,4 +83,4 @@ full RTL implementation just to explore a design.
 - **Tool builders** who want a structured, machine-readable hardware representation for automation
   and AI-assisted workflows.
 
-Next: [what makes Waveflow different](./keyfeatures.md).
+Next: [the harness for AI](./aiharness.md).
