@@ -85,7 +85,7 @@ y    = quantize(full, Q8_4)            # ap_fixed<8, 4>   -- the one explicit ro
 to_real(y)                             # array([ 3.5 , -2.75, -1.  ])
 ```
 
-This is exactly the fixed case of [`examples/basic_vec`](../../examples/), checked
+This is exactly the fixed case of [`examples/basic_vec`](../../examples/basic_vec/), checked
 bit-for-bit against a Vitis kernel.
 
 ## Single 64-bit dtype, fail-fast above it

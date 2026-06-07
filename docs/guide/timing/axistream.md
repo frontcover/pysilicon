@@ -22,7 +22,7 @@ The `TDATA` signals for the streams are:
 - `apatb_poly_top.AESL_inst_poly.in_stream_TDATA[31:0]`
 - `apatb_poly_top.AESL_inst_poly.out_stream_TDATA[31:0]`
 
-You can find these names from the print out of the signals -- see the section on [parsing the VCD outputs](./parsing).  After identifying the signal names for the AXI4 streams, you can use the code below to load the stream signals:
+You can find these names from the print out of the signals -- see the section on [parsing the VCD outputs](./parsing.md).  After identifying the signal names for the AXI4 streams, you can use the code below to load the stream signals:
 
 ```python
 # Create a parsing class

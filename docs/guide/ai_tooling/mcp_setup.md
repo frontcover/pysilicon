@@ -13,7 +13,7 @@ Waveflow is being designed with agentic assistance to help build and simulate mo
 
 ## Set-Up
 
-To set up the MCP server on VS Code, first follow the [instructions](./python.md) to create and activate a virtual environment, then install `waveflow` into that environment. You can install from a cloned `waveflow` repository or from a published package source, as long as the environment you activate contains `waveflow`.
+To set up the MCP server on VS Code, first follow the [instructions](../installation/) to create and activate a virtual environment, then install `waveflow` into that environment. You can install from a cloned `waveflow` repository or from a published package source, as long as the environment you activate contains `waveflow`.
 
 Independent of where the virtual environment is installed, navigate to the root folder of the repository where you wish to work:
 
