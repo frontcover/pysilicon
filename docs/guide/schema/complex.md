@@ -113,6 +113,7 @@ sugar over the underlying `cmult` / `cadd` / `csub` functions; `conj` is a free 
 ```python
 from waveflow.hw.complexfield import conj
 
+bx = DataArray.specialize(CFix, max_shape=(2,))(cx.make_complex([10, 4], [-6, 2], Format(16, 8, True)))
 prod = ax * bx        # cmult
 sm   = ax + bx        # cadd
 df   = ax - bx        # csub
