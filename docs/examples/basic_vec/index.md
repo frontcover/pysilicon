@@ -2,72 +2,55 @@
 title: Basic Vectorization (MAC)
 parent: Examples
 nav_order: 1
-has_children: false
+has_children: true
 ---
 # Basic Vectorization — one MAC, bit-exact
 
-`basic_vec` is the **front-door for [vectorization](../../guide/vectorization/)**:
-the smallest possible demonstration that a Python-vectorized golden model and a
-vectorized Vitis kernel produce **the same bits**. It is a *data/schema* example —
-it teaches how to **represent and compute on data**, before any module-to-module
-interface is introduced.
+`basic_vec` is the **front-door for [vectorization](../../guide/vectorization/)**: the
+smallest demonstration that a Python-vectorized golden model and a vectorized Vitis kernel
+produce **the same bits**. It is a *data/schema* example — how to **represent and compute on
+data**, before any module-to-module interface is introduced.
 
-The whole example is one elementwise multiply-accumulate:
+The whole example is one elementwise multiply-accumulate, computed over arrays (no
+per-element Python loop) for each of the three numeric kinds, with the result asserted equal
+to Vitis C-sim **bit-for-bit**:
 
 ```python
 y = a * b + c
 ```
 
-computed over arrays — **no per-element Python loop** — for each of the three
-numeric kinds, with the result asserted equal to a Vitis C-sim **bit-for-bit**:
-
-- **integer** — growth-aware operators (`a*b` is `Wa+Wb` wide, `+c` adds a carry
-  bit); the Python `Int17` result matches `ap_int<17> y = a*b + c;`.
-- **float** — numpy `float32` passthrough; the kernel is built with
-  `-ffp-contract=off` so its `a*b + c` is the same **two roundings** numpy does.
-- **fixed** — full-precision `a*b + c` then one explicit `quantize` back to the
-  working format, matching `ap_fixed<...> y = a*b + c;`.
+| kind | Python | Vitis kernel | bit-exact because |
+|------|--------|--------------|-------------------|
+| **integer** | growth-aware operators (`Int17` result) | `ap_int<17> y = a*b + c;` | integer arithmetic is exact; the operators track the growth |
+| **float** | numpy `float32` passthrough | `a*b + c`, built `-ffp-contract=off` | same two roundings (no fused FMA) |
+| **fixed** | `quantize(a*b + c, Q)` | `ap_fixed<8,4> y = a*b + c;` | full precision, then quantize-on-assign |
 
 This is the **teaching** counterpart to the rigorous all-modes/all-widths sweep in
-`examples/schemas/fixedpoint`; the two share the same conformance machinery
-(`BuildDag` + `run_dag_cli` + gen→csim→compare-bits).
+`examples/schemas/fixedpoint` — the two share the same conformance machinery (`BuildDag` +
+`run_dag_cli` + gen→csim→compare-bits). The *concepts* (operators, the two paths, growth
+rules) live in the [vectorization guide](../../guide/vectorization/); this walkthrough shows
+them end-to-end on one example.
 
-## What it demonstrates
+## The walkthrough
 
-- The two computing paths from the [vectorization guide](../../guide/vectorization/):
-  the **type-preserving operators** (`a*b + c`, full-precision growth, explicit
-  `quantize`) producing a golden bit-vector, versus the raw numpy `.val` escape.
-- That keeping data in numpy arrays end-to-end is what makes functional simulation
-  **fast *and* bit-exact** — the core Waveflow differentiator.
+1. **[The Python model](./python.md)** — the vectorized golden: declare the arrays, apply
+   `a*b + c`, derive the result type, emit the golden bits.
+2. **[The Vitis equivalent](./vitis.md)** — the hand-written C++ kernels that mirror the op.
+3. **[Confirming the match](./eval.md)** — the build DAG, the Vitis C-sim, the bit comparison.
 
 ## File map
 
-The example lives in [`examples/basic_vec/`](../../../examples/basic_vec/):
-
-- `basic_vec_build.py` — builds the three MAC cases: computes each Python golden
-  with the operators, derives the result type, renders the matching kernel, and runs
-  the gen→csim→compare-bits conformance DAG.
-- `kernels.py` — the three minimal vectorized Vitis kernels (int / float / fixed)
-  over the *same* `a*b + c`, deliberately readable (the guide pulls from them).
-- `run.tcl` — the Vitis HLS C-simulation driver (`-ffp-contract=off` for the float
-  kernel).
+In [`examples/basic_vec/`](../../../examples/basic_vec/):
+- `basic_vec_build.py` — the three MAC cases + the gen→csim→compare conformance DAG.
+- `kernels.py` — the three minimal, **hand-written** Vitis kernels (int / float / fixed).
+- `run.tcl` — the Vitis C-sim driver (`-ffp-contract=off` for the float kernel).
 
 ## Running it
 
 ```bash
-# Generate kernels + input vectors + the Python golden bits (no Vitis needed):
-python examples/basic_vec/basic_vec_build.py --through gen
-
-# The full bit-exact conformance against Vitis C-sim (requires Vitis HLS):
-python examples/basic_vec/basic_vec_build.py --through run
+python examples/basic_vec/basic_vec_build.py --through gen   # kernels + vectors + golden (no Vitis)
+python examples/basic_vec/basic_vec_build.py --through run   # the bit-exact csim conformance (Vitis)
 ```
 
-The `run` stage asserts, per kind, that the Vitis output bits equal the Python
-operator bits **exactly**; any mismatch stops the build.
-
-## Next
-
-- [Vectorization guide](../../guide/vectorization/) — the selling point, the two
-  paths, and the per-kind detail (integer / float / fixed) this example embodies.
-- [Fixed-point (FixedField)](../../guide/schema/fixpoint.md) — the fixed-point type
-  behind the fixed case.
+The `run` stage asserts, per kind, that the Vitis output bits equal the Python operator bits
+**exactly**; any mismatch stops the build.
