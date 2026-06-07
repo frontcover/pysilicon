@@ -177,11 +177,31 @@ def test_mixed_sign_raises():
 
 # --- float path ---------------------------------------------------------------
 @pytest.mark.parametrize("dt", [np.complex64, np.complex128])
-def test_float_arithmetic_vs_numpy(dt):
+def test_float_add_sub_conj_are_numpy(dt):
     a = np.array([1 + 2j, -3 + 0.5j, 0 - 1j, 2.5 + 2.5j], dtype=dt)
     b = np.array([0.5 - 1j, 4 + 2j, -2 + 3j, 1 + 1j], dtype=dt)
-    np.testing.assert_array_equal(cx.cadd_float(a, b), a + b)
+    np.testing.assert_array_equal(cx.cadd_float(a, b), a + b)   # componentwise, exact
     np.testing.assert_array_equal(cx.csub_float(a, b), a - b)
-    np.testing.assert_array_equal(cx.cmult_float(a, b), a * b)
     np.testing.assert_array_equal(cx.conj_float(a), np.conj(a))
-    assert cx.cmult_float(a, b).dtype == dt          # no growth
+    assert cx.cmult_float(a, b).dtype == dt                     # no growth
+
+
+@pytest.mark.parametrize("dt,ft", [(np.complex64, np.float32), (np.complex128, np.float64)])
+def test_float_cmult_is_naive_not_numpy_fma(dt, ft):
+    """cmult uses the naive (hardware-faithful) formula, NOT numpy's FMA complex `*`.
+
+    On exactly-representable operands the two agree; on rounding-triggering random
+    operands numpy's FMA `*` diverges from the naive std::complex<float> formula on a
+    large fraction -- cmult_float must follow the naive formula (the bit-exact path)."""
+    rng = np.random.default_rng(7)
+    n = 2000
+    a = (rng.standard_normal(n) + 1j * rng.standard_normal(n)).astype(dt)
+    b = (rng.standard_normal(n) + 1j * rng.standard_normal(n)).astype(dt)
+    re = (a.real * b.real - a.imag * b.imag).astype(ft)
+    im = (a.real * b.imag + a.imag * b.real).astype(ft)
+    got = cx.cmult_float(a, b)
+    np.testing.assert_array_equal(got.real, re)        # exactly the naive formula
+    np.testing.assert_array_equal(got.imag, im)
+    # and it genuinely differs from numpy's FMA `*` on a meaningful fraction
+    diff = np.sum(got.real != (a * b).real) + np.sum(got.imag != (a * b).imag)
+    assert diff > n // 10

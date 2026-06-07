@@ -153,11 +153,13 @@ def test_conj_fixed_negates_imag():
     np.testing.assert_array_equal(out.val["im"], -im)
 
 
-def test_float_arithmetic_matches_numpy():
-    a = _da(_float(32), np.array([1 + 2j, -3 + 0.5j], dtype=np.complex64))
-    b = _da(_float(32), np.array([0.5 - 1j, 4 + 2j], dtype=np.complex64))
-    np.testing.assert_array_equal(np.asarray(cmult(a, b).val), np.asarray(a.val) * np.asarray(b.val))
-    np.testing.assert_array_equal(np.asarray(cadd(a, b).val), np.asarray(a.val) + np.asarray(b.val))
+def test_float_arithmetic_matches_core():
+    av = np.array([1 + 2j, -3 + 0.5j], dtype=np.complex64)
+    bv = np.array([0.5 - 1j, 4 + 2j], dtype=np.complex64)
+    a, b = _da(_float(32), av), _da(_float(32), bv)
+    # cadd is plain numpy; cmult is the naive (hardware-faithful) formula, not numpy `*`
+    np.testing.assert_array_equal(np.asarray(cadd(a, b).val), av + bv)
+    np.testing.assert_array_equal(np.asarray(cmult(a, b).val), cx.cmult_float(av, bv))
     assert cmult(a, b).element_type.kind == "float"
     assert cmult(a, b).element_type.bitwidth == 64   # complex64, no growth
 

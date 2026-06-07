@@ -11,7 +11,9 @@ numpy has **no integer-complex dtype**, so there are two representations:
 Complex arithmetic **composes** the fixed-point integer core
 (:mod:`waveflow.utils.fixputils` ``add``/``mult``/``sub``) on the re/im stored-int
 components -- an integer inner is just a :class:`Format` with ``frac_bits == 0`` -- and
-native numpy for float.  **No reimplemented fixed-point math.**  Result formats follow the
+numpy float ops for float (the **naive** multiply formula, not numpy's FMA complex `*`,
+so it is bit-exact with ``std::complex<float>``; see :func:`cmult_float`).  **No
+reimplemented fixed-point math.**  Result formats follow the
 ``FixedField`` rules and inherit the single-64-bit dtype + fail-fast >64 guard from
 :class:`Format`:
 
@@ -143,7 +145,14 @@ def conj(va: NDArray, a: Format) -> tuple[NDArray, Format]:
     return make_complex(re, im, r), r
 
 
-# --- float complex arithmetic (native numpy; no growth) -----------------------
+# --- float complex arithmetic (numpy float ops; no growth) --------------------
+# add/sub/conj are componentwise (one IEEE-rounded op per component) and match
+# std::complex<T> bit-for-bit.  multiply is the EDGE: numpy's complex-dtype `*` is
+# FMA-based and diverges from std::complex<T>'s naive (ar*br - ai*bi) formula on ~25%
+# of random operands -- so cmult uses the **naive float formula** (three IEEE-rounded
+# float ops per component, same order as libstdc++ operator*), which is bit-exact with
+# Vitis std::complex<float>/<double> (verified on random operands).  Raw numpy `*` (FMA)
+# stays available via `.val`.
 def cadd_float(a: NDArray, b: NDArray) -> NDArray:
     return np.asarray(a) + np.asarray(b)
 
@@ -153,7 +162,13 @@ def csub_float(a: NDArray, b: NDArray) -> NDArray:
 
 
 def cmult_float(a: NDArray, b: NDArray) -> NDArray:
-    return np.asarray(a) * np.asarray(b)
+    a, b = np.asarray(a), np.asarray(b)
+    ft = a.real.dtype                               # float32 / float64 (no FMA, no upcast)
+    re = (a.real * b.real - a.imag * b.imag).astype(ft)
+    im = (a.real * b.imag + a.imag * b.real).astype(ft)
+    out = np.empty(np.broadcast(re, im).shape, dtype=np.result_type(a.dtype, b.dtype))
+    out.real, out.imag = re, im
+    return out
 
 
 def conj_float(a: NDArray) -> NDArray:

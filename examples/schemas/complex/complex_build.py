@@ -237,8 +237,12 @@ def build_cases() -> list[dict]:  # noqa: C901 — flat enumeration of curated c
                            _interleave_stored_bits(oc.val, ri.get_bitwidth())))
 
     # ---- float (f32 / f64): round-trip + cmult (the edge) + cadd/csub/conj ----
-    fa_vals = [1 + 2j, -3 + 0.5j, 0.25 - 1j, 7.5 + 2.5j, -0.125 + 6j]
-    fb_vals = [0.5 - 1j, 4 + 2j, -2 + 3j, 1 + 1j, 3.25 - 0.75j]
+    # Rounding-TRIGGERING random operands (fixed seed): products are non-exact, so this
+    # genuinely exercises the complex-multiply edge (numpy's FMA `*` would diverge from
+    # std::complex on ~25% of these; the naive cmult_float model matches Vitis bit-exact).
+    _rng = np.random.default_rng(20240607)
+    fa_vals = _rng.standard_normal(64) + 1j * _rng.standard_normal(64)
+    fb_vals = _rng.standard_normal(64) + 1j * _rng.standard_normal(64)
     for cfg in FLOATS:
         a = _float_operand(cfg, fa_vals)
         b = _float_operand(cfg, fb_vals)
