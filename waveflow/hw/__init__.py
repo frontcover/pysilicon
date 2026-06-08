@@ -10,8 +10,10 @@ from .dataschema import (
     FloatField,
     IntField,
     MemAddr,
+    ParamSchema,
     Words,
 )
+from .param import Expr, LazyField, Param, defer_if_symbolic, pmax, pmin
 from .dataunion import (
     DataUnion,
     DataUnionHdr,
@@ -65,6 +67,13 @@ __all__ = [
     "BooleanField",
     "DataList",
     "DataArray",
+    "ParamSchema",
+    "Param",
+    "Expr",
+    "LazyField",
+    "defer_if_symbolic",
+    "pmax",
+    "pmin",
     "Words",
     "SchemaRegistry",
     "register_schema",
