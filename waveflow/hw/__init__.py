@@ -1,6 +1,7 @@
 """Public hardware-schema API exports."""
 
 from .dataschema import (
+    BooleanField,
     DataArray,
     DataField,
     DataList,
@@ -61,6 +62,7 @@ __all__ = [
     "MemAddr",
     "FloatField",
     "EnumField",
+    "BooleanField",
     "DataList",
     "DataArray",
     "Words",

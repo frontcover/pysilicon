@@ -1891,6 +1891,67 @@ class EnumField(DataField):
         )
 
 
+class BooleanField(IntField):
+    """A 1-bit boolean flag field.
+
+    A fixed ``ap_uint<1>`` :class:`IntField` (exact 1-bit ``m_axi`` packing) whose runtime
+    value is a Python ``bool``.  ``_convert`` accepts ``bool`` / ``0`` / ``1`` and rejects
+    any other value; it serializes / deserializes and code-generates like any other field
+    (the stored bit is ``0`` / ``1``).  Use it directly (``BooleanField``) for a flag, the
+    same way a default ``IntField`` is a 32-bit int.
+    """
+
+    bitwidth: ClassVar[int] = 1
+    signed: ClassVar[bool] = False
+    cpp_type: ClassVar[str] = "ap_uint<1>"
+    can_gen_include: ClassVar[bool] = False
+    _specializations: ClassVar[dict[tuple[Any, ...], type[BooleanField]]] = {}
+
+    @classmethod
+    def specialize(cls, **kwargs: Any) -> type[BooleanField]:  # type: ignore[override]
+        """Return a cached ``BooleanField`` subclass.
+
+        The width is fixed at 1 bit; only structural metadata overrides (such as
+        ``include_dir`` / ``include_filename``) vary, so unlike :class:`IntField` this
+        takes no ``bitwidth`` / ``signed`` parameters.
+        """
+        overrides = cls.validate_specialize_kwargs(kwargs)
+        override_items = tuple(sorted(overrides.items()))
+        key = (cls, override_items)
+        cached = cls._specializations.get(key)
+        if cached is not None:
+            return cached
+
+        specialized_attrs = cls.merge_specialize_attrs(
+            {
+                "bitwidth": 1,
+                "signed": False,
+                "cpp_type": "ap_uint<1>",
+                "__module__": cls.__module__,
+                "__doc__": "1-bit boolean field (ap_uint<1>).",
+            },
+            overrides,
+        )
+        specialized = type("Boolean", (cls,), specialized_attrs)
+        cls._specializations[key] = specialized
+        return specialized
+
+    def _convert(self, value: Any) -> bool:
+        """Coerce to a Python ``bool``; accept ``bool`` / ``0`` / ``1``, reject the rest."""
+        if isinstance(value, (bool, np.bool_)):
+            return bool(value)
+        if isinstance(value, (int, np.integer)) and int(value) in (0, 1):
+            return bool(value)
+        raise ValueError(
+            f"{type(self).__name__} accepts only bool or 0/1, got {value!r}."
+        )
+
+    @classmethod
+    def init_value(cls) -> bool:
+        """Return the initial Python-side boolean value (``False``)."""
+        return False
+
+
 class DataList(DataSchema):
     """Structured aggregate with schema defined entirely at the class level.
 
@@ -4243,6 +4304,7 @@ __all__ = [
     "MemAddr",
     "FloatField",
     "EnumField",
+    "BooleanField",
     "DataList",
     "DataArray",
 ]
