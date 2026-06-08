@@ -30,6 +30,7 @@ import numpy as np
 
 from waveflow.hw.dataschema import DataArray, DataField, FloatField, IntField, _elem_kind
 from waveflow.utils import complexutils as cx
+from waveflow.utils import fixputils
 from waveflow.utils.complexutils import complex_dtype, int_format
 from waveflow.utils.fixputils import Format
 
@@ -245,3 +246,24 @@ def conj(a: DataArray) -> DataArray:
         return _wrap_float(cx.conj_float(np.asarray(a.val)))
     out, r = cx.conj(np.asarray(a.val), ea.inner_format())
     return _wrap_complex(out, _result_inner(ea.kind, r))
+
+
+def csum(a: DataArray, axis: int = 0) -> DataArray:
+    """Wide-accumulator column reduction (full precision), real **or** complex.
+
+    Reduces over ``axis`` (default 0 -> sum the rows, one value per column), integer
+    bits growing by ``ceil(log2 N)`` (``sum_format``).  Real ``FixedField`` / ``IntField``
+    delegates to ``fixpoint.fixed_sum``; complex sums the re/im stored-int components with
+    the same integer reduction and recombines (so re and im share the grown format).
+    Vectorized -- no per-element loop."""
+    ea = a.element_type
+    if getattr(ea, "is_complex_field", False):
+        if ea.kind == "float":
+            return _wrap_float(np.asarray(a.val).sum(axis=axis))
+        fmt = ea.inner_format()
+        v = np.asarray(a.val)
+        re, r = fixputils.fixed_sum(cx.re_of(v), fmt, axis=axis)
+        im, _ = fixputils.fixed_sum(cx.im_of(v), fmt, axis=axis)
+        return _wrap_complex(cx.make_complex(re, im, r), _result_inner(ea.kind, r))
+    from waveflow.hw.fixpoint import fixed_sum as _fixed_sum
+    return _fixed_sum(a, axis=axis)
