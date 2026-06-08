@@ -50,6 +50,23 @@ Float32 = FloatField.specialize(bitwidth=32)    # IEEE single precision
 Float64 = FloatField.specialize(bitwidth=64)    # IEEE double precision
 ```
 
+### `BooleanField` — a one-bit flag
+
+A boolean flag is common enough to get its own type. `BooleanField` is a fixed
+`ap_uint<1>` (an `IntField` subclass), but its `.val` is a Python `bool`:
+
+```python
+from waveflow.hw.dataschema import BooleanField
+
+enable = BooleanField(True)
+enable.val            # True  (a Python bool)
+```
+
+It accepts `bool` or `0` / `1` and **rejects any other value**, so a flag can never
+silently hold `2`. It packs into exactly **one bit** (`ap_uint<1>`), so several flags cost
+only a few bits in a record — handy for `m_axi` control words. Use it directly (no
+`specialize` needed); the equivalent raw form is the one-bit `IntField` shown above.
+
 ## Why arbitrary-precision integers matter in hardware
 
 Software integers come in a few fixed sizes (8/16/32/64). Hardware has no such restriction —
