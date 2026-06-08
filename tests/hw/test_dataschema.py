@@ -7,6 +7,7 @@ import pytest
 from waveflow.build.build import BuildConfig
 from waveflow.build.streamutils import MemMgrStep, StreamUtilsStep
 from waveflow.hw import (
+    BooleanField as PublicBooleanField,
     DataArray as PublicDataArray,
     DataField as PublicDataField,
     DataList as PublicDataList,
@@ -17,6 +18,7 @@ from waveflow.hw import (
     MemAddr as PublicMemAddr,
 )
 from waveflow.hw.dataschema import (
+    BooleanField,
     DataArray,
     DataField,
     DataList,
@@ -224,6 +226,83 @@ def test_enumfield_explicit_overrides_win():
     assert mode_field.cpp_class_name() == "CustomMode"
     assert mode_field.resolved_include_filename() == "custom_mode.h"
     assert mode_field.resolved_tb_include_filename() == "custom_mode_tb.h"
+
+
+# --- BooleanField -------------------------------------------------------------
+def test_booleanfield_construction_and_defaults():
+    assert BooleanField.get_bitwidth() == 1
+    assert BooleanField.signed is False
+    assert BooleanField.cpp_class_name() == "ap_uint<1>"
+    assert BooleanField.can_gen_include is False
+    assert issubclass(BooleanField, IntField)
+
+    init = BooleanField.init_value()
+    assert init is False and isinstance(init, bool)
+    assert BooleanField().val is False
+    assert PublicBooleanField is BooleanField
+
+
+@pytest.mark.parametrize(
+    "value,expected",
+    [
+        (True, True), (False, False),
+        (1, True), (0, False),
+        (np.int64(1), True), (np.uint8(0), False),
+        (np.bool_(True), True), (np.bool_(False), False),
+    ],
+)
+def test_booleanfield_coerces_to_python_bool(value, expected):
+    field = BooleanField(value)
+    assert field.val is expected            # exact Python bool singleton
+    assert isinstance(field.val, bool)
+
+
+@pytest.mark.parametrize("bad", [2, -1, 255, 1.0, 0.0, "1"])
+def test_booleanfield_rejects_out_of_range(bad):
+    with pytest.raises(ValueError):
+        BooleanField(bad)
+    with pytest.raises(ValueError):
+        BooleanField().val = bad        # also rejected on direct assignment
+
+
+@pytest.mark.parametrize("word_bw", [32, 64])
+@pytest.mark.parametrize("value", [True, False])
+def test_booleanfield_serialize_deserialize_roundtrip(value, word_bw):
+    packed = BooleanField(value).serialize(word_bw=word_bw)
+    assert int(packed[0]) == (1 if value else 0)          # exact 1-bit payload
+    restored = BooleanField().deserialize(packed, word_bw=word_bw)
+    assert restored.val is value
+
+
+def test_booleanfield_one_bit_width_packs_tightly():
+    # Three booleans + a byte pack into a single 32-bit word (3 + 8 = 11 bits used).
+    class Flags(DataList):
+        elements = {"a": BooleanField, "b": BooleanField, "c": BooleanField, "n": U8}
+
+    flags = Flags(a=True, b=False, c=True, n=200)
+    packed = flags.serialize(word_bw=32)
+    assert packed.shape == (1,)
+    restored = Flags().deserialize(packed, word_bw=32)
+    assert restored.val == {"a": True, "b": False, "c": True, "n": np.uint32(200)}
+
+
+def test_booleanfield_specialize_caches_and_honors_overrides():
+    assert BooleanField.specialize() is BooleanField.specialize()
+    a = BooleanField.specialize(include_dir="a")
+    b = BooleanField.specialize(include_dir="b")
+    assert a is not b
+    assert a.get_bitwidth() == 1 and a.cpp_class_name() == "ap_uint<1>"
+    assert a.include_dir == "a" and b.include_dir == "b"
+
+
+def test_booleanfield_codegen_emits_ap_uint1(tmp_path: Path):
+    class Toggle(DataList):
+        elements = {"enable": BooleanField, "count": U8}
+
+    result = Toggle.as_buildable(word_bw_supported=[32]).run(BuildConfig(root_dir=tmp_path))
+    content = result.artifacts["include"].read_text(encoding="utf-8")
+    assert "ap_uint<1> enable;" in content                # exact 1-bit struct member
+    assert "res.range(0, 0) = data.enable;" in content    # packs into a single bit
 
 
 def test_inline_enum_specialization_keeps_expected_metadata():
