@@ -8,7 +8,7 @@ derivation, and the unsigned/mixed-kind guards.
 import numpy as np
 import pytest
 
-from waveflow.hw.complexfield import ComplexField, cadd, cmult, conj, csub
+from waveflow.hw.complexfield import ComplexField, cadd, cmult, conj, csub, csum
 from waveflow.hw.dataschema import DataArray, FloatField, IntField
 from waveflow.hw.fixpoint import FixedField
 from waveflow.utils import complexutils as cx
@@ -142,6 +142,24 @@ def test_cadd_csub_int_match_core():
     np.testing.assert_array_equal(csub(a, b).val["im"], d["im"])
     assert cadd(a, b).element_type.kind == "int"
     assert cadd(a, b).element_type.inner_type.get_bitwidth() == 9   # max+1
+
+
+def test_csum_real_and_complex_full_precision():
+    # real: sum 3 rows of ap_fixed<8,4> -> grows int bits by ceil(log2 3)=2 -> <10,6>
+    F = FixedField.specialize(8, 4, True)
+    a = DataArray.specialize(F, max_shape=(3, 2))(np.array([[1, 2], [3, 4], [5, 6]], dtype=np.int64))
+    r = csum(a, axis=0)
+    assert r.element_type.get_format() == Format(10, 6, True)
+    np.testing.assert_array_equal(np.asarray(r.val), [9, 12])     # exact, no overflow
+
+    # complex: per-component reduction, re/im share the grown format
+    v = cx.make_complex(np.array([[1, 2], [3, 4], [5, 6]]),
+                        np.array([[10, 20], [30, 40], [50, 60]]), Format(8, 4, True))
+    ca = DataArray.specialize(ComplexField.specialize(F), max_shape=(3, 2))(v)
+    cr = csum(ca, axis=0)
+    assert cr.element_type.inner_format() == Format(10, 6, True)
+    np.testing.assert_array_equal(cr.val["re"], [9, 12])
+    np.testing.assert_array_equal(cr.val["im"], [90, 120])
 
 
 def test_conj_fixed_negates_imag():
