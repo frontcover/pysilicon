@@ -1,24 +1,34 @@
-"""The VMAC Python golden — the bit-exact reference for ``D = α·A·op(B) + β·C [, reduce]``.
+"""``VmacAccel`` — the VMAC accelerator: structural params + the bit-exact Python golden.
 
-``execute(cmd, mem)`` runs a :class:`~examples.vmac.vmac_cmd.VmacCmd` over a shared-memory
-array, composing the merged ``FixedField`` / ``ComplexField`` operators (``mult`` / ``cmult``,
-``add`` / ``cadd``, ``conj``) for the multiply-accumulate, the wide-accumulator column
-reduction :func:`~waveflow.hw.complexfield.csum` for ``reduce_rows``, and the output
-requantize (right-shift ``SHIFT`` + round + saturate) via the ``ap_fixed``-exact integer
-requantizer.  Everything is **vectorized** — no per-element Python loop.
+A VMAC instance is parameterized by its **structural** widths — fixed at synthesis, the
+HLS template params: ``mem_dwidth`` (MEM_BW), ``mem_awidth``, ``data_bw`` (IN_BW),
+``acc_bw``, ``out_bw``.  ``VmacAccel.specialize(...)`` sets them and **cascades** the
+specialization into the command schema (``Cmd = VmacCmd.specialize(mem_awidth, data_bw)``),
+so a command's field widths track the silicon that consumes it::
 
-The datapath: **multiply (IN_BW × IN_BW) → wide accumulate (full precision, ≤ ACC_BW) →
-right-shift SHIFT → round + saturate → write (OUT_BW)**.  The right-shift is the single
-lossy step; it is exactly an ``ap_fixed`` assignment, so the golden is bit-exact with the
-Vitis kernel (Phase 3).
+    Accel = VmacAccel.specialize(mem_dwidth=512, mem_awidth=32, data_bw=16, acc_bw=48, out_bw=16)
+    cmd   = Accel.Cmd(...)            # a VmacCmd specialized to this accelerator
+    dst   = Accel.execute(cmd, mem)   # the bit-exact golden
 
-``mem`` is the shared memory: a 1-D ``int64`` array of stored integers (``real`` mode) or a
-1-D structured ``[('re','im')]`` array (``complex`` mode).  Operands are **strided** regions
-``M[i, j] = mem[addr + i·row_stride + j·col_stride]``.  ``execute`` writes the requantized
-result into ``mem`` at the ``d`` region (so commands compose) and returns the dst
-``DataArray``.
+``execute`` runs the fused op ``D = α·A·op(B) + β·C [, reduce]`` over a shared-memory
+array, composing the merged ``FixedField`` / ``ComplexField`` operators (``mult`` /
+``cmult``, ``add`` / ``cadd``, ``conj``), the wide-accumulator column reduction
+:func:`~waveflow.hw.complexfield.csum` for ``reduce_rows``, and the output requantize
+(right-shift ``SHIFT`` + round + saturate) via the ``ap_fixed``-exact integer requantizer.
+Vectorized — no per-element Python loop.
+
+The datapath: **multiply (data_bw × data_bw) → wide accumulate (full precision, ≤ acc_bw)
+→ right-shift shift → round + saturate → write (out_bw)**.  The right-shift is the single
+lossy step (an ``ap_fixed`` assignment), so the golden is bit-exact with the Vitis kernel
+(Phase 3).  ``mem`` is the shared memory: a 1-D ``int64`` array of stored integers (``real``
+mode) or a 1-D structured ``[('re','im')]`` array (``complex`` mode); operands are strided
+regions ``M[i, j] = mem[addr + i·row_stride + j·col_stride]``.  ``execute`` writes the
+requantized result into ``mem`` at the ``d`` region (so commands compose) and returns the
+dst ``DataArray``.
 """
 from __future__ import annotations
+
+from typing import Any
 
 import numpy as np
 
@@ -32,128 +42,163 @@ from waveflow.utils import fixputils
 from waveflow.utils.fixputils import Format, OMode, QMode
 
 
-def _q(cmd: VmacCmd) -> QMode:
-    return QMode.AP_RND if int(cmd.q_rnd) else QMode.AP_TRN
+class VmacAccel:
+    """A VMAC accelerator instance: structural widths + the Python golden ``execute``."""
 
+    # structural params (synthesis-time; the HLS template params)
+    mem_dwidth: int = 512
+    mem_awidth: int = 32
+    data_bw: int = 32                       # IN_BW — operand element width
+    acc_bw: int = 64                        # accumulator width budget
+    out_bw: int = 32                        # writeback element width
+    Cmd: type[VmacCmd] = VmacCmd            # the command schema (specialized below)
+    _specializations: dict[tuple[Any, ...], type["VmacAccel"]] = {}
 
-def _o(cmd: VmacCmd) -> OMode:
-    return OMode.AP_SAT if int(cmd.o_sat) else OMode.AP_WRAP
+    @classmethod
+    def specialize(
+        cls,
+        *,
+        mem_dwidth: int,
+        mem_awidth: int,
+        data_bw: int,
+        acc_bw: int,
+        out_bw: int,
+    ) -> type["VmacAccel"]:
+        """Return a cached accelerator with these structural widths; cascades into ``Cmd``.
 
+        Same params → same class object (stable schema identity for codegen)."""
+        key = (cls, int(mem_dwidth), int(mem_awidth), int(data_bw), int(acc_bw), int(out_bw))
+        cached = cls._specializations.get(key)
+        if cached is not None:
+            return cached
+        sub = type(f"VmacAccel_d{mem_dwidth}_a{mem_awidth}_w{data_bw}", (cls,), {
+            "mem_dwidth": int(mem_dwidth),
+            "mem_awidth": int(mem_awidth),
+            "data_bw": int(data_bw),
+            "acc_bw": int(acc_bw),
+            "out_bw": int(out_bw),
+            "Cmd": VmacCmd.specialize(mem_awidth=int(mem_awidth), data_bw=int(data_bw)),
+            "__module__": cls.__module__,
+        })
+        cls._specializations[key] = sub
+        return sub
 
-def _fixed_cls(fmt: Format) -> type[FixedField]:
-    return FixedField.specialize(fmt.W, fmt.int_bits, fmt.signed, fmt.q_mode, fmt.o_mode)
+    # --- private datapath helpers --------------------------------------------
+    @staticmethod
+    def _fixed_cls(fmt: Format) -> type[FixedField]:
+        return FixedField.specialize(fmt.W, fmt.int_bits, fmt.signed, fmt.q_mode, fmt.o_mode)
 
+    @staticmethod
+    def _region_idx(reg, n_rows: int, n_cols: int) -> np.ndarray:
+        """The strided index matrix: ``addr + i·row_stride + j·col_stride``."""
+        rows = np.arange(n_rows)[:, None] * int(reg.row_stride)
+        cols = np.arange(n_cols)[None, :] * int(reg.col_stride)
+        return int(reg.addr) + rows + cols
 
-def _region_idx(reg, n_rows: int, n_cols: int) -> np.ndarray:
-    """The strided index matrix for a region: ``addr + i·row_stride + j·col_stride``."""
-    rows = np.arange(n_rows)[:, None] * int(reg.row_stride)
-    cols = np.arange(n_cols)[None, :] * int(reg.col_stride)
-    return int(reg.addr) + rows + cols
+    @classmethod
+    def _operand(cls, M: np.ndarray, in_fmt: Format, complex_mode: bool) -> DataArray:
+        """Wrap a strided matrix view (stored ints / structured) as a DataArray operand."""
+        inner = cls._fixed_cls(in_fmt)
+        elem = ComplexField.specialize(inner) if complex_mode else inner
+        shape = M.shape if M.shape else (1,)
+        return DataArray.specialize(elem, max_shape=tuple(shape))(M)
 
-
-def _operand(M: np.ndarray, in_fmt: Format, complex_mode: bool) -> DataArray:
-    """Wrap a strided matrix view (stored ints / structured) as a DataArray operand."""
-    inner = _fixed_cls(in_fmt)
-    elem = ComplexField.specialize(inner) if complex_mode else inner
-    shape = M.shape if M.shape else (1,)
-    return DataArray.specialize(elem, max_shape=tuple(shape))(M)
-
-
-def _scalar(sc, n_cols: int, in_fmt: Format, mem: np.ndarray, complex_mode: bool) -> DataArray:
-    """Build an alpha/beta operand: direct immediate (shape (1,)) or indirect per-column."""
-    if int(sc.direct):
-        if complex_mode:
-            M = cx.make_complex([int(sc.re)], [int(sc.im)], in_fmt)
-        else:
-            M = np.array([int(sc.re)], dtype=np.int64)
-    else:
-        idx = int(sc.addr) + np.arange(n_cols) * int(sc.stride)
-        M = mem[idx]
-    return _operand(M, in_fmt, complex_mode)
-
-
-def _mult(a: DataArray, b: DataArray, complex_mode: bool) -> DataArray:
-    return cmult(a, b) if complex_mode else fixpoint.mult(a, b)
-
-
-def _add(a: DataArray, b: DataArray, complex_mode: bool) -> DataArray:
-    return cadd(a, b) if complex_mode else fixpoint.add(a, b)
-
-
-def _acc_width(t: DataArray, complex_mode: bool) -> int:
-    et = t.element_type
-    return et.inner_type.get_bitwidth() if complex_mode else et.get_bitwidth()
-
-
-def _requantize(t: DataArray, out_bw: int, shift: int, q: QMode, o: OMode,
+    @classmethod
+    def _scalar(cls, sc, n_cols: int, in_fmt: Format, mem: np.ndarray,
                 complex_mode: bool) -> DataArray:
-    """Right-shift ``SHIFT`` + round + saturate to ``OUT_BW`` — the single lossy step,
-    an ``ap_fixed`` assignment via the integer requantizer."""
-    tf = t.element_type.inner_format() if complex_mode else t.element_type.get_format()
-    out_frac = tf.frac_bits - shift
-    if out_frac < 0:
-        raise ValueError(
-            f"SHIFT={shift} exceeds accumulator fractional bits {tf.frac_bits}; "
-            "the output would need more integer bits than OUT_BW.")
-    target = Format(out_bw, out_bw - out_frac, tf.signed, q, o)
-    if complex_mode:
-        re = fixputils.quantize(cx.re_of(t.val), tf, target)
-        im = fixputils.quantize(cx.im_of(t.val), tf, target)
-        elem = ComplexField.specialize(_fixed_cls(target))
-        struct = cx.make_complex(re, im, target)
-        return DataArray.specialize(elem, max_shape=struct.shape)(struct)
-    return fixpoint.quantize(t, _fixed_cls(target))
+        """Build an alpha/beta operand: direct immediate (shape (1,)) or indirect per-column."""
+        if bool(sc.direct):
+            if complex_mode:
+                M = cx.make_complex([int(sc.re)], [int(sc.im)], in_fmt)
+            else:
+                M = np.array([int(sc.re)], dtype=np.int64)
+        else:
+            idx = int(sc.addr) + np.arange(n_cols) * int(sc.stride)
+            M = mem[idx]
+        return cls._operand(M, in_fmt, complex_mode)
 
+    @staticmethod
+    def _mult(a: DataArray, b: DataArray, complex_mode: bool) -> DataArray:
+        return cmult(a, b) if complex_mode else fixpoint.mult(a, b)
 
-def _writeback(mem: np.ndarray, reg, dst: DataArray, complex_mode: bool) -> None:
-    val = np.asarray(dst.val)
-    if val.ndim == 1:                                   # reduced -> single row of columns
-        idx = int(reg.addr) + np.arange(val.shape[0]) * int(reg.col_stride)
-    else:
-        idx = _region_idx(reg, val.shape[0], val.shape[1])
-    mem[idx] = val
+    @staticmethod
+    def _add(a: DataArray, b: DataArray, complex_mode: bool) -> DataArray:
+        return cadd(a, b) if complex_mode else fixpoint.add(a, b)
 
+    @staticmethod
+    def _acc_width(t: DataArray, complex_mode: bool) -> int:
+        et = t.element_type
+        return et.inner_type.get_bitwidth() if complex_mode else et.get_bitwidth()
 
-def execute(cmd: VmacCmd, mem: np.ndarray) -> DataArray:
-    """Execute a ``VmacCmd`` over ``mem``; write the dst region and return the dst array."""
-    mode = VmacMode(int(cmd.mode))
-    complex_mode = mode == VmacMode.COMPLEX
-    in_fmt = Format(int(cmd.in_bw), int(cmd.int_bits), True)
-    n, m = int(cmd.n_rows), int(cmd.n_cols)
-    mem = np.asarray(mem)
+    @classmethod
+    def _requantize(cls, t: DataArray, out_bw: int, shift: int, q: QMode, o: OMode,
+                    complex_mode: bool) -> DataArray:
+        """Right-shift ``shift`` + round + saturate to ``out_bw`` — the single lossy step."""
+        tf = t.element_type.inner_format() if complex_mode else t.element_type.get_format()
+        out_frac = tf.frac_bits - shift
+        if out_frac < 0:
+            raise ValueError(
+                f"shift={shift} exceeds accumulator fractional bits {tf.frac_bits}; "
+                "the output would need more integer bits than out_bw.")
+        target = Format(out_bw, out_bw - out_frac, tf.signed, q, o)
+        if complex_mode:
+            re = fixputils.quantize(cx.re_of(t.val), tf, target)
+            im = fixputils.quantize(cx.im_of(t.val), tf, target)
+            elem = ComplexField.specialize(cls._fixed_cls(target))
+            struct = cx.make_complex(re, im, target)
+            return DataArray.specialize(elem, max_shape=struct.shape)(struct)
+        return fixpoint.quantize(t, cls._fixed_cls(target))
 
-    def region(reg) -> DataArray:
-        return _operand(mem[_region_idx(reg, n, m)], in_fmt, complex_mode)
+    @classmethod
+    def _writeback(cls, mem: np.ndarray, reg, dst: DataArray) -> None:
+        val = np.asarray(dst.val)
+        if val.ndim == 1:                                   # reduced -> single row of columns
+            idx = int(reg.addr) + np.arange(val.shape[0]) * int(reg.col_stride)
+        else:
+            idx = cls._region_idx(reg, val.shape[0], val.shape[1])
+        mem[idx] = val
 
-    # op(B) and A·op(B)
-    a = region(cmd.a)
-    if int(cmd.b_one):
-        ab = a
-    else:
-        b = region(cmd.b)
-        if int(cmd.b_conj) and complex_mode:            # conj is a no-op for real data
-            b = conj(b)
-        ab = _mult(a, b, complex_mode)
+    # --- the golden ----------------------------------------------------------
+    @classmethod
+    def execute(cls, cmd: VmacCmd, mem: np.ndarray) -> DataArray:
+        """Execute a ``VmacCmd`` over ``mem``; write the dst region and return the dst array."""
+        complex_mode = VmacMode(int(cmd.mode)) == VmacMode.COMPLEX
+        in_fmt = Format(cls.data_bw, int(cmd.int_bits), True)
+        n, m = int(cmd.n_rows), int(cmd.n_cols)
+        mem = np.asarray(mem)
 
-    # alpha · A·op(B)
-    alpha = _scalar(cmd.alpha, m, in_fmt, mem, complex_mode)
-    t = _mult(alpha, ab, complex_mode)
+        def region(reg) -> DataArray:
+            return cls._operand(mem[cls._region_idx(reg, n, m)], in_fmt, complex_mode)
 
-    # + beta · C
-    if not int(cmd.c_zero):
-        beta = _scalar(cmd.beta, m, in_fmt, mem, complex_mode)
-        t = _add(t, _mult(beta, region(cmd.c), complex_mode), complex_mode)
+        # op(B) and A·op(B)
+        a = region(cmd.a)
+        if bool(cmd.b_one):
+            ab = a
+        else:
+            b = region(cmd.b)
+            if bool(cmd.b_conj) and complex_mode:           # conj is a no-op for real data
+                b = conj(b)
+            ab = cls._mult(a, b, complex_mode)
 
-    # optional row reduction (wide accumulator)
-    if int(cmd.reduce_rows):
-        t = csum(t, axis=0)
+        # alpha · A·op(B)
+        alpha = cls._scalar(cmd.alpha, m, in_fmt, mem, complex_mode)
+        t = cls._mult(alpha, ab, complex_mode)
 
-    # accumulator-width budget check (the provisioned ACC_BW must hold full precision)
-    acc_w = _acc_width(t, complex_mode)
-    if acc_w > int(cmd.acc_bw):
-        raise ValueError(
-            f"accumulator width {acc_w} exceeds ACC_BW={int(cmd.acc_bw)}; widen ACC_BW.")
+        # + beta · C
+        if not bool(cmd.c_zero):
+            beta = cls._scalar(cmd.beta, m, in_fmt, mem, complex_mode)
+            t = cls._add(t, cls._mult(beta, region(cmd.c), complex_mode), complex_mode)
 
-    dst = _requantize(t, int(cmd.out_bw), int(cmd.shift), _q(cmd), _o(cmd), complex_mode)
-    _writeback(mem, cmd.d, dst, complex_mode)
-    return dst
+        # optional row reduction (wide accumulator)
+        if bool(cmd.reduce_rows):
+            t = csum(t, axis=0)
+
+        # accumulator-width budget check (the provisioned acc_bw must hold full precision)
+        acc_w = cls._acc_width(t, complex_mode)
+        if acc_w > cls.acc_bw:
+            raise ValueError(
+                f"accumulator width {acc_w} exceeds acc_bw={cls.acc_bw}; widen acc_bw.")
+
+        dst = cls._requantize(t, cls.out_bw, int(cmd.shift), cmd.q_mode, cmd.o_mode, complex_mode)
+        cls._writeback(mem, cmd.d, dst)
+        return dst

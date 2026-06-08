@@ -1,16 +1,25 @@
-"""Phase-1 VMAC command tests — ``VmacCmd`` encode/decode round-trips.
+"""VMAC command/accelerator tests — encode/decode round-trips + the ``specialize`` cascade.
 
-``VmacCmd`` is a plain ``DataList`` (with nested ``Region`` / ``Scalar`` sub-lists and an
-``EnumField`` mode), so it must serialize and deserialize back to an identical value across
-word widths — the wire-format contract for the (Phase-3) HLS kernel.
+``VmacCmd`` is a plain ``DataList`` (nested ``Region`` / ``Scalar`` sub-lists, an
+``EnumField`` mode, ``BooleanField`` flags), so it must serialize / deserialize back to an
+identical value across word widths — the wire-format contract for the (Phase-3) HLS kernel.
+The structural widths live on ``VmacAccel``, which ``specialize``s the command schema so a
+command's field widths track the silicon (``addr`` = ``mem_awidth`` bits; immediate ``re`` /
+``im`` = ``data_bw`` bits); same params → same class object.
 """
 import pytest
 
+from examples.vmac.golden import VmacAccel
 from examples.vmac.vmac_cmd import Region, Scalar, VmacCmd, VmacMode
+from waveflow.utils.fixputils import OMode, QMode
+
+# a concrete accelerator: 32-bit addresses, 16-bit operands/immediates
+ACCEL = VmacAccel.specialize(mem_dwidth=512, mem_awidth=32, data_bw=16, acc_bw=48, out_bw=12)
+Cmd = ACCEL.Cmd
 
 
-def _full_cmd() -> VmacCmd:
-    cmd = VmacCmd()
+def _full_cmd():
+    cmd = Cmd()
     cmd.n_rows, cmd.n_cols = 6, 4
     cmd.a = {"addr": 0, "row_stride": 4, "col_stride": 1}
     cmd.b = {"addr": 24, "row_stride": 4, "col_stride": 1}
@@ -20,16 +29,16 @@ def _full_cmd() -> VmacCmd:
     cmd.beta = {"direct": 0, "re": 0, "im": 0, "addr": 96, "stride": 1}
     cmd.b_one, cmd.c_zero, cmd.b_conj, cmd.reduce_rows = 0, 1, 1, 1
     cmd.mode = VmacMode.COMPLEX
-    cmd.in_bw, cmd.int_bits, cmd.out_bw = 16, 8, 12
-    cmd.shift, cmd.acc_bw = 13, 48
+    cmd.int_bits, cmd.shift = 8, 13
     cmd.q_rnd, cmd.o_sat = 1, 1
     return cmd
 
 
+# --- encode / decode round-trips ----------------------------------------------
 @pytest.mark.parametrize("word_bw", [16, 32, 64])
 def test_vmac_cmd_roundtrip(word_bw):
     cmd = _full_cmd()
-    restored = VmacCmd().deserialize(cmd.serialize(word_bw), word_bw)
+    restored = Cmd().deserialize(cmd.serialize(word_bw), word_bw)
     assert restored.val == cmd.val
 
 
@@ -41,27 +50,92 @@ def test_nested_region_scalar_roundtrip():
     sc = Scalar(direct=1, re=-100, im=77, addr=5, stride=-1)
     s2 = Scalar().deserialize(sc.serialize(32), 32)
     assert s2.val == sc.val
+    assert s2.direct is True                                     # BooleanField -> Python bool
 
 
 def test_default_cmd_roundtrips():
-    cmd = VmacCmd()                                              # all defaults / zeros
-    restored = VmacCmd().deserialize(cmd.serialize(32), 32)
+    cmd = Cmd()                                                  # all defaults / zeros
+    restored = Cmd().deserialize(cmd.serialize(32), 32)
     assert restored.val == cmd.val
 
 
 def test_mode_enum_field_roundtrips_both_values():
     for mode in (VmacMode.REAL, VmacMode.COMPLEX):
-        cmd = VmacCmd()
+        cmd = Cmd()
         cmd.mode = mode
-        restored = VmacCmd().deserialize(cmd.serialize(32), 32)
+        restored = Cmd().deserialize(cmd.serialize(32), 32)
         assert int(restored.mode) == int(mode)
 
 
 def test_signed_fields_preserve_negatives():
     cmd = _full_cmd()
     cmd.a = {"addr": 10, "row_stride": -4, "col_stride": -1}
-    cmd.alpha = {"direct": 1, "re": -32768, "im": -1, "addr": 0, "stride": 0}
-    restored = VmacCmd().deserialize(cmd.serialize(32), 32)
+    cmd.alpha = {"direct": 1, "re": -32768, "im": -1, "addr": 0, "stride": 0}  # data_bw=16 range
+    restored = Cmd().deserialize(cmd.serialize(32), 32)
     assert restored.a.row_stride == -4 and restored.a.col_stride == -1
     assert restored.alpha.re == -32768 and restored.alpha.im == -1
     assert restored.val == cmd.val
+
+
+def test_flags_are_booleanfields():
+    cmd = _full_cmd()
+    for flag in (cmd.b_one, cmd.c_zero, cmd.b_conj, cmd.reduce_rows, cmd.q_rnd, cmd.o_sat):
+        assert isinstance(flag, bool)
+    assert cmd.c_zero is True and cmd.b_one is False
+
+
+def test_q_o_mode_properties():
+    cmd = Cmd()
+    cmd.q_rnd, cmd.o_sat = 0, 0
+    assert cmd.q_mode is QMode.AP_TRN and cmd.o_mode is OMode.AP_WRAP
+    cmd.q_rnd, cmd.o_sat = 1, 1
+    assert cmd.q_mode is QMode.AP_RND and cmd.o_mode is OMode.AP_SAT
+
+
+# --- the specialize cascade ---------------------------------------------------
+def test_accel_specialize_is_cached():
+    a = VmacAccel.specialize(mem_dwidth=512, mem_awidth=32, data_bw=16, acc_bw=48, out_bw=12)
+    b = VmacAccel.specialize(mem_dwidth=512, mem_awidth=32, data_bw=16, acc_bw=48, out_bw=12)
+    assert a is b is ACCEL                                       # same params -> same class
+    c = VmacAccel.specialize(mem_dwidth=512, mem_awidth=24, data_bw=12, acc_bw=48, out_bw=12)
+    assert c is not a
+
+
+def test_accel_carries_structural_params():
+    assert (ACCEL.mem_dwidth, ACCEL.mem_awidth, ACCEL.data_bw, ACCEL.acc_bw, ACCEL.out_bw) \
+        == (512, 32, 16, 48, 12)
+
+
+def test_cmd_specialize_cached_and_matches_accel():
+    assert ACCEL.Cmd is VmacCmd.specialize(mem_awidth=32, data_bw=16)
+    assert VmacCmd.specialize(mem_awidth=32, data_bw=16) is VmacCmd.specialize(mem_awidth=32, data_bw=16)
+    assert issubclass(ACCEL.Cmd, VmacCmd)
+
+
+def test_cmd_field_widths_track_mem_awidth_and_data_bw():
+    # addr (and strides) follow mem_awidth; immediate re/im follow data_bw
+    region = ACCEL.Cmd.get_element_schema("a")
+    scalar = ACCEL.Cmd.get_element_schema("alpha")
+    assert region.get_element_schema("addr").get_bitwidth() == 32
+    assert region.get_element_schema("row_stride").get_bitwidth() == 32
+    assert scalar.get_element_schema("re").get_bitwidth() == 16
+    assert scalar.get_element_schema("im").get_bitwidth() == 16
+
+    wide = VmacAccel.specialize(mem_dwidth=256, mem_awidth=40, data_bw=24, acc_bw=64, out_bw=24)
+    assert wide.Cmd.get_element_schema("a").get_element_schema("addr").get_bitwidth() == 40
+    assert wide.Cmd.get_element_schema("alpha").get_element_schema("re").get_bitwidth() == 24
+
+
+def test_region_scalar_specialize_cached_and_sized():
+    assert Region.specialize(32) is Region.specialize(32)
+    assert Region.specialize(40) is not Region.specialize(32)
+    assert Region.specialize(40).get_element_schema("addr").get_bitwidth() == 40
+    assert Scalar.specialize(32, 16) is Scalar.specialize(32, 16)
+    assert Scalar.specialize(32, 16).get_element_schema("re").get_bitwidth() == 16
+    assert Scalar.specialize(32, 24).get_element_schema("re").get_bitwidth() == 24
+
+
+def test_in_bw_out_bw_acc_bw_removed_from_cmd():
+    fields = set(VmacCmd.elements)
+    assert {"in_bw", "out_bw", "acc_bw"}.isdisjoint(fields)     # moved to the accelerator
+    assert {"int_bits", "shift", "q_rnd", "o_sat"} <= fields    # runtime params stay

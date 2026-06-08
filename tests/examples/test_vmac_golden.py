@@ -17,8 +17,8 @@ from fractions import Fraction
 import numpy as np
 import pytest
 
-from examples.vmac.golden import execute
-from examples.vmac.vmac_cmd import VmacCmd, VmacMode
+from examples.vmac.golden import VmacAccel
+from examples.vmac.vmac_cmd import VmacMode
 from waveflow.utils import complexutils as cx
 from waveflow.utils.fixputils import Format
 
@@ -114,8 +114,16 @@ def _flat(pair_or_arr, complex_mode):
     return re.astype(np.int64)
 
 
-def build(cfg, a, b, c, alpha, beta):
-    """Lay a/b/c (+ per-column alpha/beta) into mem and build the VmacCmd. Returns (cmd, mem)."""
+def _accel(cfg):
+    """The accelerator carrying the structural widths for this config."""
+    return VmacAccel.specialize(
+        mem_dwidth=512, mem_awidth=32,
+        data_bw=cfg["in_bw"], acc_bw=cfg.get("acc_bw", 48), out_bw=cfg["out_bw"],
+    )
+
+
+def build(accel, cfg, a, b, c, alpha, beta):
+    """Lay a/b/c (+ per-column alpha/beta) into mem and build the Cmd. Returns (cmd, mem)."""
     complex_mode = cfg["mode"] == VmacMode.COMPLEX
     n, m = a[0].shape
     nm = n * m
@@ -146,7 +154,7 @@ def build(cfg, a, b, c, alpha, beta):
     for name, blk in zip(order, blocks):
         mem[addr[name]:addr[name] + len(blk)] = blk
 
-    cmd = VmacCmd()
+    cmd = accel.Cmd()
     cmd.n_rows, cmd.n_cols = n, m
     cmd.a = {"addr": addr["a"], "row_stride": m, "col_stride": 1}
     cmd.b = {"addr": addr["b"], "row_stride": m, "col_stride": 1}
@@ -154,10 +162,10 @@ def build(cfg, a, b, c, alpha, beta):
     cmd.d = {"addr": addr["d"], "row_stride": m, "col_stride": 1}
     cmd.alpha = _scalar_field(alpha, addr.get("alpha"), complex_mode)
     cmd.beta = _scalar_field(beta, addr.get("beta"), complex_mode)
-    for f in ("b_one", "c_zero", "b_conj", "reduce_rows", "mode", "in_bw", "int_bits",
-              "out_bw", "shift", "q_rnd", "o_sat"):
+    # in_bw / out_bw / acc_bw are now structural (on the accelerator), not cmd fields
+    for f in ("b_one", "c_zero", "b_conj", "reduce_rows", "mode", "int_bits", "shift",
+              "q_rnd", "o_sat"):
         setattr(cmd, f, cfg[f])
-    cmd.acc_bw = cfg.get("acc_bw", 48)
     return cmd, mem
 
 
@@ -169,8 +177,9 @@ def _scalar_field(s, addr, complex_mode):
 
 
 def run(cfg, a, b, c, alpha, beta):
-    cmd, mem = build(cfg, a, b, c, alpha, beta)
-    dst = execute(cmd, mem)
+    accel = _accel(cfg)
+    cmd, mem = build(accel, cfg, a, b, c, alpha, beta)
+    dst = accel.execute(cmd, mem)
     exp_re, exp_im = oracle(cfg, a, b, c, alpha, beta)
     if cfg["mode"] == VmacMode.COMPLEX:
         got_re, got_im = np.asarray(dst.val["re"]), np.asarray(dst.val["im"])
