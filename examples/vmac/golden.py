@@ -39,7 +39,7 @@ from waveflow.hw.dataschema import DataArray
 from waveflow.hw.fixpoint import FixedField
 from waveflow.utils import complexutils as cx
 from waveflow.utils import fixputils
-from waveflow.utils.fixputils import Format, OMode, QMode
+from waveflow.utils.fixputils import Format, add_format, mult_format, sum_format
 
 
 class VmacAccel:
@@ -125,29 +125,87 @@ class VmacAccel:
     def _add(a: DataArray, b: DataArray, complex_mode: bool) -> DataArray:
         return cadd(a, b) if complex_mode else fixpoint.add(a, b)
 
-    @staticmethod
-    def _acc_width(t: DataArray, complex_mode: bool) -> int:
-        et = t.element_type
-        return et.inner_type.get_bitwidth() if complex_mode else et.get_bitwidth()
+    # --- numeric model: datapath format derivation (the Phase-3 codegen spec) ----
+    @classmethod
+    def _in_fmt(cls, cmd: VmacCmd) -> Format:
+        """The operand ``FixedField`` format: ``W = data_bw`` (structural), ``I = int_bits``
+        (runtime), so ``F = data_bw - int_bits`` fractional bits."""
+        return Format(cls.data_bw, int(cmd.int_bits), signed=True)
 
     @classmethod
-    def _requantize(cls, t: DataArray, out_bw: int, shift: int, q: QMode, o: OMode,
-                    complex_mode: bool) -> DataArray:
-        """Right-shift ``shift`` + round + saturate to ``out_bw`` — the single lossy step."""
-        tf = t.element_type.inner_format() if complex_mode else t.element_type.get_format()
-        out_frac = tf.frac_bits - shift
+    def accumulator_format(cls, cmd: VmacCmd) -> Format:
+        """The wide-accumulator ``FixedField`` format for ``cmd`` — full precision, no loss.
+
+        Composes the datapath as pure format algebra (no data):
+
+        - **product** ``A·op(B)``: ``data_bw × data_bw`` (fraction bits add) — real uses
+          ``mult_format``, complex ``cmult_format`` (``sub_format``-based, +1 integer bit);
+        - **scale** by ``alpha``: one more multiply;
+        - **+ β·C**: aligned add (``add_format``) — fractions align, integer bits +1 (carry);
+        - **row reduction**: ``+⌈log₂ n_rows⌉`` integer bits (``sum_format``).
+
+        Fractional growth is identical for real and complex (complex's extra bit lands in
+        the *integer* part), so ``F_acc`` depends only on the multiply depth."""
+        complex_mode = VmacMode(int(cmd.mode)) == VmacMode.COMPLEX
+        mul = cx.cmult_format if complex_mode else mult_format
+        in_fmt = cls._in_fmt(cmd)
+        if bool(cmd.b_one):
+            ab = in_fmt                                         # op(B) = 1, A·op(B) = A
+        else:
+            op_b = in_fmt
+            if bool(cmd.b_conj) and complex_mode:               # conj grows the inner: (W+1, I+1)
+                op_b = cx.conj_format(in_fmt)
+            ab = mul(in_fmt, op_b)
+        acc = mul(in_fmt, ab)                                   # alpha · A·op(B)
+        if not bool(cmd.c_zero):
+            acc = add_format(acc, mul(in_fmt, in_fmt))          # + beta · C (aligned, +1 int bit)
+        if bool(cmd.reduce_rows):
+            acc = sum_format(acc, int(cmd.n_rows))              # + ceil(log2 n_rows) int bits
+        return acc
+
+    @classmethod
+    def output_format(cls, cmd: VmacCmd) -> type[FixedField]:
+        """The exact output (per-lane) ``FixedField`` for ``cmd`` — the Phase-3 codegen target.
+
+        The single lossy step is the right-shift ``SHIFT``, which picks the output binary
+        point: ``F_out = F_acc − SHIFT`` (so ``I_out = out_bw − F_out``), then round
+        (``q_mode``) + saturate (``o_mode``) into ``out_bw`` bits.  Fail-loud on a mis-sized
+        accelerator: an accumulator wider than ``acc_bw``, a ``SHIFT`` past the accumulator's
+        fractional bits, or an ``out_bw`` too small to hold the integer part.  (Complex
+        output is a ``ComplexField`` over this per-lane format.)"""
+        acc = cls.accumulator_format(cmd)
+        if acc.W > cls.acc_bw:
+            raise ValueError(
+                f"accumulator width {acc.W} exceeds acc_bw={cls.acc_bw}; widen acc_bw.")
+        shift = int(cmd.shift)
+        out_frac = acc.frac_bits - shift
         if out_frac < 0:
             raise ValueError(
-                f"shift={shift} exceeds accumulator fractional bits {tf.frac_bits}; "
-                "the output would need more integer bits than out_bw.")
-        target = Format(out_bw, out_bw - out_frac, tf.signed, q, o)
+                f"SHIFT={shift} exceeds accumulator fractional bits {acc.frac_bits}; "
+                "the right-shift would reach into the integer bits (SHIFT out of range).")
+        int_bits = cls.out_bw - out_frac
+        if int_bits < 0:
+            raise ValueError(
+                f"out_bw={cls.out_bw} is too small for the integer part: SHIFT={shift} keeps "
+                f"{out_frac} fractional bits, exceeding out_bw (need out_bw >= {out_frac}).")
+        # binary-point relationship: F_out = F_acc − SHIFT, hence I_out = out_bw − F_acc + SHIFT
+        assert int_bits == cls.out_bw - (acc.frac_bits - shift)
+        return FixedField.specialize(cls.out_bw, int_bits, acc.signed, cmd.q_mode, cmd.o_mode)
+
+    @classmethod
+    def _requantize(cls, t: DataArray, out_cls: type[FixedField], complex_mode: bool) -> DataArray:
+        """Requantize the wide accumulator ``t`` into the output ``FixedField`` ``out_cls`` —
+        right-shift + round + saturate, an ``ap_fixed`` assignment via the ``ap_fixed``-exact
+        integer requantizer (``fixputils.quantize``)."""
+        target = out_cls.get_format()
         if complex_mode:
-            re = fixputils.quantize(cx.re_of(t.val), tf, target)
-            im = fixputils.quantize(cx.im_of(t.val), tf, target)
-            elem = ComplexField.specialize(cls._fixed_cls(target))
+            src = t.element_type.inner_format()
+            re = fixputils.quantize(cx.re_of(t.val), src, target)
+            im = fixputils.quantize(cx.im_of(t.val), src, target)
+            elem = ComplexField.specialize(out_cls)
             struct = cx.make_complex(re, im, target)
             return DataArray.specialize(elem, max_shape=struct.shape)(struct)
-        return fixpoint.quantize(t, cls._fixed_cls(target))
+        return fixpoint.quantize(t, out_cls)
 
     @classmethod
     def _writeback(cls, mem: np.ndarray, reg, dst: DataArray) -> None:
@@ -163,9 +221,10 @@ class VmacAccel:
     def execute(cls, cmd: VmacCmd, mem: np.ndarray) -> DataArray:
         """Execute a ``VmacCmd`` over ``mem``; write the dst region and return the dst array."""
         complex_mode = VmacMode(int(cmd.mode)) == VmacMode.COMPLEX
-        in_fmt = Format(cls.data_bw, int(cmd.int_bits), True)
+        in_fmt = cls._in_fmt(cmd)
         n, m = int(cmd.n_rows), int(cmd.n_cols)
         mem = np.asarray(mem)
+        out_cls = cls.output_format(cmd)        # fail-loud config guards (acc_bw / SHIFT / out_bw)
 
         def region(reg) -> DataArray:
             return cls._operand(mem[cls._region_idx(reg, n, m)], in_fmt, complex_mode)
@@ -193,12 +252,14 @@ class VmacAccel:
         if bool(cmd.reduce_rows):
             t = csum(t, axis=0)
 
-        # accumulator-width budget check (the provisioned acc_bw must hold full precision)
-        acc_w = cls._acc_width(t, complex_mode)
-        if acc_w > cls.acc_bw:
-            raise ValueError(
-                f"accumulator width {acc_w} exceeds acc_bw={cls.acc_bw}; widen acc_bw.")
+        # invariant: the actual accumulator format must equal the derived spec (the format
+        # algebra in accumulator_format mirrors the operators it composes).
+        actual = t.element_type.inner_format() if complex_mode else t.element_type.get_format()
+        spec = cls.accumulator_format(cmd)
+        if (actual.W, actual.int_bits, actual.signed) != (spec.W, spec.int_bits, spec.signed):
+            raise AssertionError(
+                f"accumulator format mismatch: actual {actual} != derived {spec}")
 
-        dst = cls._requantize(t, cls.out_bw, int(cmd.shift), cmd.q_mode, cmd.o_mode, complex_mode)
+        dst = cls._requantize(t, out_cls, complex_mode)
         cls._writeback(mem, cmd.d, dst)
         return dst
