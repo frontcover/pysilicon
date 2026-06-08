@@ -27,6 +27,7 @@ import numpy as np
 from numpy.typing import NDArray
 
 from waveflow.utils.fixputils import MAX_WIDTH
+from waveflow.hw.param import Param, defer_if_symbolic, resolve_elements
 
 Words: TypeAlias = NDArray[np.uint32] | NDArray[np.uint64]
 
@@ -1181,6 +1182,7 @@ class IntField(DataField):
     _specializations: ClassVar[dict[tuple[Any, ...], type[IntField]]] = {}
 
     @classmethod
+    @defer_if_symbolic
     def specialize(
         cls,
         bitwidth: int,
@@ -1535,6 +1537,7 @@ class MemAddr(IntField):
     _specializations: ClassVar[dict[tuple[Any, ...], type[MemAddr]]] = {}
 
     @classmethod
+    @defer_if_symbolic
     def specialize(cls, bitwidth: int = 64, **kwargs: Any) -> type[MemAddr]:
         """Return a cached specialized ``MemAddr`` subclass.
 
@@ -1586,6 +1589,7 @@ class FloatField(DataField):
     _specializations: ClassVar[dict[tuple[Any, ...], type[FloatField]]] = {}
 
     @classmethod
+    @defer_if_symbolic
     def specialize(cls, bitwidth: int = 32, **kwargs: Any) -> type[FloatField]:
         """Return a cached specialized ``FloatField`` subclass.
 
@@ -1711,6 +1715,7 @@ class EnumField(DataField):
         return []
 
     @classmethod
+    @defer_if_symbolic
     def specialize(
         cls,
         enum_type: type[IntEnum],
@@ -2592,6 +2597,77 @@ class DataList(DataSchema):
         return True
 
 
+class ParamSchema(DataList):
+    """A :class:`DataList` whose ``elements`` reference symbolic :class:`Param`\\ s — the
+    **Level-2 declarative** parameterization.
+
+    A subclass declares ``Param`` class attributes and a dict-literal ``elements`` that
+    uses them (directly or via arithmetic such as ``2 * data_bw``).  Because the core
+    ``specialize`` methods (``IntField`` / ``FloatField`` / ``EnumField`` / ``MemAddr`` /
+    ``DataArray``) defer when given a symbolic argument, those ``elements`` entries are
+    captured as :class:`~waveflow.hw.param.LazyField`\\ s.  The framework (via
+    ``__init_subclass__``, not a metaclass — avoiding the ``DataList`` / ``ABCMeta``
+    conflict) collects the params (naming them from their namespace keys), installs the
+    default ``elements`` (params at their defaults) + a fresh per-class cache, and provides
+    a generic cached :meth:`specialize`.
+
+    ``specialize`` itself **defers when handed a symbolic value**, so a nested parameterized
+    schema that shares a param (``"a": Region.specialize(awidth=awidth)``) becomes a
+    ``LazyField`` the outer schema resolves — the cascade.  Nested resolution reuses the
+    nested schema's own cache, so the same ``Region.specialize(awidth=64)`` class appears
+    wherever it is referenced (shared schema identity)."""
+
+    _params: ClassVar[dict[str, Param]] = {}
+    _lazy_elements: ClassVar[dict[str, Any]] = {}
+    _specializations: ClassVar[dict[Any, type["ParamSchema"]]] = {}
+
+    def __init_subclass__(cls, **kwargs: Any) -> None:
+        super().__init_subclass__(**kwargs)
+        # Subclasses produced BY specialize() carry already-resolved concrete elements.
+        if cls.__dict__.get("_param_specialized"):
+            return
+        params = {k: v for k, v in cls.__dict__.items() if isinstance(v, Param)}
+        if not params and "elements" not in cls.__dict__:
+            return                                  # intermediate/abstract subclass; nothing to do
+        for name, param in params.items():
+            param.name = name
+        cls._params = params
+        cls._lazy_elements = dict(cls.__dict__.get("elements", {}))
+        cls._specializations = {}
+        default_env = {name: param.default for name, param in params.items()}
+        cls.elements = resolve_elements(cls._lazy_elements, default_env)
+
+    @classmethod
+    @defer_if_symbolic
+    def specialize(cls, **vals: Any) -> type["ParamSchema"]:
+        """Return a cached subclass with ``elements`` resolved for ``vals`` (defaults filled
+        in).  Keyword-only; same params → the same class object.  Defers (returns a
+        ``LazyField``) when any value is symbolic — the cascade for nested schemas."""
+        unknown = set(vals) - set(cls._params)
+        if unknown:
+            raise TypeError(
+                f"{cls.__name__}.specialize() got unknown param(s) {sorted(unknown)}; "
+                f"valid params: {sorted(cls._params)}.")
+        env = {name: vals.get(name, param.default) for name, param in cls._params.items()}
+        key = (cls, tuple(sorted(env.items())))
+        cached = cls._specializations.get(key)
+        if cached is not None:
+            return cached
+        suffix = "_".join(f"{name}{env[name]}" for name in sorted(env))
+        specialized = type(
+            f"{cls.__name__}_{suffix}" if suffix else cls.__name__,
+            (cls,),
+            {
+                "elements": resolve_elements(cls._lazy_elements, env),
+                "_param_specialized": True,
+                "__module__": cls.__module__,
+                "__doc__": cls.__doc__,
+            },
+        )
+        cls._specializations[key] = specialized
+        return specialized
+
+
 class DataArray(DataSchema):
     """Class-driven array schema with fixed maximum shape and optional dynamic extent."""
 
@@ -2734,6 +2810,7 @@ class DataArray(DataSchema):
         return None, ()
 
     @classmethod
+    @defer_if_symbolic
     def specialize(
         cls,
         element_type: type[DataSchema],
@@ -4307,6 +4384,7 @@ __all__ = [
     "BooleanField",
     "DataList",
     "DataArray",
+    "ParamSchema",
 ]
 
 
