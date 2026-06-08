@@ -127,12 +127,12 @@ def test_cmd_field_widths_track_mem_awidth_and_data_bw():
 
 
 def test_region_scalar_specialize_cached_and_sized():
-    assert Region.specialize(32) is Region.specialize(32)
-    assert Region.specialize(40) is not Region.specialize(32)
-    assert Region.specialize(40).get_element_schema("addr").get_bitwidth() == 40
-    assert Scalar.specialize(32, 16) is Scalar.specialize(32, 16)
-    assert Scalar.specialize(32, 16).get_element_schema("re").get_bitwidth() == 16
-    assert Scalar.specialize(32, 24).get_element_schema("re").get_bitwidth() == 24
+    assert Region.specialize(mem_awidth=32) is Region.specialize(mem_awidth=32)
+    assert Region.specialize(mem_awidth=40) is not Region.specialize(mem_awidth=32)
+    assert Region.specialize(mem_awidth=40).get_element_schema("addr").get_bitwidth() == 40
+    assert Scalar.specialize(mem_awidth=32, data_bw=16) is Scalar.specialize(mem_awidth=32, data_bw=16)
+    assert Scalar.specialize(mem_awidth=32, data_bw=16).get_element_schema("re").get_bitwidth() == 16
+    assert Scalar.specialize(mem_awidth=32, data_bw=24).get_element_schema("re").get_bitwidth() == 24
 
 
 def test_in_bw_out_bw_acc_bw_removed_from_cmd():
