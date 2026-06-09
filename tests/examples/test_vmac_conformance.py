@@ -15,16 +15,16 @@ from waveflow.toolchain import toolchain
 CASES = build_cases()
 
 
-def test_cases_cover_cg_configs_and_both_modes():
+def test_cases_cover_cg_configs_complex_only():
     names = {c["name"] for c in CASES}
-    # the CG / general configs, real and complex
-    assert "full_mac_trn_real" in names and "full_mac_trn_complex" in names
-    assert "axpy_percol_trn_real" in names           # CG: X - P*alpha[col] (per-column alpha)
-    assert "colsum_trn_real" in names                # b_one, c_zero, reduce=rows
-    assert "reduced_mac_rnd_complex" in names        # reduce + RND/SAT
-    assert "conj_inner_trn_complex" in names         # CG: sum conj(P)*S (complex b_conj)
-    assert not any(n.startswith("conj_inner") and n.endswith("real") for n in names)  # signed-only
-    assert sum(n.endswith("real") for n in names) and sum(n.endswith("complex") for n in names)
+    # VMAC is complex-only — every case ends "_complex", covering the CG / general configs
+    assert "full_mac_trn_complex" in names           # dst = alpha*A*B + beta*C
+    assert "axpy_percol_trn_complex" in names         # CG: X - P*alpha[col] (per-column alpha)
+    assert "colsum_trn_complex" in names              # b_one, c_zero, reduce=rows
+    assert "reduced_mac_rnd_complex" in names         # reduce + RND/SAT
+    assert "conj_inner_trn_complex" in names          # CG: sum conj(P)*S (complex b_conj)
+    assert all(n.endswith("complex") for n in names)  # no real path
+    assert not any(n.endswith("real") for n in names)
 
 
 def test_every_case_has_golden_bits():

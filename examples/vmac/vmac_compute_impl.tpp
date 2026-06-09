@@ -1,167 +1,114 @@
 // vmac_compute_impl.tpp
-// Included from gen/vmac.hpp. Types declared there (VmacCmd, the operand
-// array-utils namespace) are in scope. Do not include this file directly
-// except via the .hpp.
+// Included from gen/vmac.hpp. Types declared there (VmacCmd, the generated component
+// array-utils namespace) are in scope. Do not include this file directly except via the .hpp.
 //
-// Hand-written body for the templated `vmac_impl::vmac_compute` hook — the
-// single VMAC datapath: the fused op
+// Hand-written body for the templated `vmac_impl::vmac_compute` hook — the single VMAC
+// datapath: the **complex** fused op
 //
 //     D = alpha * A * op(B) + beta * C   [, reduced over rows]
 //
-// over a row-major shared-memory image reached through the `m_axi` pointer.
-// This is the C++ contract of `VmacAccel.vmac_compute` (whose Python body is
-// the golden `VmacAccel.execute`); it is bit-identical to that golden by
-// construction (full-precision intermediates in the wide accumulator, a single
-// lossy requantize = the right-shift + round + saturate).
+// over a row-major shared-memory image reached through the `m_axi` pointer.  This is the C++
+// contract of `VmacAccel.vmac_compute` (whose Python body is the golden `VmacAccel.execute`);
+// it is bit-identical to that golden by construction (full-precision intermediates in the
+// wide accumulator, a single lossy requantize).
 //
-// Lanes via the existing packing infra (not reinvented), exactly as
-// examples/stream_inband/poly_evaluate_impl.tpp does for streams — here the
-// m_axi variant: `pf<MEM_BW>()` contiguous elements per memory word, lane
-// arrays with `#pragma HLS ARRAY_PARTITION` + `UNROLL`.  The packed (inner)
-// dimension is the **columns** (unit stride, row-major), so each m_axi word
-// carries `pf` contiguous columns:
+// ONE fixed-format kernel, configured at *run time* by the command's op flags:
 //
-//   * real    element = DATA_BW bits        -> pf = MEM_BW / DATA_BW lanes
-//   * complex element = 2*DATA_BW bits       -> pf = MEM_BW / (2*DATA_BW) lanes
-//                                               (re in the low DATA_BW bits,
-//                                                im in the high DATA_BW bits)
+//   * Template params are **widths only** (MEM_BW / DATA_BW / INT_BITS / ACC_BW / OUT_BW /
+//     Q_RND / O_SAT) -> the ap_int/ap_fixed types are compile-time (no dynamic types).
+//   * The op flags (b_one / c_zero / b_conj / reduce_rows) are **runtime** if/mux —
+//     loop-invariant, so no II hit.
+//   * The requantize shift is **derived** from the flags + the structural format
+//     (F_acc = (b_one?2:3)*F_in, F_out = F_in) -> SHIFT = F_acc - F_in: a variable barrel
+//     shift on the fixed-width accumulator (vmac_requantize), not a dynamic type.
 //
-// so real gets 2x the lanes of complex (the Phase-4 throughput 2x).
+// VMAC is complex-only: every element is an interleaved (re, im) pair of DATA_BW-bit stored
+// ints, so the component packing factor is CPF = MEM_BW / DATA_BW components/word and the
+// kernel processes PF = CPF / 2 complex columns per word.  The complex multiply uses the
+// **explicit re/im formula** (ar*br - ai*bi, ar*bi + ai*br); op(B) = conj(B) negates B's imag.
 //
-// The ap_fixed types are the Phase-2 numeric contract, taken straight from the
-// component's format methods (the compile-time template params below):
-//
-//   A_T   = ap_fixed<DATA_BW, INT_BITS>                  (VmacAccel._in_fmt)
-//   ACC_T = ap_fixed<ACC_W, ACC_I>                       (accumulator_format)
-//   OUT_T = ap_fixed<OUT_W, OUT_I, QMODE, OMODE>         (output_format)
-//
-// Complex uses the **explicit re/im formula** (ar*br - ai*bi, ar*bi + ai*br) on
-// A_T/ACC_T values — *not* std::complex operator* (which would quantize the
-// product back to A_T); conj(B) negates the imag component (its +1 integer bit
-// of growth is already in ACC_T via conj_format).  reduce_rows is a per-column
-// reduction (sum over rows -> one value per column): a per-column ACC_T
-// accumulator, outer loop over rows, inner loop over the contiguous (packed)
-// columns — the GEMM accumulation pattern, not a strided down-column read.
+// Lanes reuse the generated per-type packing (NOT reinvented), exactly as
+// poly_evaluate_impl.tpp uses float32_array_utils: `vmac_comp_array_utils::pf<MEM_BW>()` +
+// `read_array_elem` / `write_array_elem` over a component lane array (the stored-int
+// components, ap_int<DATA_BW>), with `#pragma HLS ARRAY_PARTITION` + `UNROLL`.
+
+#include "vmac_utils.h"
 
 namespace vmac_impl {
 
-// Reconstruct an A_T operand from DATA_BW packed bits at [lo, lo+DATA_BW).
-template <typename A_T, int DATA_BW>
-static inline A_T recon(const ap_uint<DATA_BW>& bits) {
+// Read PF complex columns (re/im stored-int components) of one operand row, starting at the
+// complex element index `elem0` (== addr + i*row_stride + col0).  Rows are word-aligned
+// (addr / row_stride are multiples of PF), so the contiguous columns are the components of
+// one m_axi word: component index 2*elem0, word index 2*elem0 / CPF == elem0 / PF.
+template <int MEM_BW, int DATA_BW, int PF>
+static inline void vmac_read_lanes(const ap_uint<MEM_BW>* mem, int elem0,
+                                   ap_int<DATA_BW> re[PF], ap_int<DATA_BW> im[PF]) {
 #pragma HLS INLINE
-    A_T v;
-    v.range(DATA_BW - 1, 0) = bits;
-    return v;
-}
-
-// One lane's fused term, full precision (no rounding): real path.
-//   t = alpha * (b_one ? a : a*b) + (c_zero ? 0 : beta * c)
-template <typename A_T, typename ACC_T, bool B_ONE, bool C_ZERO>
-static inline ACC_T term_real(A_T a, A_T b, A_T c, A_T alpha, A_T beta) {
-#pragma HLS INLINE
-    ACC_T ab = B_ONE ? (ACC_T)a : (ACC_T)(a * b);
-    ACC_T t = (ACC_T)(alpha * ab);
-    if (!C_ZERO) t += (ACC_T)(beta * c);
-    return t;
-}
-
-// One lane's fused term, full precision: complex path (explicit re/im).
-// conj(B) negates the imag of B before the multiply (B_CONJ).
-template <typename A_T, typename ACC_T, bool B_ONE, bool C_ZERO, bool B_CONJ>
-static inline void term_complex(
-    A_T are, A_T aim, A_T bre, A_T bim, A_T cre, A_T cim,
-    A_T alre, A_T alim, A_T bere, A_T beim,
-    ACC_T& tre, ACC_T& tim) {
-#pragma HLS INLINE
-    // op(B): identity, or conj(B) = (bre, -bim)
-    A_T obim = B_CONJ ? (A_T)(-bim) : bim;
-    // A * op(B)  (explicit re/im; full precision into ACC_T)
-    ACC_T abre, abim;
-    if (B_ONE) {
-        abre = (ACC_T)are;
-        abim = (ACC_T)aim;
-    } else {
-        abre = (ACC_T)(are * bre) - (ACC_T)(aim * obim);
-        abim = (ACC_T)(are * obim) + (ACC_T)(aim * bre);
-    }
-    // alpha * (A*op(B))
-    tre = (ACC_T)(alre * abre) - (ACC_T)(alim * abim);
-    tim = (ACC_T)(alre * abim) + (ACC_T)(alim * abre);
-    // + beta * C
-    if (!C_ZERO) {
-        tre += (ACC_T)(bere * cre) - (ACC_T)(beim * cim);
-        tim += (ACC_T)(bere * cim) + (ACC_T)(beim * cre);
+    const int CPF = 2 * PF;
+    ap_int<DATA_BW> comp[2 * PF];
+#pragma HLS ARRAY_PARTITION variable=comp complete dim=1
+    vmac_comp_array_utils::template read_array_elem<MEM_BW>(mem + (2 * elem0) / CPF, comp);
+    for (int k = 0; k < PF; ++k) {
+#pragma HLS UNROLL
+        re[k] = comp[2 * k];
+        im[k] = comp[2 * k + 1];
     }
 }
 
-// The compute hook.  Template params are the compile-time numeric contract +
-// datapath flags (from VmacAccel's HwParams + accumulator_format /
-// output_format + the cmd flags); the runtime VmacCmd carries the region
-// addresses / pitches, the matrix shape, and the alpha/beta operands.  `mem` is
-// the m_axi word pointer (pf operand elements per ap_uint<MEM_BW> word); region
-// rows are word-aligned (addr and row_stride are multiples of pf), so the
-// contiguous columns of a row are the lanes of consecutive words.
-// The single lossy step is the requantize `OUT_T y = acc`, an ap_fixed assignment:
-// OUT_T's binary point is F_out = F_acc - SHIFT (output_format), so aligning the
-// ACC_T value to OUT_T drops SHIFT fractional bits with round (QMODE) + saturate
-// (OMODE) — SHIFT is therefore *encoded in* OUT_I (= OUT_W - F_out) and needs no
-// explicit `>> SHIFT` (that would double-count it).
-template <
-    int MEM_BW, int DATA_BW, int INT_BITS,
-    int ACC_W, int ACC_I, int OUT_W, int OUT_I,
-    int MAX_COLS,
-    bool COMPLEX, bool B_ONE, bool C_ZERO, bool B_CONJ, bool REDUCE_ROWS,
-    ap_q_mode QMODE, ap_o_mode OMODE>
+// Write PF complex columns (re/im stored-int components) of one dst row at element `elem0`.
+template <int MEM_BW, int DATA_BW, int PF>
+static inline void vmac_write_lanes(ap_uint<MEM_BW>* mem, int elem0,
+                                    const ap_int<DATA_BW> re[PF], const ap_int<DATA_BW> im[PF],
+                                    int lane_count) {
+#pragma HLS INLINE
+    const int CPF = 2 * PF;
+    ap_int<DATA_BW> comp[2 * PF];
+#pragma HLS ARRAY_PARTITION variable=comp complete dim=1
+    for (int k = 0; k < PF; ++k) {
+#pragma HLS UNROLL
+        comp[2 * k] = re[k];
+        comp[2 * k + 1] = im[k];
+    }
+    vmac_comp_array_utils::template write_array_elem<MEM_BW>(comp, mem + (2 * elem0) / CPF,
+                                                             2 * lane_count);
+}
+
+template <int MEM_BW, int DATA_BW, int INT_BITS, int ACC_BW, int OUT_BW,
+          bool Q_RND, bool O_SAT, int MAX_COLS>
 void vmac_compute(VmacCmd cmd, ap_uint<MEM_BW>* mem) {
-    typedef ap_fixed<DATA_BW, INT_BITS, AP_TRN, AP_WRAP> A_T;
-    typedef ap_fixed<ACC_W, ACC_I, AP_TRN, AP_WRAP> ACC_T;     // full precision (no loss)
-    typedef ap_fixed<OUT_W, OUT_I, QMODE, OMODE> OUT_T;        // the single lossy requantize
-
-    // element bits / packing factor (the lane count) — real 1 component, complex 2.
-    const int EB = COMPLEX ? (2 * DATA_BW) : DATA_BW;
-    const int PF = MEM_BW / EB;
+    typedef ap_int<DATA_BW> A_T;       // stored-int operand component
+    typedef ap_int<ACC_BW> ACC_T;      // full-precision integer accumulator
+    static const int F_IN = DATA_BW - INT_BITS;
+    static const int CPF = MEM_BW / DATA_BW;       // components / word
+    static const int PF = CPF / 2;                 // complex columns / word
 
     const int n_rows = (int)cmd.n_rows;
     const int n_cols = (int)cmd.n_cols;
-    const int a_addr = (int)cmd.a.addr,  a_rs = (int)cmd.a.row_stride;
-    const int b_addr = (int)cmd.b.addr,  b_rs = (int)cmd.b.row_stride;
-    const int c_addr = (int)cmd.c.addr,  c_rs = (int)cmd.c.row_stride;
-    const int d_addr = (int)cmd.d.addr,  d_rs = (int)cmd.d.row_stride;
+    const bool b_one = (bool)cmd.b_one;
+    const bool c_zero = (bool)cmd.c_zero;
+    const bool b_conj = (bool)cmd.b_conj;
+    const bool reduce_rows = (bool)cmd.reduce_rows;
 
-    // alpha / beta: direct immediates (re/im) or indirect per-column pointers.
-    const bool al_direct = (bool)cmd.alpha.direct;
-    const bool be_direct = (bool)cmd.beta.direct;
-    A_T al_re_imm = recon<A_T, DATA_BW>((ap_uint<DATA_BW>)cmd.alpha.re);
-    A_T al_im_imm = recon<A_T, DATA_BW>((ap_uint<DATA_BW>)cmd.alpha.im);
-    A_T be_re_imm = recon<A_T, DATA_BW>((ap_uint<DATA_BW>)cmd.beta.re);
-    A_T be_im_imm = recon<A_T, DATA_BW>((ap_uint<DATA_BW>)cmd.beta.im);
+    // Derived requantize shift: F_acc = (b_one?2:3)*F_in, F_out = F_in -> SHIFT = F_acc - F_in.
+    const int shift = (b_one ? 1 : 2) * F_IN;
 
-    // read pf contiguous lanes (columns col0..col0+pf-1 of row i) of one operand
-    // word into a lane array; im[] is meaningful only in COMPLEX mode.
-    // elem address = base + i*pitch + col0 ; word index = that / PF (row-aligned).
-#define VMAC_READ_LANES(NAME, BASE, PITCH)                                      \
-    A_T NAME##_re[PF];                                                          \
-    A_T NAME##_im[PF];                                                          \
-    _Pragma("HLS ARRAY_PARTITION variable=" #NAME "_re complete dim=1")         \
-    _Pragma("HLS ARRAY_PARTITION variable=" #NAME "_im complete dim=1")         \
-    {                                                                           \
-        ap_uint<MEM_BW> w = mem[((BASE) + i * (PITCH) + col0) / PF];            \
-        for (int k = 0; k < PF; ++k) {                                          \
-            _Pragma("HLS UNROLL")                                               \
-            int lo = k * EB;                                                    \
-            NAME##_re[k] = recon<A_T, DATA_BW>(w.range(lo + DATA_BW - 1, lo));  \
-            if (COMPLEX)                                                        \
-                NAME##_im[k] = recon<A_T, DATA_BW>(                             \
-                    w.range(lo + 2 * DATA_BW - 1, lo + DATA_BW));               \
-        }                                                                       \
-    }
+    const int a_addr = (int)cmd.a.addr, a_rs = (int)cmd.a.row_stride;
+    const int b_addr = (int)cmd.b.addr, b_rs = (int)cmd.b.row_stride;
+    const int c_addr = (int)cmd.c.addr, c_rs = (int)cmd.c.row_stride;
+    const int d_addr = (int)cmd.d.addr, d_rs = (int)cmd.d.row_stride;
 
-    // per-column accumulators (REDUCE_ROWS): one ACC_T per column, summed over rows.
-    ACC_T acc_re[MAX_COLS];
-    ACC_T acc_im[MAX_COLS];
+    // alpha / beta immediates (direct); per-column (indirect) reads are loaded per column.
+    const bool al_direct = (bool)cmd.alpha.direct, be_direct = (bool)cmd.beta.direct;
+    const A_T al_re_imm = (A_T)(ap_int<DATA_BW>)cmd.alpha.re;
+    const A_T al_im_imm = (A_T)(ap_int<DATA_BW>)cmd.alpha.im;
+    const A_T be_re_imm = (A_T)(ap_int<DATA_BW>)cmd.beta.re;
+    const A_T be_im_imm = (A_T)(ap_int<DATA_BW>)cmd.beta.im;
+
+    // per-column accumulators (reduce_rows): one complex ACC_T per column, summed over rows.
+    ACC_T acc_re[MAX_COLS], acc_im[MAX_COLS];
 #pragma HLS ARRAY_PARTITION variable=acc_re cyclic factor=16 dim=1
 #pragma HLS ARRAY_PARTITION variable=acc_im cyclic factor=16 dim=1
-    if (REDUCE_ROWS) {
+    if (reduce_rows) {
         for (int j = 0; j < n_cols; ++j) {
 #pragma HLS PIPELINE II=1
             acc_re[j] = 0;
@@ -169,89 +116,102 @@ void vmac_compute(VmacCmd cmd, ap_uint<MEM_BW>* mem) {
         }
     }
 
-    // outer loop over rows (strided by the pitch), inner over contiguous columns
-    // packed PF/word — the GEMM accumulation pattern.
+    // outer loop over rows (strided by the pitch), inner over contiguous columns packed
+    // PF/word (the GEMM accumulation pattern).
     for (int i = 0; i < n_rows; ++i) {
 #pragma HLS LOOP_TRIPCOUNT min=1 max=MAX_COLS
         for (int col0 = 0; col0 < n_cols; col0 += PF) {
 #pragma HLS PIPELINE II=1
-            VMAC_READ_LANES(a, a_addr, a_rs)
-            VMAC_READ_LANES(b, b_addr, b_rs)
-            VMAC_READ_LANES(c, c_addr, c_rs)
+            A_T are[PF], aim[PF], bre[PF], bim[PF], cre[PF], cim[PF];
+#pragma HLS ARRAY_PARTITION variable=are complete dim=1
+#pragma HLS ARRAY_PARTITION variable=aim complete dim=1
+#pragma HLS ARRAY_PARTITION variable=bre complete dim=1
+#pragma HLS ARRAY_PARTITION variable=bim complete dim=1
+#pragma HLS ARRAY_PARTITION variable=cre complete dim=1
+#pragma HLS ARRAY_PARTITION variable=cim complete dim=1
+            vmac_read_lanes<MEM_BW, DATA_BW, PF>(mem, a_addr + i * a_rs + col0, are, aim);
+            if (!b_one)
+                vmac_read_lanes<MEM_BW, DATA_BW, PF>(mem, b_addr + i * b_rs + col0, bre, bim);
+            if (!c_zero)
+                vmac_read_lanes<MEM_BW, DATA_BW, PF>(mem, c_addr + i * c_rs + col0, cre, cim);
 
-            ap_uint<MEM_BW> dw = 0;
+            ap_int<DATA_BW> yr[PF], yi[PF];
+#pragma HLS ARRAY_PARTITION variable=yr complete dim=1
+#pragma HLS ARRAY_PARTITION variable=yi complete dim=1
+            int lane_count = 0;
             for (int k = 0; k < PF; ++k) {
 #pragma HLS UNROLL
                 const int j = col0 + k;
                 if (j >= n_cols) continue;
+                lane_count = k + 1;
 
-                // per-column alpha/beta: indirect reads one lane per column.
-                A_T alre = al_re_imm, alim = al_im_imm;
-                A_T bere = be_re_imm, beim = be_im_imm;
+                // per-column alpha/beta (indirect): one complex element per column.
+                A_T alre = al_re_imm, alim = al_im_imm, bere = be_re_imm, beim = be_im_imm;
                 if (!al_direct) {
-                    ap_uint<MEM_BW> aw = mem[((int)cmd.alpha.addr + j * (int)cmd.alpha.stride) / PF];
-                    int la = (((int)cmd.alpha.addr + j * (int)cmd.alpha.stride) % PF) * EB;
-                    alre = recon<A_T, DATA_BW>(aw.range(la + DATA_BW - 1, la));
-                    if (COMPLEX) alim = recon<A_T, DATA_BW>(aw.range(la + 2 * DATA_BW - 1, la + DATA_BW));
+                    A_T tre[PF], tim[PF];
+                    vmac_read_lanes<MEM_BW, DATA_BW, PF>(
+                        mem, (int)cmd.alpha.addr + j * (int)cmd.alpha.stride, tre, tim);
+                    alre = tre[0]; alim = tim[0];
                 }
                 if (!be_direct) {
-                    ap_uint<MEM_BW> bw = mem[((int)cmd.beta.addr + j * (int)cmd.beta.stride) / PF];
-                    int lb = (((int)cmd.beta.addr + j * (int)cmd.beta.stride) % PF) * EB;
-                    bere = recon<A_T, DATA_BW>(bw.range(lb + DATA_BW - 1, lb));
-                    if (COMPLEX) beim = recon<A_T, DATA_BW>(bw.range(lb + 2 * DATA_BW - 1, lb + DATA_BW));
+                    A_T tre[PF], tim[PF];
+                    vmac_read_lanes<MEM_BW, DATA_BW, PF>(
+                        mem, (int)cmd.beta.addr + j * (int)cmd.beta.stride, tre, tim);
+                    bere = tre[0]; beim = tim[0];
                 }
 
-                ACC_T tre, tim = 0;
-                if (COMPLEX) {
-                    term_complex<A_T, ACC_T, B_ONE, C_ZERO, B_CONJ>(
-                        a_re[k], a_im[k], b_re[k], b_im[k], c_re[k], c_im[k],
-                        alre, alim, bere, beim, tre, tim);
+                // op(B): identity, or conj(B) = (bre, -bim)
+                ACC_T obre = bre[k], obim = b_conj ? (ACC_T)(-bim[k]) : (ACC_T)bim[k];
+                // A * op(B)  (explicit re/im, full precision)
+                ACC_T abre, abim;
+                if (b_one) {
+                    abre = (ACC_T)are[k]; abim = (ACC_T)aim[k];
                 } else {
-                    tre = term_real<A_T, ACC_T, B_ONE, C_ZERO>(
-                        a_re[k], b_re[k], c_re[k], alre, bere);
+                    abre = (ACC_T)are[k] * obre - (ACC_T)aim[k] * obim;
+                    abim = (ACC_T)are[k] * obim + (ACC_T)aim[k] * obre;
+                }
+                // alpha * (A*op(B))
+                ACC_T tre = (ACC_T)alre * abre - (ACC_T)alim * abim;
+                ACC_T tim = (ACC_T)alre * abim + (ACC_T)alim * abre;
+                // + beta * C
+                if (!c_zero) {
+                    tre += (ACC_T)bere * (ACC_T)cre[k] - (ACC_T)beim * (ACC_T)cim[k];
+                    tim += (ACC_T)bere * (ACC_T)cim[k] + (ACC_T)beim * (ACC_T)cre[k];
                 }
 
-                if (REDUCE_ROWS) {
+                if (reduce_rows) {
                     acc_re[j] += tre;
-                    if (COMPLEX) acc_im[j] += tim;
+                    acc_im[j] += tim;
                 } else {
-                    // requantize this lane (the single lossy step) and pack into dst word.
-                    OUT_T yr = tre;
-                    int lo = k * EB;
-                    dw.range(lo + OUT_W - 1, lo) = yr.range(OUT_W - 1, 0);
-                    if (COMPLEX) {
-                        OUT_T yi = tim;
-                        dw.range(lo + DATA_BW + OUT_W - 1, lo + DATA_BW) = yi.range(OUT_W - 1, 0);
-                    }
+                    yr[k] = vmac_requantize<OUT_BW, Q_RND, O_SAT>(tre, shift);
+                    yi[k] = vmac_requantize<OUT_BW, Q_RND, O_SAT>(tim, shift);
                 }
             }
-            if (!REDUCE_ROWS)
-                mem[(d_addr + i * d_rs + col0) / PF] = dw;
+            if (!reduce_rows)
+                vmac_write_lanes<MEM_BW, DATA_BW, PF>(mem, d_addr + i * d_rs + col0, yr, yi,
+                                                      lane_count);
         }
     }
 
-    // REDUCE_ROWS writeback: one row of n_cols requantized results at the dst.
-    if (REDUCE_ROWS) {
+    // reduce_rows writeback: one row of n_cols requantized results at the dst.
+    if (reduce_rows) {
         for (int col0 = 0; col0 < n_cols; col0 += PF) {
 #pragma HLS PIPELINE II=1
-            ap_uint<MEM_BW> dw = 0;
+            ap_int<DATA_BW> yr[PF], yi[PF];
+#pragma HLS ARRAY_PARTITION variable=yr complete dim=1
+#pragma HLS ARRAY_PARTITION variable=yi complete dim=1
+            int lane_count = 0;
             for (int k = 0; k < PF; ++k) {
 #pragma HLS UNROLL
                 const int j = col0 + k;
                 if (j >= n_cols) continue;
-                int lo = k * EB;
-                OUT_T yr = acc_re[j];
-                dw.range(lo + OUT_W - 1, lo) = yr.range(OUT_W - 1, 0);
-                if (COMPLEX) {
-                    OUT_T yi = acc_im[j];
-                    dw.range(lo + DATA_BW + OUT_W - 1, lo + DATA_BW) = yi.range(OUT_W - 1, 0);
-                }
+                lane_count = k + 1;
+                yr[k] = vmac_requantize<OUT_BW, Q_RND, O_SAT>(acc_re[j], shift);
+                yi[k] = vmac_requantize<OUT_BW, Q_RND, O_SAT>(acc_im[j], shift);
             }
-            mem[(d_addr + col0) / PF] = dw;
+            vmac_write_lanes<MEM_BW, DATA_BW, PF>(mem, d_addr + col0, yr, yi, lane_count);
         }
     }
-
-#undef VMAC_READ_LANES
 }
 
 }  // namespace vmac_impl

@@ -1,17 +1,24 @@
 """``VmacCmd`` — the VMAC fused-instruction DataSchema (runtime tier).
 
-A configurable vector MAC engine (VMAC) executes the fused op
+A configurable vector MAC engine (VMAC) executes the **complex** fused op
 
     D = alpha · A · op(B) + beta · C   [, reduced over rows]
 
-over a **strided** region of shared memory.  Parameters split into two tiers (see
-:class:`~examples.vmac.golden.VmacAccel`): the **structural** widths that size silicon
-(``mem_dwidth`` / ``mem_awidth`` / ``data_bw`` / ``acc_bw`` / ``out_bw``) live on the
-accelerator, and the **runtime** instruction lives here in ``VmacCmd``: the operand
-regions (addr + strides; the matrix shape is global), the ``alpha`` / ``beta`` scalars
-(direct immediate or indirect pointer+stride, scalar or per-column), the op flags
-(``b_one`` / ``c_zero`` / ``b_conj`` / ``reduce_rows``), the ``real`` | ``complex`` mode,
-the fractional split ``int_bits``, the output ``shift``, and the round / saturate flags.
+over a row-major region of shared memory.  VMAC is **complex-only** (every element is an
+interleaved ``re`` / ``im`` pair of ``data_bw``-bit stored ints); there is no real mode.
+
+Parameters split into two tiers (see :class:`~examples.vmac.vmac.VmacAccel`): everything
+that **sizes or types the datapath** is **structural** and lives on the accelerator as
+``HwParam`` (``mem_dwidth`` / ``mem_awidth`` / ``data_bw`` / ``int_bits`` / ``acc_bw`` /
+``out_bw`` / ``q_rnd`` / ``o_sat``), so ``A_T`` / ``ACC_T`` / ``OUT_T`` are compile-time —
+no dynamic types.  The **runtime** instruction lives here in ``VmacCmd`` and carries only
+the **op + geometry**: the matrix shape (``n_rows`` / ``n_cols``), the row-major operand
+regions (``a`` / ``b`` / ``c`` / ``d`` — addr + row_stride pitch), the op flags
+(``b_one`` / ``c_zero`` / ``b_conj`` / ``reduce_rows``), and the ``alpha`` / ``beta``
+scalars (direct immediate or indirect pointer + stride, scalar or per-column).  **No format
+fields** — the requantize shift is *derived* from the flags + the structural format (the
+accumulator fractional depth is ``2·F_in`` or ``3·F_in`` per ``b_one`` / ``c_zero``), a
+variable shift on a fixed-width accumulator, not a dynamic type.
 
 The width-bearing fields are set by the accelerator that produces/consumes the command
 (``addr`` is ``mem_awidth`` bits; the immediate ``re`` / ``im`` are ``data_bw`` bits).
@@ -24,23 +31,10 @@ so it serializes / deserializes and code-generates like any schema.
 """
 from __future__ import annotations
 
-from enum import IntEnum
-
-from waveflow.hw import BooleanField, EnumField, IntField, Param, ParamSchema
-from waveflow.utils.fixputils import OMode, QMode
+from waveflow.hw import BooleanField, IntField, Param, ParamSchema
 
 # --- field aliases (names match the auto-generated IntField subclass __name__) ----
 UInt16 = IntField.specialize(16, signed=False)
-UInt8 = IntField.specialize(8, signed=False)
-
-
-class VmacMode(IntEnum):
-    """Datapath mode — sets the element width (``IN_BW`` real / ``2·IN_BW`` complex)."""
-    REAL = 0
-    COMPLEX = 1
-
-
-ModeField = EnumField.specialize(VmacMode)
 
 
 class Region(ParamSchema):
@@ -103,25 +97,11 @@ class VmacCmd(ParamSchema):
         # scaling scalars (cascade: share mem_awidth and data_bw)
         "alpha": Scalar.specialize(mem_awidth=mem_awidth, data_bw=data_bw),
         "beta": Scalar.specialize(mem_awidth=mem_awidth, data_bw=data_bw),
-        # op flags
-        "b_one": {"schema": BooleanField, "description": "op(B) = 1 (skip the A·B multiply)"},
+        # op flags — the only runtime *control* (loop-invariant if/mux, no II hit).
+        # No format fields: int_bits / out_bw / q_rnd / o_sat are structural (on VmacAccel),
+        # and the requantize shift is derived from these flags + that structural format.
+        "b_one": {"schema": BooleanField, "description": "op(B) = 1 (skip the A·op(B) multiply)"},
         "c_zero": {"schema": BooleanField, "description": "drop the beta·C term"},
-        "b_conj": {"schema": BooleanField, "description": "op(B) = conj(B) (complex; no-op for real)"},
+        "b_conj": {"schema": BooleanField, "description": "op(B) = conj(B) (negate B's imag part)"},
         "reduce_rows": {"schema": BooleanField, "description": "sum the rows (per-column reduction)"},
-        # datapath mode + runtime numeric format
-        "mode": ModeField,
-        "int_bits": UInt8,        # I of the operand format (F = data_bw - int_bits)
-        "shift": UInt8,           # output right-shift (the single lossy step)
-        "q_rnd": {"schema": BooleanField, "description": "output rounding: False = AP_TRN, True = AP_RND"},
-        "o_sat": {"schema": BooleanField, "description": "output overflow: False = AP_WRAP, True = AP_SAT"},
     }
-
-    @property
-    def q_mode(self) -> QMode:
-        """The quantization mode this command selects (from its ``q_rnd`` flag)."""
-        return QMode.AP_RND if bool(self.q_rnd) else QMode.AP_TRN
-
-    @property
-    def o_mode(self) -> OMode:
-        """The overflow mode this command selects (from its ``o_sat`` flag)."""
-        return OMode.AP_SAT if bool(self.o_sat) else OMode.AP_WRAP

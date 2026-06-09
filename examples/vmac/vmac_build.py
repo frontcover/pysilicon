@@ -25,9 +25,8 @@ from pathlib import Path
 
 import numpy as np
 
-from examples.vmac.golden import VmacAccel
+from examples.vmac.vmac import VmacAccel
 from examples.vmac.kernels import KernelSpec, render
-from examples.vmac.vmac_cmd import VmacMode
 from waveflow.build.build import BuildConfig, BuildDag, BuildStep, SourceStep
 from waveflow.build.cli import run_dag_cli
 from waveflow.toolchain import toolchain
@@ -106,7 +105,8 @@ def _interleave(re, im):
 def make_case(cfg: Config, params: Params, mode: str, n: int = 4, m: int = 3) -> dict:
     complex_mode = mode == "complex"
     p = params
-    accel = VmacAccel(data_bw=p.data_bw, mem_awidth=32, acc_bw=p.acc_bw, out_bw=p.out_bw)
+    accel = VmacAccel(data_bw=p.data_bw, mem_awidth=32, int_bits=p.int_bits,
+                      acc_bw=p.acc_bw, out_bw=p.out_bw, q_rnd=p.q_rnd, o_sat=p.o_sat)
     rng = _rng(f"{cfg.name}_{params.name}_{mode}")
     fmt = Format(p.data_bw, p.int_bits, True)
     nm = n * m
@@ -161,8 +161,7 @@ def make_case(cfg: Config, params: Params, mode: str, n: int = 4, m: int = 3) ->
         cmd.alpha = {"direct": 1, "re": alpha_re_imm, "im": alpha_im_imm, "addr": 0, "stride": 0}
     cmd.beta = {"direct": 1, "re": beta_re_imm, "im": beta_im_imm, "addr": 0, "stride": 0}
     cmd.b_one, cmd.c_zero, cmd.b_conj, cmd.reduce_rows = cfg.b_one, cfg.c_zero, cfg.b_conj, cfg.reduce_rows
-    cmd.mode = VmacMode.COMPLEX if complex_mode else VmacMode.REAL
-    cmd.int_bits, cmd.shift, cmd.q_rnd, cmd.o_sat = p.int_bits, p.shift, p.q_rnd, p.o_sat
+    # format (int_bits / out_bw / q_rnd / o_sat) is structural (on accel); shift is derived.
 
     # golden + expected bits (dst, row-major; interleaved re/im for complex)
     dst = accel.execute(cmd, mem.copy())
@@ -214,12 +213,11 @@ def make_case(cfg: Config, params: Params, mode: str, n: int = 4, m: int = 3) ->
 
 
 def build_cases() -> list[dict]:
+    # VMAC is complex-only now; this old f-string conformance rig is rewritten in Phase 3.
     cases: list[dict] = []
     for cfg in CONFIGS:
-        modes = ["complex"] if cfg.complex_only else ["real", "complex"]
-        for mode in modes:
-            for params in (P_TRN, P_RND):
-                cases.append(make_case(cfg, params, mode))
+        for params in (P_TRN, P_RND):
+            cases.append(make_case(cfg, params, "complex"))
     return cases
 
 
