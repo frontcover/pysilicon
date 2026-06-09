@@ -44,14 +44,20 @@ ModeField = EnumField.specialize(VmacMode)
 
 
 class Region(ParamSchema):
-    """A strided operand region: ``M[i, j] = mem[addr + i·row_stride + j·col_stride]``."""
+    """A row-major operand region: ``M[i, j] = mem[addr + i·row_stride + j]``.
+
+    Columns are the **contiguous, unit-stride packed inner dimension** — the wide bus reads
+    ``pf = MEM_BW / element_bits`` contiguous elements per cycle, so an arbitrary column
+    stride would only defeat it (scattered reads → one element/beat).  ``row_stride`` is the
+    outer **pitch** (in elements) between successive rows, letting a region be a sub-matrix of
+    a larger buffer."""
 
     mem_awidth = Param(32)
     elements = {
         "addr": {"schema": IntField.specialize(mem_awidth, signed=False),
                  "description": "base offset into shared memory"},
-        "row_stride": IntField.specialize(mem_awidth, signed=True),
-        "col_stride": IntField.specialize(mem_awidth, signed=True),
+        "row_stride": {"schema": IntField.specialize(mem_awidth, signed=True),
+                       "description": "outer pitch (in elements) between successive rows"},
     }
 
 
@@ -85,11 +91,15 @@ class VmacCmd(ParamSchema):
         # global matrix shape (operands share it; dst is (1, n_cols) when reduced)
         "n_rows": UInt16,
         "n_cols": UInt16,
-        # strided operand / destination regions (cascade: share mem_awidth)
-        "a": Region.specialize(mem_awidth=mem_awidth),
-        "b": Region.specialize(mem_awidth=mem_awidth),
-        "c": Region.specialize(mem_awidth=mem_awidth),
-        "d": Region.specialize(mem_awidth=mem_awidth),
+        # row-major operand / destination regions (cascade: share mem_awidth)
+        "a": {"schema": Region.specialize(mem_awidth=mem_awidth),
+              "description": "operand A region (left multiplicand of A·op(B))"},
+        "b": {"schema": Region.specialize(mem_awidth=mem_awidth),
+              "description": "operand B region (op(B): identity, or conj(B) in complex mode)"},
+        "c": {"schema": Region.specialize(mem_awidth=mem_awidth),
+              "description": "addend C region (the β·C term; unused when c_zero)"},
+        "d": {"schema": Region.specialize(mem_awidth=mem_awidth),
+              "description": "destination D region (reduced to a single row when reduce_rows)"},
         # scaling scalars (cascade: share mem_awidth and data_bw)
         "alpha": Scalar.specialize(mem_awidth=mem_awidth, data_bw=data_bw),
         "beta": Scalar.specialize(mem_awidth=mem_awidth, data_bw=data_bw),

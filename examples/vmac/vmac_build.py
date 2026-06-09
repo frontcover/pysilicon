@@ -154,7 +154,7 @@ def make_case(cfg: Config, params: Params, mode: str, n: int = 4, m: int = 3) ->
     cmd = accel.Cmd()
     cmd.n_rows, cmd.n_cols = n, m
     for name in ("a", "b", "c", "d"):
-        setattr(cmd, name, {"addr": addr[name], "row_stride": m, "col_stride": 1})
+        setattr(cmd, name, {"addr": addr[name], "row_stride": m})
     if cfg.alpha_percol:
         cmd.alpha = {"direct": 0, "re": 0, "im": 0, "addr": addr["alpha"], "stride": 1}
     else:
@@ -177,7 +177,7 @@ def make_case(cfg: Config, params: Params, mode: str, n: int = 4, m: int = 3) ->
     out_cls = accel.output_format(cmd)
 
     def _reg(r):
-        return (int(r.addr), int(r.row_stride), int(r.col_stride))
+        return (int(r.addr), int(r.row_stride), 1)   # columns are unit-stride (row-major)
 
     def _imm(v):
         return int(to_bits(np.int64(v), p.data_bw))

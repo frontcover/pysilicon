@@ -156,10 +156,10 @@ def build(accel, cfg, a, b, c, alpha, beta):
 
     cmd = accel.Cmd()
     cmd.n_rows, cmd.n_cols = n, m
-    cmd.a = {"addr": addr["a"], "row_stride": m, "col_stride": 1}
-    cmd.b = {"addr": addr["b"], "row_stride": m, "col_stride": 1}
-    cmd.c = {"addr": addr["c"], "row_stride": m, "col_stride": 1}
-    cmd.d = {"addr": addr["d"], "row_stride": m, "col_stride": 1}
+    cmd.a = {"addr": addr["a"], "row_stride": m}
+    cmd.b = {"addr": addr["b"], "row_stride": m}
+    cmd.c = {"addr": addr["c"], "row_stride": m}
+    cmd.d = {"addr": addr["d"], "row_stride": m}
     cmd.alpha = _scalar_field(alpha, addr.get("alpha"), complex_mode)
     cmd.beta = _scalar_field(beta, addr.get("beta"), complex_mode)
     # in_bw / out_bw / acc_bw are now structural (on the accelerator), not cmd fields

@@ -288,10 +288,10 @@ def test_failloud_propagates_through_execute():
     accel = _accel(data_bw=8, acc_bw=10, out_bw=8)
     cmd = _cmd(accel, int_bits=4, b_one=0, c_zero=0, shift=8)
     mem = np.zeros(256, dtype=np.int64)
-    cmd.a = {"addr": 0, "row_stride": 2, "col_stride": 1}
-    cmd.b = {"addr": 8, "row_stride": 2, "col_stride": 1}
-    cmd.c = {"addr": 16, "row_stride": 2, "col_stride": 1}
-    cmd.d = {"addr": 24, "row_stride": 2, "col_stride": 1}
+    cmd.a = {"addr": 0, "row_stride": 2}
+    cmd.b = {"addr": 8, "row_stride": 2}
+    cmd.c = {"addr": 16, "row_stride": 2}
+    cmd.d = {"addr": 24, "row_stride": 2}
     cmd.alpha = {"direct": 1, "re": 1, "im": 0, "addr": 0, "stride": 0}
     cmd.beta = {"direct": 1, "re": 1, "im": 0, "addr": 0, "stride": 0}
     with pytest.raises(ValueError, match="exceeds acc_bw"):

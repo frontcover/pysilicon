@@ -28,7 +28,8 @@ precision, ≤ acc_bw) → right-shift shift → round + saturate → write (out
 right-shift is the single lossy step (an ``ap_fixed`` assignment), so the golden is bit-exact
 with the Vitis kernel.  ``mem`` is the shared memory: a 1-D ``int64`` array of stored integers
 (``real`` mode) or a 1-D structured ``[('re','im')]`` array (``complex`` mode); operands are
-strided regions ``M[i, j] = mem[addr + i·row_stride + j·col_stride]``.  :meth:`execute` writes
+row-major regions ``M[i, j] = mem[addr + i·row_stride + j]`` (columns unit-stride).
+:meth:`execute` writes
 the requantized result into ``mem`` at the ``d`` region (so commands compose) and returns the
 dst ``DataArray``.
 
@@ -109,9 +110,9 @@ class VmacAccel(HwComponent):
 
     @staticmethod
     def _region_idx(reg, n_rows: int, n_cols: int) -> np.ndarray:
-        """The strided index matrix: ``addr + i·row_stride + j·col_stride``."""
+        """The row-major index matrix: ``addr + i·row_stride + j`` (columns unit-stride)."""
         rows = np.arange(n_rows)[:, None] * int(reg.row_stride)
-        cols = np.arange(n_cols)[None, :] * int(reg.col_stride)
+        cols = np.arange(n_cols)[None, :]
         return int(reg.addr) + rows + cols
 
     @classmethod
@@ -163,7 +164,7 @@ class VmacAccel(HwComponent):
     def _writeback(mem: np.ndarray, reg, dst: DataArray) -> None:
         val = np.asarray(dst.val)
         if val.ndim == 1:                                   # reduced -> single row of columns
-            idx = int(reg.addr) + np.arange(val.shape[0]) * int(reg.col_stride)
+            idx = int(reg.addr) + np.arange(val.shape[0])   # columns unit-stride
         else:
             idx = VmacAccel._region_idx(reg, val.shape[0], val.shape[1])
         mem[idx] = val

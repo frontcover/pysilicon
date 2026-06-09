@@ -22,10 +22,10 @@ Cmd = ACCEL.Cmd
 def _full_cmd():
     cmd = Cmd()
     cmd.n_rows, cmd.n_cols = 6, 4
-    cmd.a = {"addr": 0, "row_stride": 4, "col_stride": 1}
-    cmd.b = {"addr": 24, "row_stride": 4, "col_stride": 1}
-    cmd.c = {"addr": 48, "row_stride": 1, "col_stride": 6}        # transposed access
-    cmd.d = {"addr": 72, "row_stride": 4, "col_stride": 1}
+    cmd.a = {"addr": 0, "row_stride": 4}
+    cmd.b = {"addr": 24, "row_stride": 4}
+    cmd.c = {"addr": 48, "row_stride": 8}          # row pitch wider than n_cols (sub-matrix)
+    cmd.d = {"addr": 72, "row_stride": 4}
     cmd.alpha = {"direct": 1, "re": -16, "im": 8, "addr": 0, "stride": 0}
     cmd.beta = {"direct": 0, "re": 0, "im": 0, "addr": 96, "stride": 1}
     cmd.b_one, cmd.c_zero, cmd.b_conj, cmd.reduce_rows = 0, 1, 1, 1
@@ -44,9 +44,9 @@ def test_vmac_cmd_roundtrip(word_bw):
 
 
 def test_nested_region_scalar_roundtrip():
-    reg = Region(addr=12, row_stride=-3, col_stride=2)           # negative stride survives
+    reg = Region(addr=12, row_stride=-3)                         # negative pitch survives
     r2 = Region().deserialize(reg.serialize(32), 32)
-    assert r2.val == reg.val == {"addr": 12, "row_stride": -3, "col_stride": 2}
+    assert r2.val == reg.val == {"addr": 12, "row_stride": -3}
 
     sc = Scalar(direct=1, re=-100, im=77, addr=5, stride=-1)
     s2 = Scalar().deserialize(sc.serialize(32), 32)
@@ -70,10 +70,10 @@ def test_mode_enum_field_roundtrips_both_values():
 
 def test_signed_fields_preserve_negatives():
     cmd = _full_cmd()
-    cmd.a = {"addr": 10, "row_stride": -4, "col_stride": -1}
+    cmd.a = {"addr": 10, "row_stride": -4}
     cmd.alpha = {"direct": 1, "re": -32768, "im": -1, "addr": 0, "stride": 0}  # data_bw=16 range
     restored = Cmd().deserialize(cmd.serialize(32), 32)
-    assert restored.a.row_stride == -4 and restored.a.col_stride == -1
+    assert restored.a.row_stride == -4
     assert restored.alpha.re == -32768 and restored.alpha.im == -1
     assert restored.val == cmd.val
 
