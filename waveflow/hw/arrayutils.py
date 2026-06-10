@@ -447,6 +447,47 @@ def _get_write_recursive_lines(
     return [str(line) for line in lines]
 
 
+def _wide_stream_elem_body(
+    elem_type: type[DataSchema], bw: int, i3: str, kind: str,
+) -> list[str]:
+    """Body of a stream-elem helper's wide-element branch (``elem_bw > word_bw``).
+
+    ``DataList`` elements use their generated stream member methods (``read_stream`` etc.);
+    every other element (scalar / ``ComplexField``) composes the **recursive serialization**
+    over the stream, so a wide element (e.g. ``std::complex<double>`` at word_bw 64) packs in
+    streams the same way it does in m_axi arrays -- no assumed member method.
+    """
+    if issubclass(elem_type, DataList):
+        member = {
+            "read_stream": f"out[0].template read_stream<{bw}>(s);",
+            "read_axi4": f"out[0].template read_axi4_stream<{bw}>(s, tl);",
+            "write_stream": f"in[0].template write_stream<{bw}>(s);",
+            "write_axi4": f"in[0].template write_axi4_stream<{bw}>(s, tlast);",
+        }[kind]
+        return [f"{i3}{member}"]
+
+    if kind in ("read_stream", "read_axi4"):
+        src_type = "stream" if kind == "read_stream" else "axi4_stream"
+        decls = [f"{i3}ap_uint<{bw}> w;"]
+        if kind == "read_axi4":
+            decls.append(f"{i3}bool last = false;")
+        rec = elem_type._gen_read_recursive(
+            word_bw=bw, src_type=src_type, source="s", prefix="", member_name="out[0]")[0]
+    else:
+        dst_type = "stream" if kind == "write_stream" else "axi4_stream"
+        decls = [f"{i3}ap_uint<{bw}> w = 0;"]
+        if kind == "write_axi4":
+            decls.append(f"{i3}(void)tlast;")
+        rec = elem_type._gen_write_recursive(
+            word_bw=bw, dst_type=dst_type, target="s", prefix="", member_name="in[0]")[0]
+
+    body = list(decls)
+    for line in rec:
+        stripped = line[4:] if line.startswith("    ") else line
+        body.append(f"{i3}{stripped}" if stripped else "")
+    return body
+
+
 def _gen_reader_body(elem_type: type[DataSchema], word_bw: int, indent_level: int = 1) -> str:
     indent = elem_type._get_indent(indent_level)
     i1 = elem_type._get_indent(indent_level + 1)
@@ -702,7 +743,7 @@ def _gen_read_axi4_stream_elem_specializations(
                 lines.append(f"{i2}}}")
             else:
                 lines.append(f"{i2}if (n > 0) {{")
-                lines.append(f"{i3}out[0].template read_axi4_stream<{bw}>(s, tl);")
+                lines.extend(_wide_stream_elem_body(elem_type, bw, i3, "read_axi4"))
                 lines.append(f"{i2}}}")
         lines.extend([
             f"{i1}}}",
@@ -932,7 +973,7 @@ def _gen_read_stream_elem_specializations(
                 lines.append(f"{i2}}}")
             else:
                 lines.append(f"{i2}if (n > 0) {{")
-                lines.append(f"{i3}out[0].template read_stream<{bw}>(s);")
+                lines.extend(_wide_stream_elem_body(elem_type, bw, i3, "read_stream"))
                 lines.append(f"{i2}}}")
         lines.extend([
             f"{i1}}}",
@@ -1000,7 +1041,7 @@ def _gen_write_stream_elem_specializations(
                 lines.append(f"{i2}}}")
             else:
                 lines.append(f"{i2}if (n > 0) {{")
-                lines.append(f"{i3}in[0].template write_stream<{bw}>(s);")
+                lines.extend(_wide_stream_elem_body(elem_type, bw, i3, "write_stream"))
                 lines.append(f"{i2}}}")
         lines.extend([
             f"{i1}}}",
@@ -1069,7 +1110,7 @@ def _gen_write_axi4_stream_elem_specializations(
                 lines.append(f"{i2}}}")
             else:
                 lines.append(f"{i2}if (n > 0) {{")
-                lines.append(f"{i3}in[0].template write_axi4_stream<{bw}>(s, tlast);")
+                lines.extend(_wide_stream_elem_body(elem_type, bw, i3, "write_axi4"))
                 lines.append(f"{i2}}}")
         lines.extend([
             f"{i1}}}",
@@ -1317,6 +1358,11 @@ def _gen_array_utils_content(
         "#endif",
         f'#include "{_relative_streamutils_include(elem_type, root_dir, su_dir)}"',
     ]
+
+    # Raw type includes the element's cpp_type needs (e.g. <complex> / the wf_cint header
+    # for a ComplexField element); the body carries its own <…> / "…" delimiters.
+    for inc in elem_type.get_codegen_includes():
+        lines.append(f"#include {inc}")
 
     if elem_include is not None:
         lines.append(f'#include "{elem_include}"')
