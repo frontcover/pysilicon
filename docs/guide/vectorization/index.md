@@ -24,6 +24,16 @@ pages drill in:
   `quantize`, bit-exact with `ap_fixed`. (The fixed-point *type* itself is on the
   [FixedField](../schema/fixpoint.md) page.)
 
+The **Vitis C++** pages cover the generated array helpers in a synthesizable kernel
+(the schema-level packing model is in [Serialization](../schema/serialization.md)):
+
+- [Vitis: raw arrays](./vitis_raw.md) — the flat array, packing factor, lanes, and the
+  throughput lane loop.
+- [Vitis: struct arrays](./vitis_struct.md) — the generated wrapper struct's whole-array
+  methods.
+- [Vitis: complex arrays](./vitis_complex.md) — complex elements end-to-end (the wireless
+  vertical).
+
 ## Why vectorization is the differentiator
 
 The Waveflow thesis is bit-exact *and* fast. The speed comes from keeping data
