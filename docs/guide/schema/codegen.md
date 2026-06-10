@@ -22,7 +22,23 @@ For array element helpers, `ArrayUtilsStep` generates:
 
 ## Current build flow (`DataSchemaStep` + `ArrayUtilsStep`)
 
-Schema headers and array helpers are generated through `BuildDag` steps:
+Schema headers and array helpers are generated through `BuildDag` steps. For example, suppose we have a simple [DataList](./datalists.md) schema like:
+
+```python
+class PolyCmdHdr(DataList):
+    """Command header: ...
+    """
+    elements = {
+        "cmd_type": {"schema": PolyCmdTypeField, 
+            "description": "DATA or END"},
+        "tx_id":    {"schema": TxIdField,
+            "description": "Transaction ID"},
+        "nsamp":    {"schema": NsampField,       
+             "description": "Sample count (0 for END)"},
+    }
+```
+
+Then we create the include files in Python with these `BuildStep`s:
 
 ```python
 from waveflow.build.build import BuildConfig, BuildDag
@@ -38,27 +54,35 @@ dag.add(ArrayUtilsStep(Float32, [32, 64]))
 dag.run(cfg)
 ```
 
-`BuildConfig(root_dir=...)` is the build-root entry point. `ArrayUtilsStep` and `DataSchemaStep` both integrate with DAG dependency resolution.
+The two steps have distinct jobs: **`DataSchemaStep`** generates the header for a schema *class* (here `PolyCmdHdr`), while **`ArrayUtilsStep`** generates the packing helpers for a `DataArray` *element type* (here `Float32`) — see [Serialization](./serialization.md). `BuildConfig(root_dir=...)` sets the build root, and both steps resolve their shared dependency on `StreamUtilsStep` automatically through the DAG.
 
-## Using generated headers in kernel code
+Running these commands will generate header files: `poly_cmd_hdr.h` and `poly_cmd_hdr_tb.h`.  In the file `poly_cmd_hdr.h`, you will find a structure:
 
-```cpp
-#include "include/poly_cmd_hdr.h"
-#include "include/streamutils_hls.h"
-
-static const int WORD_BW = 32;
-using axis_word_t = streamutils::axi4s_word<WORD_BW>;
-
-void poly(hls::stream<axis_word_t>& in_stream,
-          hls::stream<axis_word_t>& out_stream) {
-#pragma HLS INTERFACE axis port=in_stream
-#pragma HLS INTERFACE axis port=out_stream
-#pragma HLS INTERFACE ap_ctrl_none port=return
-
-    PolyCmdHdr cmd_hdr;
-    streamutils::tlast_status cmd_hdr_tlast;
-    cmd_hdr.read_axi4_stream<WORD_BW>(in_stream, cmd_hdr_tlast);
+```c
+struct PolyCmdHdr {
+    PolyCmdType cmd_type;  // DATA or END
+    ap_uint<16> tx_id;  // Transaction ID
+    ap_uint<16> nsamp;  // Sample count (0 for END)
+    
+    ...
 }
 ```
 
-Serialization helpers are templated on `word_bw`, so switching bus width typically changes only one constant.
+In this way, the Python data structure is faithfully translated to the Vitis HLS code — the field types (`PolyCmdType`, `ap_uint<16>`) and even the descriptive comments come straight from the schema. Now any other Vitis C++ file can `#include` the header and declare an instance:
+
+```cpp
+#include "include/poly_cmd_hdr.h"
+
+PolyCmdHdr hdr;
+hdr.cmd_type = PolyCmdType::DATA;   // the generated enum
+hdr.tx_id    = 42;
+hdr.nsamp    = 1024;
+```
+
+The struct stays in lock-step with its Python definition: change a field there and the regenerated header changes with it, so the kernel can never drift from the source of truth.
+
+
+
+## Reading and writing over a channel
+
+Beyond its data members, each generated header also carries **serialization** methods — templated on the channel width `word_bw` — for moving the schema in and out of an AXI-Stream or `m_axi` port. Because they are templated, switching bus width is usually a one-constant change. These methods, and the packing model behind them, are covered in [Serialization & Deserialization](./serialization.md).
