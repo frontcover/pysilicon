@@ -1657,16 +1657,20 @@ class FloatField(DataField):
 
     @classmethod
     def to_uint_expr(cls, value_expr: str) -> str:
+        if cls.get_bitwidth() == 64:
+            return f"streamutils::double_to_uint({value_expr})"
         return f"streamutils::float_to_uint({value_expr})"
 
     @classmethod
     def to_uint_value_expr(cls, value_expr: str) -> str:
-        return f"streamutils::float_to_uint({value_expr})"
+        return cls.to_uint_expr(value_expr)
 
     @classmethod
     def from_uint_expr(cls, uint_expr: str) -> str:
+        if cls.get_bitwidth() == 64:
+            return f"streamutils::uint_to_double((uint64_t)({uint_expr}))"
         if cls.get_bitwidth() != 32:
-            raise ValueError("FloatField unpack currently supports only bitwidth=32.")
+            raise ValueError("FloatField unpack supports only bitwidth 32 or 64.")
         return f"streamutils::uint_to_float((uint32_t)({uint_expr}))"
 
     def _value_to_field_bits(self, current_val: Any) -> int:

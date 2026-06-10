@@ -54,6 +54,31 @@ namespace streamutils {
     }
 
     /**
+     * Reinterprets the 64 bits of a double as an unsigned integer
+     * (bit pattern, no value conversion) -- the double analogue of float_to_uint.
+     */
+    inline uint64_t double_to_uint(double d) {
+        union {
+            double d_val;
+            uint64_t u_val;
+        } converter;
+        converter.d_val = d;
+        return converter.u_val;
+    }
+
+    /**
+     * Reinterprets a 64-bit unsigned integer as a double.
+     */
+    inline double uint_to_double(uint64_t u) {
+        union {
+            uint64_t u_val;
+            double d_val;
+        } converter;
+        converter.u_val = u;
+        return converter.d_val;
+    }
+
+    /**
      * Reinterprets the raw bits of an ap_fixed/ap_ufixed value as an unsigned
      * integer of the same width (the .range() bit pattern) — a bit-reinterpret,
      * NOT a value conversion. Templated on the fixed-point type T (uses T::width),

@@ -1,23 +1,29 @@
 """Complex conformance harness -- Python ``ComplexField`` vs Vitis complex, bit-exact.
 
-The Phase-4 milestone: for each curated case, run the complex op in Vitis C-sim (the
-:mod:`kernels` complex kernels) and assert the emitted stored bits equal the bits the
-Python ``DataArray[ComplexField]`` model produces -- **bit-for-bit, zero LSB
-disagreement** -- per inner:
+For each curated case, run the complex op in Vitis C-sim and assert the emitted **packed
+words** equal the words the Python ``DataArray[ComplexField]`` model produces -- bit-for-bit,
+zero LSB disagreement -- per inner:
 
-- **fixed** -> ``std::complex<ap_fixed>``  (the headline; signed cmult/cadd/csub/conj,
-  unsigned cadd; round-trip quantization).
+- **fixed** -> ``std::complex<ap_fixed>``  (signed cmult/cadd/csub/conj, unsigned cadd; the
+  serialization round-trip).
 - **int**   -> the Waveflow ``wf_cint`` struct (s8 / s16: cmult/cadd/csub/conj + round-trip).
 - **float** -> ``std::complex<float>`` / ``std::complex<double>``  (round-trip + the
-  complex-multiply **edge** confirmed empirically + cadd/csub/conj).
+  complex-multiply edge + cadd/csub/conj).
 
-If Python and Vitis ever differ the Python model is wrong, not Vitis: fix it, never loosen.
-Built on the shared ``BuildDag`` + :func:`run_dag_cli` rig (reused from the FixedField
-harness), so this is the same gen -> csim -> compare-bits flow.
+This is the **migrated** harness (plans/complex_serialization.md Phase 3): the operand /
+result vectors are the **generated serialization** (:func:`arrayutils.write_array` /
+:func:`read_array` over ``DataArray[ComplexField]``, replacing the old hand-interleaving), and
+the kernel arithmetic is **``complex_utils.hpp``** (replacing the inline formula).  Each
+operand / result is (de)serialized at ``word_bw = its element bitwidth`` (<=64) so the packing
+is one element per word -- exactly what ``write_array`` produces -- and the kernel uses the
+generated ``<type>_array_utils::read_array`` / ``write_array`` to match it on the C++ side.
+
+If Python and Vitis ever differ the Python model is the spec: fix the codegen / kernel, never
+loosen the compare.  Built on the shared ``BuildDag`` + :func:`run_dag_cli` rig.
 
 CLI::
 
-    python complex_build.py --through gen_conformance   # write kernels + vectors (no Vitis)
+    python complex_build.py --through gen_conformance   # write kernels + headers + vectors
     python complex_build.py --through run_conformance    # the full csim conformance (Vitis)
     python complex_build.py --list-steps
 """
@@ -25,30 +31,31 @@ from __future__ import annotations
 
 import json
 import shutil
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import numpy as np
 
 from waveflow.build.build import BuildConfig, BuildDag, BuildStep, SourceStep
 from waveflow.build.cli import run_dag_cli
+from waveflow.build.streamutils import StreamUtilsStep
+from waveflow.hw.arrayutils import (
+    _array_utils_filename, _array_utils_namespace, gen_array_utils, get_nwords, write_array,
+)
 from waveflow.hw.complexfield import ComplexField, cadd, cmult, conj, csub
 from waveflow.hw.dataschema import DataArray, FloatField, IntField
 from waveflow.hw.fixpoint import FixedField
 from waveflow.toolchain import toolchain
 from waveflow.utils import complexutils as cx
-from waveflow.utils.fixputils import OMode, QMode, quantize_real, to_bits
+from waveflow.utils.fixputils import OMode, QMode, quantize_real
 
 try:
-    from examples.schemas.complex.kernels import (
-        render_caddsub, render_cmult, render_conj, render_load_real,
-    )
+    from examples.schemas.complex.kernels import render_kernel
 except ModuleNotFoundError:  # direct execution from the example dir
-    from kernels import (  # type: ignore[no-redef]
-        render_caddsub, render_cmult, render_conj, render_load_real,
-    )
+    from kernels import render_kernel  # type: ignore[no-redef]
 
 _SOURCE_DIR = Path(__file__).resolve().parent
+_BUILD_DIR = Path(__file__).resolve().parents[3] / "waveflow" / "build"   # complex_utils.hpp / wf_cint.h
 
 
 # --- config -------------------------------------------------------------------
@@ -75,12 +82,8 @@ class ComplexConfig:
     def complex_cls(self):
         return ComplexField.specialize(self.inner_cls)
 
-    @property
-    def inner_W(self) -> int:
-        return self.fbw if self.kind == "float" else self.W
 
-
-# curated signed fixed configs (the FixedField set; 2W+1 <= 64 for all -> cmult ok)
+# curated signed fixed configs (2W+1 <= 64 for all -> cmult ok)
 FIXED_SIGNED = [
     ComplexConfig("s4_2", "fixed", 4, 2), ComplexConfig("s8_4", "fixed", 8, 4),
     ComplexConfig("s16_8", "fixed", 16, 8), ComplexConfig("s8_8", "fixed", 8, 8),
@@ -114,163 +117,8 @@ def _float_operand(cfg: ComplexConfig, vals) -> DataArray:
     return _da(cfg.complex_cls, np.asarray(vals, dtype=dt))
 
 
-def _interleave_stored_bits(struct, W: int) -> list[int]:
-    re = np.atleast_1d(to_bits(np.asarray(struct["re"]), W))
-    im = np.atleast_1d(to_bits(np.asarray(struct["im"]), W))
-    return [int(x) for pair in zip(re, im) for x in pair]
-
-
-def _interleave_float_bits(arr, bw: int) -> list[int]:
-    dt = np.uint32 if bw == 32 else np.uint64
-    ft = np.float32 if bw == 32 else np.float64
-    out: list[int] = []
-    for z in np.atleast_1d(arr):
-        out.append(int(np.asarray(ft(z.real)).view(dt)))
-        out.append(int(np.asarray(ft(z.imag)).view(dt)))
-    return out
-
-
-def _text(ints) -> str:
-    return "\n".join(str(int(x)) for x in ints) + "\n"
-
-
-def _reals_text(pairs) -> str:
-    """Interleaved re, im doubles (one per line)."""
-    out: list[str] = []
-    for re, im in pairs:
-        out.append(f"{float(re):.17g}")
-        out.append(f"{float(im):.17g}")
-    return "\n".join(out) + "\n"
-
-
-def _case(name, kernel, in_a, in_b, expected) -> dict:
-    return {"name": name, "kernel": kernel, "in_a": in_a, "in_b": in_b, "expected": expected}
-
-
-# --- per-op golden + kernel ---------------------------------------------------
-def _arith_inputs(cfg, a, b):
-    if cfg.kind == "float":
-        return _text(_interleave_float_bits(a.val, cfg.fbw)), _text(_interleave_float_bits(b.val, cfg.fbw))
-    return _text(_interleave_stored_bits(a.val, cfg.W)), _text(_interleave_stored_bits(b.val, cfg.W))
-
-
-def _arith_expected(cfg, out):
-    ri = out.element_type.inner_type
-    if cfg.kind == "float":
-        return _interleave_float_bits(out.val, ri.get_bitwidth()), ri
-    return _interleave_stored_bits(out.val, ri.get_bitwidth()), ri
-
-
-def _add_binary_case(cases, cfg, a, b, op_name, fn, render_fn):
-    out = fn(a, b)
-    exp, ri = _arith_expected(cfg, out)
-    in_a, in_b = _arith_inputs(cfg, a, b)
-    kernel = render_fn(cfg.inner_cls.cpp_type, cfg.inner_W, ri.cpp_type, ri.get_bitwidth())
-    cases.append(_case(f"{op_name}_{cfg.name}", kernel, in_a, in_b, exp))
-
-
-def build_cases() -> list[dict]:  # noqa: C901 — flat enumeration of curated cases
-    cases: list[dict] = []
-    ctype_of = lambda cfg: cfg.inner_cls.cpp_type  # noqa: E731
-
-    # ---- fixed (signed): round-trip + cmult/cadd/csub/conj ----
-    for cfg in FIXED_SIGNED:
-        a = _fixed_int_operand(cfg, 2)
-        b = _fixed_int_operand(cfg, 4)
-        # round-trip: quantize reals (exact + rounding-midpoint + overflow sweep)
-        pairs = _roundtrip_pairs(cfg)
-        gold = []
-        for re, im in pairs:
-            gold.append(int(to_bits(quantize_real(np.array([re]), cfg.inner_cls.get_format()), cfg.W)[0]))
-            gold.append(int(to_bits(quantize_real(np.array([im]), cfg.inner_cls.get_format()), cfg.W)[0]))
-        cases.append(_case(f"roundtrip_{cfg.name}",
-                           render_load_real("fixed", ctype_of(cfg), cfg.W),
-                           _reals_text(pairs), "", gold))
-        _add_binary_case(cases, cfg, a, b, "cmult", cmult,
-                         lambda ct, w, rt, rw, c=cfg: render_cmult("fixed", c.inner_cls.cpp_type, c.W, rt, rw))
-        _add_binary_case(cases, cfg, a, b, "cadd", cadd,
-                         lambda ct, w, rt, rw, c=cfg: render_caddsub("+", "fixed", c.inner_cls.cpp_type, c.W, rt, rw))
-        _add_binary_case(cases, cfg, a, b, "csub", csub,
-                         lambda ct, w, rt, rw, c=cfg: render_caddsub("-", "fixed", c.inner_cls.cpp_type, c.W, rt, rw))
-        oc = conj(a)
-        ri = oc.element_type.inner_type
-        cases.append(_case(f"conj_{cfg.name}",
-                           render_conj("fixed", ctype_of(cfg), cfg.W, ri.cpp_type, ri.get_bitwidth()),
-                           _text(_interleave_stored_bits(a.val, cfg.W)), "",
-                           _interleave_stored_bits(oc.val, ri.get_bitwidth())))
-
-    # ---- fixed (unsigned): round-trip + cadd only (cmult/conj are signed-only) ----
-    cfg = FIXED_UNSIGNED
-    a = _fixed_int_operand(cfg, 2)
-    b = _fixed_int_operand(cfg, 4)
-    pairs = _roundtrip_pairs(cfg)
-    gold = []
-    for re, im in pairs:
-        gold.append(int(to_bits(quantize_real(np.array([re]), cfg.inner_cls.get_format()), cfg.W)[0]))
-        gold.append(int(to_bits(quantize_real(np.array([im]), cfg.inner_cls.get_format()), cfg.W)[0]))
-    cases.append(_case(f"roundtrip_{cfg.name}",
-                       render_load_real("fixed", ctype_of(cfg), cfg.W), _reals_text(pairs), "", gold))
-    _add_binary_case(cases, cfg, a, b, "cadd", cadd,
-                     lambda ct, w, rt, rw, c=cfg: render_caddsub("+", "fixed", c.inner_cls.cpp_type, c.W, rt, rw))
-
-    # ---- int (signed s8 / s16): round-trip + cmult/cadd/csub/conj ----
-    for cfg in INTS:
-        a = _fixed_int_operand(cfg, 2)
-        b = _fixed_int_operand(cfg, 4)
-        # round-trip is an identity over stored ints (validates the wf_cint layout)
-        rt_bits = _interleave_stored_bits(a.val, cfg.W)
-        cases.append(_case(f"roundtrip_{cfg.name}",
-                           render_load_real("int", f"ap_int<{cfg.W}>", cfg.W),
-                           _text(rt_bits), "", rt_bits))
-        _add_binary_case(cases, cfg, a, b, "cmult", cmult,
-                         lambda ct, w, rt, rw, c=cfg: render_cmult("int", f"ap_int<{c.W}>", c.W, rt, rw))
-        _add_binary_case(cases, cfg, a, b, "cadd", cadd,
-                         lambda ct, w, rt, rw, c=cfg: render_caddsub("+", "int", f"ap_int<{c.W}>", c.W, rt, rw))
-        _add_binary_case(cases, cfg, a, b, "csub", csub,
-                         lambda ct, w, rt, rw, c=cfg: render_caddsub("-", "int", f"ap_int<{c.W}>", c.W, rt, rw))
-        oc = conj(a)
-        ri = oc.element_type.inner_type
-        cases.append(_case(f"conj_{cfg.name}",
-                           render_conj("int", f"ap_int<{cfg.W}>", cfg.W,
-                                       f"ap_int<{ri.get_bitwidth()}>", ri.get_bitwidth()),
-                           _text(_interleave_stored_bits(a.val, cfg.W)), "",
-                           _interleave_stored_bits(oc.val, ri.get_bitwidth())))
-
-    # ---- float (f32 / f64): round-trip + cmult (the edge) + cadd/csub/conj ----
-    # Rounding-TRIGGERING random operands (fixed seed): products are non-exact, so this
-    # genuinely exercises the complex-multiply edge (numpy's FMA `*` would diverge from
-    # std::complex on ~25% of these; the naive cmult_float model matches Vitis bit-exact).
-    _rng = np.random.default_rng(20240607)
-    fa_vals = _rng.standard_normal(64) + 1j * _rng.standard_normal(64)
-    fb_vals = _rng.standard_normal(64) + 1j * _rng.standard_normal(64)
-    for cfg in FLOATS:
-        a = _float_operand(cfg, fa_vals)
-        b = _float_operand(cfg, fb_vals)
-        # round-trip: doubles -> float type (double->float quantization for f32; exact for f64)
-        pairs = [(z.real, z.imag) for z in [complex(1.1, -2.2), complex(3.3, 0.4),
-                                            complex(-5.5, 6.6), complex(0.0, -1.0)]]
-        gold = _interleave_float_bits(
-            np.asarray([complex(re, im) for re, im in pairs],
-                       dtype=np.complex128 if cfg.fbw == 64 else np.complex64), cfg.fbw)
-        cases.append(_case(f"roundtrip_{cfg.name}",
-                           render_load_real("float", ctype_of(cfg), cfg.fbw), _reals_text(pairs), "", gold))
-        _add_binary_case(cases, cfg, a, b, "cmult", cmult,
-                         lambda ct, w, rt, rw, c=cfg: render_cmult("float", c.inner_cls.cpp_type, c.fbw, c.inner_cls.cpp_type, c.fbw))
-        _add_binary_case(cases, cfg, a, b, "cadd", cadd,
-                         lambda ct, w, rt, rw, c=cfg: render_caddsub("+", "float", c.inner_cls.cpp_type, c.fbw, c.inner_cls.cpp_type, c.fbw))
-        _add_binary_case(cases, cfg, a, b, "csub", csub,
-                         lambda ct, w, rt, rw, c=cfg: render_caddsub("-", "float", c.inner_cls.cpp_type, c.fbw, c.inner_cls.cpp_type, c.fbw))
-        oc = conj(a)
-        cases.append(_case(f"conj_{cfg.name}",
-                           render_conj("float", ctype_of(cfg), cfg.fbw, ctype_of(cfg), cfg.fbw),
-                           _text(_interleave_float_bits(a.val, cfg.fbw)), "",
-                           _interleave_float_bits(oc.val, cfg.fbw)))
-
-    return cases
-
-
 def _roundtrip_pairs(cfg: ComplexConfig):
-    """(re, im) real pairs for the quantization round-trip: exact, rounding midpoints, overflow."""
+    """(re, im) real pairs for the round-trip: exact, rounding midpoints, overflow."""
     lsb = 2.0 ** (-(cfg.W - cfg.int_bits))
     if cfg.signed:
         hi, lo = ((1 << (cfg.W - 1)) - 1) * lsb, -(1 << (cfg.W - 1)) * lsb
@@ -280,16 +128,154 @@ def _roundtrip_pairs(cfg: ComplexConfig):
     return [(vals[i], vals[-1 - i]) for i in range(len(vals))]
 
 
-# --- single-case driver (reused by the step loop AND the conformance test) ----
-def gen_case_sources(case: dict, work_dir: Path) -> Path:
+def _roundtrip_operand(cfg: ComplexConfig) -> DataArray:
+    """The round-trip operand: the curated quantization-edge values, **quantized** into the
+    inner format (so the serialization round-trip carries the exact stored representation)."""
+    if cfg.kind == "float":
+        pairs = [(1.1, -2.2), (3.3, 0.4), (-5.5, 6.6), (0.0, -1.0)]
+        dt = np.complex128 if cfg.fbw == 64 else np.complex64
+        return _da(cfg.complex_cls, np.asarray([complex(r, i) for r, i in pairs], dtype=dt))
+    if cfg.kind == "int":
+        return _fixed_int_operand(cfg, 2)
+    fmt = cfg.inner_cls.get_format()
+    pairs = _roundtrip_pairs(cfg)
+    re_q = quantize_real(np.array([r for r, _ in pairs]), fmt)
+    im_q = quantize_real(np.array([i for _, i in pairs]), fmt)
+    return _da(cfg.complex_cls, cx.make_complex(re_q, im_q, fmt))
+
+
+# --- one case -----------------------------------------------------------------
+def _wbw(cf) -> int:
+    """word_bw = element bitwidth (<=64) so pf=1, one element per word -- the layout
+    ``write_array`` produces; 64 for the 128-bit float64 element (2 words/element)."""
+    bw = cf.get_bitwidth()
+    return bw if bw <= 64 else 64
+
+
+@dataclass
+class Case:
+    name: str
+    op: str                          # roundtrip | cmult | cadd | csub | conj
+    a: DataArray
+    golden: DataArray
+    b: DataArray | None = None
+    expected: list = field(default_factory=list)
+
+    @property
+    def in_cf(self):
+        return type(self.a).element_type
+
+    @property
+    def out_cf(self):
+        return type(self.golden).element_type
+
+    @property
+    def binary(self) -> bool:
+        return self.op in ("cmult", "cadd", "csub")
+
+
+_OPS = {"cmult": cmult, "cadd": cadd, "csub": csub, "conj": conj}
+
+
+def _mk_case(name: str, op: str, a: DataArray, b: DataArray | None = None) -> Case:
+    if op == "roundtrip":
+        golden = a
+    elif op == "conj":
+        golden = conj(a)
+    else:
+        golden = _OPS[op](a, b)
+    wbo = _wbw(type(golden).element_type)
+    expected = [int(w) for w in np.asarray(write_array(golden, word_bw=wbo)).ravel()]
+    return Case(name=name, op=op, a=a, b=b, golden=golden, expected=expected)
+
+
+def build_cases() -> list[dict]:
+    cases: list[Case] = []
+
+    # ---- fixed (signed): round-trip + cmult/cadd/csub/conj ----
+    for cfg in FIXED_SIGNED:
+        a, b = _fixed_int_operand(cfg, 2), _fixed_int_operand(cfg, 4)
+        cases.append(_mk_case(f"roundtrip_{cfg.name}", "roundtrip", _roundtrip_operand(cfg)))
+        for op in ("cmult", "cadd", "csub"):
+            cases.append(_mk_case(f"{op}_{cfg.name}", op, a, b))
+        cases.append(_mk_case(f"conj_{cfg.name}", "conj", a))
+
+    # ---- fixed (unsigned): round-trip + cadd only (cmult/conj are signed-only) ----
+    cfg = FIXED_UNSIGNED
+    a, b = _fixed_int_operand(cfg, 2), _fixed_int_operand(cfg, 4)
+    cases.append(_mk_case(f"roundtrip_{cfg.name}", "roundtrip", _roundtrip_operand(cfg)))
+    cases.append(_mk_case(f"cadd_{cfg.name}", "cadd", a, b))
+
+    # ---- int (signed s8 / s16): round-trip + cmult/cadd/csub/conj ----
+    for cfg in INTS:
+        a, b = _fixed_int_operand(cfg, 2), _fixed_int_operand(cfg, 4)
+        cases.append(_mk_case(f"roundtrip_{cfg.name}", "roundtrip", _roundtrip_operand(cfg)))
+        for op in ("cmult", "cadd", "csub"):
+            cases.append(_mk_case(f"{op}_{cfg.name}", op, a, b))
+        cases.append(_mk_case(f"conj_{cfg.name}", "conj", a))
+
+    # ---- float (f32 / f64): round-trip + cmult (the edge) + cadd/csub/conj ----
+    # Rounding-TRIGGERING random operands (fixed seed): products are non-exact, so this
+    # genuinely exercises the complex-multiply edge (the explicit naive formula in
+    # complex_utils.hpp, bit-exact with cmult_float; numpy's FMA `*` would diverge).
+    rng = np.random.default_rng(20240607)
+    fa_vals = rng.standard_normal(64) + 1j * rng.standard_normal(64)
+    fb_vals = rng.standard_normal(64) + 1j * rng.standard_normal(64)
+    for cfg in FLOATS:
+        a, b = _float_operand(cfg, fa_vals), _float_operand(cfg, fb_vals)
+        cases.append(_mk_case(f"roundtrip_{cfg.name}", "roundtrip", _roundtrip_operand(cfg)))
+        for op in ("cmult", "cadd", "csub"):
+            cases.append(_mk_case(f"{op}_{cfg.name}", op, a, b))
+        cases.append(_mk_case(f"conj_{cfg.name}", "conj", a))
+
+    return [_case_dict(c) for c in cases]
+
+
+def _case_dict(c: Case) -> dict:
+    return {"name": c.name, "case": c, "expected": c.expected}
+
+
+# --- per-case source generation (headers + kernel + vectors) ------------------
+def _words_text(da: DataArray, word_bw: int) -> str:
+    words = np.asarray(write_array(da, word_bw=word_bw)).ravel()
+    return "\n".join(str(int(w)) for w in words) + "\n"
+
+
+def gen_case_sources(case_dict: dict, work_dir: Path) -> Path:
+    """Generate one case's dir: the generated headers (streamutils + wf_cint + complex_utils
+    + the in/out array-utils), the kernel, the packed-word input vectors, the golden bits."""
+    c: Case = case_dict["case"]
     work_dir = Path(work_dir)
     work_dir.mkdir(parents=True, exist_ok=True)
-    (work_dir / "kernel.cpp").write_text(case["kernel"], encoding="utf-8")
-    (work_dir / "in_a.txt").write_text(case["in_a"], encoding="utf-8")
-    (work_dir / "in_b.txt").write_text(case["in_b"], encoding="utf-8")
+
+    in_cf, out_cf = c.in_cf, c.out_cf
+    wbi, wbo = _wbw(in_cf), _wbw(out_cf)
+    n = int(np.asarray(c.a.val).shape[0])
+
+    # generated support headers
+    cfg = BuildConfig(root_dir=work_dir)
+    dag = BuildDag()
+    dag.add(StreamUtilsStep(output_dir="include"))
+    dag.run(cfg)
+    gen_array_utils(in_cf, [wbi], cfg=cfg, streamutils_dir="include")
+    if out_cf is not in_cf:
+        gen_array_utils(out_cf, [wbo], cfg=cfg, streamutils_dir="include")
+    for h in ("complex_utils.hpp", "wf_cint.h"):
+        shutil.copy(_BUILD_DIR / h, work_dir / h)
+
+    kernel = render_kernel(
+        op=c.op, in_cpp=in_cf.cpp_type, out_cpp=out_cf.cpp_type,
+        in_ns=_array_utils_namespace(in_cf), out_ns=_array_utils_namespace(out_cf),
+        in_hdr=_array_utils_filename(in_cf), out_hdr=_array_utils_filename(out_cf),
+        wbi=wbi, wbo=wbo, n=n,
+        nwa=get_nwords(in_cf, wbi, n), nwy=get_nwords(out_cf, wbo, n), binary=c.binary,
+    )
+    (work_dir / "kernel.cpp").write_text(kernel, encoding="utf-8")
+    (work_dir / "in_a.txt").write_text(_words_text(c.a, wbi), encoding="utf-8")
+    (work_dir / "in_b.txt").write_text(
+        _words_text(c.b, wbi) if c.binary else "0\n", encoding="utf-8")
     (work_dir / "expected.json").write_text(
-        json.dumps({"name": case["name"], "expected": case["expected"]}, indent=2),
-        encoding="utf-8")
+        json.dumps({"name": c.name, "expected": c.expected}, indent=2), encoding="utf-8")
     shutil.copy(_SOURCE_DIR / "run.tcl", work_dir / "run.tcl")
     return work_dir
 
@@ -307,18 +293,18 @@ def csim_and_compare(work_dir: Path, *, live_output: bool = False) -> dict:
             "exact": len(vitis) == len(exp) and not mism}
 
 
-def conformance_for_case(case: dict, work_dir: Path, *, live_output: bool = False) -> dict:
-    gen_case_sources(case, work_dir)
+def conformance_for_case(case_dict: dict, work_dir: Path, *, live_output: bool = False) -> dict:
+    gen_case_sources(case_dict, work_dir)
     return csim_and_compare(work_dir, live_output=live_output)
 
 
 # --- BuildDag steps -----------------------------------------------------------
 @dataclass(kw_only=True)
 class GenConformanceStep(BuildStep):
-    description = "Generate the per-case complex kernels + interleaved-I/Q vectors + Python golden bits."
+    description = "Generate the per-case headers (generated serialization) + complex_utils kernel + vectors."
     consumes = ["complex_source", "run_tcl", "kernels_source"]
     produces = {"conformance_gen": Path("gen")}
-    params = {}
+    params: dict = field(default_factory=dict)
 
     def run(self, config: BuildConfig, **_) -> dict:
         gen = config.root_dir / "gen"
@@ -330,10 +316,10 @@ class GenConformanceStep(BuildStep):
 
 @dataclass(kw_only=True)
 class RunConformanceStep(BuildStep):
-    description = "Per case: Vitis csim, assert Vitis bits == Python bits exactly (round-trip + arithmetic)."
+    description = "Per case: Vitis csim, assert Vitis words == Python write_array words exactly."
     consumes = ["conformance_gen"]
     produces = {"conformance_report": Path("results/conformance_report.json")}
-    params = {"live_output": False}
+    params: dict = field(default_factory=lambda: {"live_output": False})
 
     def run(self, config: BuildConfig, live_output, **_) -> dict:
         gen = config.root_dir / "gen"
@@ -350,7 +336,7 @@ class RunConformanceStep(BuildStep):
         if failed:
             raise RuntimeError(
                 f"STOP — Vitis disagreed with the Python model on {len(failed)}/{len(results)} "
-                "cases. The Python model is wrong, not Vitis; fix it, do not loosen the "
+                "cases. The Python model is the spec; fix the codegen/kernel, do not loosen the "
                 f"comparison. First failure: {failed[0]}")
         return {"conformance_report": report_path}
 
@@ -368,7 +354,7 @@ def build_complex_dag() -> BuildDag:
 def main() -> None:
     run_dag_cli(
         build_complex_dag,
-        description="Complex (ComplexField) Python-vs-Vitis bit-exact conformance (round-trip + arithmetic).",
+        description="Complex (ComplexField) Python-vs-Vitis bit-exact conformance (generated serialization + complex_utils.hpp).",
         default_through="gen_conformance",
         root_dir=_SOURCE_DIR,
         extra_args=[(("--live-output",), {"action": "store_true"})],

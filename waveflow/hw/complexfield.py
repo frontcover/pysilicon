@@ -178,12 +178,18 @@ class ComplexField(DataField):
     @classmethod
     def to_uint_expr(cls, value_expr: str) -> str:
         """Pack a complex value into ``2*inner_bw`` bits: ``re | (im << inner_bw)`` (delegating
-        each component to the inner field's pack)."""
+        each component to the inner field's pack).
+
+        Each component's packed bits are first truncated to ``ap_uint<inner_bw>`` so a signed
+        integer inner (``wf_cint`` over ``ap_int``) is **zero-extended** -- not sign-extended --
+        when widened to the ``2*inner_bw`` word (otherwise a negative ``re`` would bleed into
+        the ``im`` slot).  ``fixed_to_bits`` / ``float_to_uint`` already return the raw bits, so
+        the truncation is a no-op for the float / fixed inner."""
         inner = cls.inner_type
         bw = inner.get_bitwidth()
         bw2 = 2 * bw
-        re = inner.to_uint_value_expr(cls._cpp_re(value_expr))
-        im = inner.to_uint_value_expr(cls._cpp_im(value_expr))
+        re = f"(ap_uint<{bw}>)({inner.to_uint_value_expr(cls._cpp_re(value_expr))})"
+        im = f"(ap_uint<{bw}>)({inner.to_uint_value_expr(cls._cpp_im(value_expr))})"
         return f"((ap_uint<{bw2}>)({re}) | ((ap_uint<{bw2}>)({im}) << {bw}))"
 
     @classmethod
