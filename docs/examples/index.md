@@ -1,10 +1,9 @@
 ---
 title: Examples
 parent: Waveflow
-nav_order: 2
+nav_order: 3
 has_children: true
 ---
-
 # Examples
 
 Waveflow's examples are a **teaching progression**, and they come in **two
@@ -29,10 +28,10 @@ These teach the [data schema](../guide/schema/) and
 [vectorization](../guide/vectorization/) layers: typed fields, numpy-backed arrays,
 and the type-preserving operators, all proven **bit-exact** against Vitis.
 
-| Example | Vehicle | What it teaches | Status |
-|---|---|---|---|
-| [`basic_vec`](./basic_vec/) | one MAC (`a*b + c`) | vectorized golden vs vectorized Vitis, bit-exact for int / float / fixed — the [vectorization](../guide/vectorization/) front-door | available |
-| `schemas/fixedpoint` | edge-value sweep | the rigorous fixed-point conformance harness (all `QMode`/`OMode` × widths) behind [FixedField](../guide/schema/fixpoint.md) | available (code) |
+| Example                    | Vehicle               | What it teaches                                                                                                                 | Status           |
+| -------------------------- | --------------------- | ------------------------------------------------------------------------------------------------------------------------------- | ---------------- |
+| [`basic_vec`](./basic_vec/) | one MAC (`a*b + c`) | vectorized golden vs vectorized Vitis, bit-exact for int / float / fixed — the[vectorization](../guide/vectorization/) front-door | available        |
+| `schemas/fixedpoint`     | edge-value sweep      | the rigorous fixed-point conformance harness (all `QMode`/`OMode` × widths) behind [FixedField](../guide/schema/fixpoint.md)  | available (code) |
 
 `basic_vec` is the teaching front-door (minimal, readable); `schemas/fixedpoint` is
 the exhaustive proof. They share the same conformance machinery.
@@ -68,13 +67,13 @@ to **control in-band on the data stream**, to **data in memory**, to **control
 also in memory**. `pure_stream` slots in early as the boundary-free streaming
 base case.
 
-| # | Pattern (directory) | Vehicle | New concept introduced | Flow coverage | Status |
-|---|---|---|---|---|---|
-| 1 | [`regmap`](./regmap/) | simple function | register-mapped control (AXI4-Lite) | stages 1–5 | available |
-| 2 | `pure_stream` | moving-average filter | streaming dataflow — no packet boundary, no TLAST, no control | planned | reserved (not built yet) |
-| 3 | [`stream_inband`](./stream_inband/) | polynomial | packetization (TLAST) + in-band control on the stream | stages 1–5 | available |
-| 4 | [`shared_mem`](./shared_mem/) | histogram | data in memory (AXI-MM), control over a dedicated stream | stages 1–5 | available; codegen upgrade in progress |
-| 5 | `mem_queue` | vector unit | control *also* in memory, via a descriptor queue | stages 1–2 (codegen TBD) | reserved (not built yet) |
+| # | Pattern (directory)                | Vehicle               | New concept introduced                                         | Flow coverage             | Status                                 |
+| - | ---------------------------------- | --------------------- | -------------------------------------------------------------- | ------------------------- | -------------------------------------- |
+| 1 | [`regmap`](./regmap/)               | simple function       | register-mapped control (AXI4-Lite)                            | stages 1–5               | available                              |
+| 2 | `pure_stream`                    | moving-average filter | streaming dataflow — no packet boundary, no TLAST, no control | planned                   | reserved (not built yet)               |
+| 3 | [`stream_inband`](./stream_inband/) | polynomial            | packetization (TLAST) + in-band control on the stream          | stages 1–5               | available                              |
+| 4 | [`shared_mem`](./shared_mem/)       | histogram             | data in memory (AXI-MM), control over a dedicated stream       | stages 1–5               | available; codegen upgrade in progress |
+| 5 | `mem_queue`                      | vector unit           | control*also* in memory, via a descriptor queue              | stages 1–2 (codegen TBD) | reserved (not built yet)               |
 
 The shared-memory (`shared_mem`) example is the reference for AXI-MM (`m_axi`)
 codegen — multiple buffers and element types read/written over one bundle, with

@@ -40,6 +40,14 @@ Waveflow is developed by
 and Computer Engineering and Director of [NYU Wireless](https://wireless.engineering.nyu.edu/)
 at NYU.
 
+## Support
+
+This project is generously supported by:
+
+- [NTIA NOFO-2](https://www.ntia.gov/press-release/2025/biden-harris-administration-awards-117-million-wireless-innovation) award on Spectrally Agile Large Scale Arrays with NYU, Rutgers, Pi-Radio, Nokia, and Princeton University.
+- [NSF NeTS Medium: Energy-Efficient and Reconfigurable Wireless Networks through Hardware-Algorithm Co-Design](https://www.nsf.gov/awardsearch/show-award?AWD_ID=2504400) with NYU PIs Sundeep Rangan, Brandon Reagen, Elza Erkip, and Hamed Rahmani.
+- The industrial affiliates of [NYU Wireless](https://wireless.engineering.nyu.edu/).
+
 ## Feedback
 
 Waveflow is an early-stage research project and the ideas are still evolving. Feedback is very

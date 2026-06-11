@@ -1,7 +1,7 @@
 ---
 title: The harness for AI
 parent: Overview
-nav_order: 2
+nav_order: 4
 ---
 
 # Waveflow: the harness for AI

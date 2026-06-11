@@ -6,18 +6,17 @@ nav_order: 3
 
 # The Waveflow flow
 
+In Waveflow, everything *flows* from the underlying [Python model specification](./pymodel.md). A
+**SimPy discrete-event simulation (DES)** runs it **fast** and **bit-exact** using a **calibrated,
+cycle-approximate** timing/resource model; the *same* model generates **HLS codegen** (kernel +
+testbench), which **RTL synthesis / simulation** turns into cycle- and resource-**exact** ground truth.
+
 <p align="center">
   <img src="../assets/waveflow_methodology.svg" width="820"
        alt="Two-loop methodology: a violet build pipeline (Python model, SimPy DES, HLS codegen, RTL synth/sim) with a teal feedback system — Agentic DSE and Functional verification below, Calibration and the Timing/resource model above, and AI assisting codegen and exploration.">
 </p>
 
 ## The build pipeline
-
-A high-level design (architecture + parameters) becomes a **Python model**, which a **SimPy
-discrete-event simulation (DES)** runs **fast** and **bit-exact** using a **calibrated,
-cycle-approximate** timing/resource model. The same model generates **HLS codegen** (kernel +
-testbench), which **RTL synthesis / simulation** turns into cycle- and resource-**exact** ground
-truth.
 
 The whole pipeline is orchestrated by a **`BuildDag`** — a directed graph of build steps (generate
 sources, simulate, synthesize, compare bits) with explicit dependencies between them. Because those
