@@ -1,10 +1,9 @@
 ---
 title: Guide
 parent: Waveflow
-nav_order: 3
+nav_order: 2
 has_children: true
 ---
-
 # Guide
 
 Welcome to Waveflow.  This folder will have guides to use the Waveflow functionality as we develop it.
