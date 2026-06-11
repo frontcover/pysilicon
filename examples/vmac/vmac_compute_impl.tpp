@@ -74,9 +74,9 @@ void vmac_compute_core(
     ap_uint<MEM_AWIDTH> b_addr, ap_int<MEM_AWIDTH> b_rs,
     ap_uint<MEM_AWIDTH> c_addr, ap_int<MEM_AWIDTH> c_rs,
     ap_uint<MEM_AWIDTH> d_addr, ap_int<MEM_AWIDTH> d_rs,
-    bool al_direct, ap_int<DATA_BW> al_re, ap_int<DATA_BW> al_im,
+    bool al_direct, typename vmac_in_au::value_type alpha_imm,
     ap_uint<MEM_AWIDTH> al_addr, ap_int<MEM_AWIDTH> al_stride,
-    bool be_direct, ap_int<DATA_BW> be_re, ap_int<DATA_BW> be_im,
+    bool be_direct, typename vmac_in_au::value_type beta_imm,
     ap_uint<MEM_AWIDTH> be_addr, ap_int<MEM_AWIDTH> be_stride) {
 #pragma HLS INLINE
     // Inline into the synthesizable top so the m_axi reads/writes belong to the top's gmem
@@ -96,9 +96,8 @@ void vmac_compute_core(
     typedef std::complex<ACC_FX> ACC_CX;
     static constexpr int PF = vmac_in_au::pf<MEM_BW>();       // complex columns / word (power of 2)
 
-    // loop-invariant immediate scalars (one complex value each, via the (re, im) constructor)
-    const CX alpha_imm = complex_utils::cx_from_codes<CX>(al_re, al_im);
-    const CX beta_imm = complex_utils::cx_from_codes<CX>(be_re, be_im);
+    // alpha_imm / beta_imm arrive as complex values (the wrapper / top build them once via
+    // complex_utils::cx_from_codes); the indirect (per-column) reads override them below.
 
     // running word indices: row base = addr/PF, advanced by row_stride/PF per row (both exact —
     // regions are PF-aligned; elem_to_word checks it).
@@ -215,6 +214,7 @@ void vmac_compute_core(
 template <int MEM_BW, int MEM_AWIDTH, int DATA_BW, int INT_BITS, int ACC_BW, int OUT_BW,
           bool Q_RND, bool O_SAT, int MAX_COLS>
 void vmac_compute(VmacCmd cmd, ap_uint<MEM_BW>* mem) {
+    typedef typename vmac_in_au::value_type CXIN;
     vmac_compute_core<MEM_BW, MEM_AWIDTH, DATA_BW, INT_BITS, ACC_BW, OUT_BW, Q_RND, O_SAT, MAX_COLS>(
         mem,
         (ap_uint<16>)cmd.n_rows, (ap_uint<16>)cmd.n_cols,
@@ -223,9 +223,11 @@ void vmac_compute(VmacCmd cmd, ap_uint<MEM_BW>* mem) {
         (ap_uint<MEM_AWIDTH>)cmd.b.addr, (ap_int<MEM_AWIDTH>)cmd.b.row_stride,
         (ap_uint<MEM_AWIDTH>)cmd.c.addr, (ap_int<MEM_AWIDTH>)cmd.c.row_stride,
         (ap_uint<MEM_AWIDTH>)cmd.d.addr, (ap_int<MEM_AWIDTH>)cmd.d.row_stride,
-        (bool)cmd.alpha.direct, (ap_int<DATA_BW>)cmd.alpha.re, (ap_int<DATA_BW>)cmd.alpha.im,
+        (bool)cmd.alpha.direct,
+        complex_utils::cx_from_codes<CXIN>((ap_int<DATA_BW>)cmd.alpha.re, (ap_int<DATA_BW>)cmd.alpha.im),
         (ap_uint<MEM_AWIDTH>)cmd.alpha.addr, (ap_int<MEM_AWIDTH>)cmd.alpha.stride,
-        (bool)cmd.beta.direct, (ap_int<DATA_BW>)cmd.beta.re, (ap_int<DATA_BW>)cmd.beta.im,
+        (bool)cmd.beta.direct,
+        complex_utils::cx_from_codes<CXIN>((ap_int<DATA_BW>)cmd.beta.re, (ap_int<DATA_BW>)cmd.beta.im),
         (ap_uint<MEM_AWIDTH>)cmd.beta.addr, (ap_int<MEM_AWIDTH>)cmd.beta.stride);
 }
 

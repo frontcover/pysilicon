@@ -627,11 +627,18 @@ def render_top(cfg: StructCfg, depth: int) -> str:
     lines += [
         "#pragma HLS INTERFACE s_axilite port=return bundle=control",
         "    // Call the scalar-arg core directly (no VmacCmd struct — it mis-decomposes at csynth).",
+        "    // The complex scalars are built locally from the s_axilite (re, im) codes (a flat",
+        "    // std::complex<ap_fixed> by-value param does not DCE; the nested struct did).",
+        "    typedef vmac_impl::vmac_in_au::value_type cx_t;",
+        f"    cx_t alpha = complex_utils::cx_from_codes<cx_t>((ap_int<{cfg.data_bw}>)al_re, "
+        f"(ap_int<{cfg.data_bw}>)al_im);",
+        f"    cx_t beta = complex_utils::cx_from_codes<cx_t>((ap_int<{cfg.data_bw}>)be_re, "
+        f"(ap_int<{cfg.data_bw}>)be_im);",
         f"    vmac_impl::vmac_compute_core<{mbw}, {MEM_AWIDTH}, {cfg.data_bw}, {cfg.int_bits}, "
         f"{cfg.acc_bw}, {cfg.out_bw}, {cfg.q_rnd}, {cfg.o_sat}, {TPUT_MAX_COLS}>(",
         "        gmem, n_rows, n_cols, flags & 1, (flags >> 1) & 1, (flags >> 2) & 1,",
         "        (flags >> 3) & 1, a_addr, a_rs, b_addr, b_rs, c_addr, c_rs, d_addr, d_rs,",
-        "        true, al_re, al_im, 0, 0, true, be_re, be_im, 0, 0);",
+        "        true, alpha, 0, 0, true, beta, 0, 0);",
         "}",
         "",
     ]
