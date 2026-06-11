@@ -1,7 +1,9 @@
 #ifndef WAVEFLOW_COMPLEX_UTILS_HPP
 #define WAVEFLOW_COMPLEX_UTILS_HPP
 
-// Self-contained Vitis HLS complex arithmetic for Waveflow ComplexField elements.
+// Vitis HLS complex toolkit for Waveflow ComplexField elements: full-precision arithmetic plus
+// construct-from-codes / widen / requantize (the only dependency is streamutils_hls.h, for the
+// stored-bits <-> ap_fixed conversion).
 //
 // Mirrors waveflow/utils/complexutils.py exactly: the **explicit re/im formula at FULL
 // PRECISION** (ar*br - ai*bi, ar*bi + ai*br) -- NOT std::complex operator*, which
@@ -23,6 +25,7 @@
 #include <ap_int.h>
 #include <complex>
 
+#include "streamutils_hls.h"   // bits_to_fixed (for cx_from_codes)
 #include "wf_cint.h"
 
 // Keep the float explicit formula as three IEEE-rounded ops (ar*br, ai*bi, then subtract) --
@@ -59,10 +62,17 @@ static inline typename cu_result<C, Comp>::type cu_make(const Comp& re, const Co
 // *_format rules apply.  (A trailing `decltype(...)` return type is both redundant and, for
 // ap_fixed subtraction, mis-deduced -- so the body is the single source of truth.)
 
+// cmult / cadd / csub take **mixed** operand element types (CA, CB): the result type is still
+// deduced from the body, so it follows the native ap_int / ap_fixed / float widening for the
+// actual operand formats -- the same growth the Python *_format rules apply for unequal inputs.
+// Same-type callers (e.g. the complex conformance) just deduce CA == CB; differently-scaled
+// operands (e.g. VMAC's alpha[F] * A·op(B)[2F] -> [3F]) compose without an intermediate widen.
+// The result family follows the first operand CA (both std::complex / both wf_cint in practice).
+
 // --- cmult: (ar*br - ai*bi) + j(ar*bi + ai*br), full precision ------------------
 // Named products (matching cmult's p_rr / p_ii / p_ri / p_ir) keep the op order explicit.
-template <typename C>
-static inline auto cmult(const C& a, const C& b) {
+template <typename CA, typename CB>
+static inline auto cmult(const CA& a, const CB& b) {
 #pragma HLS INLINE
     auto p_rr = cu_re(a) * cu_re(b);
     auto p_ii = cu_im(a) * cu_im(b);
@@ -70,25 +80,25 @@ static inline auto cmult(const C& a, const C& b) {
     auto p_ir = cu_im(a) * cu_re(b);
     auto re = p_rr - p_ii;   // sub_format(P, P) -> (2W+1, 2I+1, signed)
     auto im = p_ri + p_ir;   // add_format(P, P) -> same format
-    return cu_make<C>(re, im);
+    return cu_make<CA>(re, im);
 }
 
 // --- cadd: (ar+br) + j(ai+bi) (add_format: int bits +1; inner signedness rule) --
-template <typename C>
-static inline auto cadd(const C& a, const C& b) {
+template <typename CA, typename CB>
+static inline auto cadd(const CA& a, const CB& b) {
 #pragma HLS INLINE
     auto re = cu_re(a) + cu_re(b);
     auto im = cu_im(a) + cu_im(b);
-    return cu_make<C>(re, im);
+    return cu_make<CA>(re, im);
 }
 
 // --- csub: (ar-br) + j(ai-bi) (sub_format: always signed) -----------------------
-template <typename C>
-static inline auto csub(const C& a, const C& b) {
+template <typename CA, typename CB>
+static inline auto csub(const CA& a, const CB& b) {
 #pragma HLS INLINE
     auto re = cu_re(a) - cu_re(b);
     auto im = cu_im(a) - cu_im(b);
-    return cu_make<C>(re, im);
+    return cu_make<CA>(re, im);
 }
 
 // --- conj: ar - j(ai) (result (W+1, I+1, signed); im = 0 - ai, re widened to match) --
@@ -100,6 +110,43 @@ static inline auto conj(const C& a) {
     auto im = zero - im_in;        // 0 - ai (sub widens to (W+1, I+1, signed)) == cx.conj
     decltype(im) re = cu_re(a);    // widen re losslessly into the same format
     return cu_make<C>(re, im);
+}
+
+// --- construct / widen / requantize: the rest of the complex toolkit ------------
+// These complete the kit so a datapath stays purely complex-typed -- build an element from its
+// stored codes, losslessly widen into a wider accumulator element, and requantize down to an
+// output element -- with no hand-split re/im.  (std::complex<ap_fixed> elements.)
+
+// cx_from_codes: build a std::complex<ap_fixed> element from its stored (re, im) integer codes,
+// i.e. the generated ComplexField (re, im) constructor (stored bits -> ap_fixed value).
+template <typename CXT, int W>
+static inline CXT cx_from_codes(ap_int<W> re, ap_int<W> im) {
+#pragma HLS INLINE
+    typedef typename CXT::value_type FX;
+    return CXT(streamutils::bits_to_fixed<FX>((ap_uint<W>)re),
+               streamutils::bits_to_fixed<FX>((ap_uint<W>)im));
+}
+
+// cwiden: value-preserving widen of a complex value into element type ACC -- the lossless
+// counterpart to cx_requantize (ACC is wide enough that no rounding / overflow occurs), so a
+// binary-point alignment or an accumulate into a wider element is just this widen.
+template <typename ACC, typename C>
+static inline ACC cwiden(const C& z) {
+#pragma HLS INLINE
+    typedef typename ACC::value_type ACC_FX;
+    return ACC((ACC_FX)z.real(), (ACC_FX)z.imag());
+}
+
+// cx_requantize: the single lossy step -- assign the (wide) value into REQ, an ap_fixed with
+// the output width/scale + round/saturate modes (== fixputils.quantize), then store the bits in
+// the output element type CXO (same width/scale; its modes are irrelevant to the stored bits).
+template <typename CXO, typename REQ, typename C>
+static inline CXO cx_requantize(const C& z) {
+#pragma HLS INLINE
+    typedef typename CXO::value_type OUT_FX;
+    REQ yr = z.real();
+    REQ yi = z.imag();
+    return CXO((OUT_FX)yr, (OUT_FX)yi);
 }
 
 }  // namespace complex_utils
