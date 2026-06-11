@@ -61,11 +61,16 @@ except ModuleNotFoundError:  # direct execution from the example dir
     from vmac_cmd import Region, Scalar, VmacCmd  # type: ignore[no-redef]
 
 _SOURCE_DIR = Path(__file__).resolve().parent
+_BUILD_DIR = Path(__file__).resolve().parents[2] / "waveflow" / "build"  # complex_utils.hpp / wf_cint.h
 INCLUDE_DIR = "include"
 WORD_BW_SUPPORTED = [32, 64]                 # cmd schema word widths
 MEM_WORD_BWS = [16, 32, 64, 128]             # m_axi widths the array-utils support (PF sweep)
 CMD_NWORDS = 16                              # VmacCmd.serialize(word_bw=32) word count
 MAX_COLS_CAP = 16                            # acc[] capacity in the kernel (>= any case n_cols)
+MEM_AWIDTH = 32                              # cmd address width (the kernel's MEM_AWIDTH param)
+# the hand-written hook + the complex-arithmetic header it pulls in (no integer-code bridging)
+HOOK_FILES = ("vmac_compute_impl.tpp",)
+BUILD_HDRS = ("complex_utils.hpp", "wf_cint.h")
 
 
 # --- structural configs (compile-time kernel widths) --------------------------
@@ -373,8 +378,9 @@ def render_tb(cfg: StructCfg) -> str:
         "        for (int i = 0; i < ncmd; ++i) cmdw[i] = (ap_uint<32>)cw[i];",
         "        vmac_impl::VmacCmd cmd; cmd.read_array<32>(cmdw);",
         f"        for (int i = 0; i < nmem; ++i) mem[i] = (ap_uint<{cfg.mem_dwidth}>)mw[i];",
-        f"        vmac_impl::vmac_compute<{cfg.mem_dwidth}, {cfg.data_bw}, {cfg.int_bits}, "
-        f"{cfg.acc_bw}, {cfg.out_bw}, {cfg.q_rnd}, {cfg.o_sat}, {MAX_COLS_CAP}>(cmd, mem);",
+        f"        vmac_impl::vmac_compute<{cfg.mem_dwidth}, {MEM_AWIDTH}, {cfg.data_bw}, "
+        f"{cfg.int_bits}, {cfg.acc_bw}, {cfg.out_bw}, {cfg.q_rnd}, {cfg.o_sat}, "
+        f"{MAX_COLS_CAP}>(cmd, mem);",
         "        std::ofstream o(of.c_str());",
         "        for (int i = 0; i < nmem; ++i) o << (unsigned long long)mem[i] << char(10);",
         "    }",
@@ -423,9 +429,11 @@ def gen_config_sources(cfg: StructCfg, cfg_dir: Path) -> list[dict]:
         dag.add(ArrayUtilsStep(cfg.out_elem(), MEM_WORD_BWS))
     dag.run(bc)
 
-    # the hand-written hook + its helpers travel alongside the generated headers
-    for fname in ("vmac_compute_impl.tpp", "vmac_utils.h"):
+    # the hand-written hook + the complex-arithmetic header travel with the generated headers
+    for fname in HOOK_FILES:
         shutil.copy(_SOURCE_DIR / fname, cfg_dir / fname)
+    for fname in BUILD_HDRS:
+        shutil.copy(_BUILD_DIR / fname, cfg_dir / fname)
     (cfg_dir / "kernel.cpp").write_text(render_tb(cfg), encoding="utf-8")
     (cfg_dir / "run.tcl").write_text(_RUN_TCL, encoding="utf-8")
 
@@ -619,8 +627,8 @@ def render_top(cfg: StructCfg, depth: int) -> str:
     lines += [
         "#pragma HLS INTERFACE s_axilite port=return bundle=control",
         "    // Call the scalar-arg core directly (no VmacCmd struct — it mis-decomposes at csynth).",
-        f"    vmac_impl::vmac_compute_core<{mbw}, {cfg.data_bw}, {cfg.int_bits}, {cfg.acc_bw}, "
-        f"{cfg.out_bw}, {cfg.q_rnd}, {cfg.o_sat}, {TPUT_MAX_COLS}>(",
+        f"    vmac_impl::vmac_compute_core<{mbw}, {MEM_AWIDTH}, {cfg.data_bw}, {cfg.int_bits}, "
+        f"{cfg.acc_bw}, {cfg.out_bw}, {cfg.q_rnd}, {cfg.o_sat}, {TPUT_MAX_COLS}>(",
         "        gmem, n_rows, n_cols, flags & 1, (flags >> 1) & 1, (flags >> 2) & 1,",
         "        (flags >> 3) & 1, a_addr, a_rs, b_addr, b_rs, c_addr, c_rs, d_addr, d_rs,",
         "        true, al_re, al_im, 0, 0, true, be_re, be_im, 0, 0);",
@@ -702,8 +710,10 @@ def gen_tput_config(cfg: StructCfg, tdir: Path) -> dict:
         dag.add(DataSchemaStep(sch, word_bw_supported=WORD_BW_SUPPORTED, include_dir=INCLUDE_DIR))
     dag.add(ArrayUtilsStep(cfg.in_elem(), MEM_WORD_BWS))
     dag.run(bc)
-    for fname in ("vmac_compute_impl.tpp", "vmac_utils.h"):
+    for fname in HOOK_FILES:
         shutil.copy(_SOURCE_DIR / fname, tdir / fname)
+    for fname in BUILD_HDRS:
+        shutil.copy(_BUILD_DIR / fname, tdir / fname)
 
     scalars, mem_in_w, mem_exp_w = _tput_vectors(cfg)
     nmem = len(mem_in_w)

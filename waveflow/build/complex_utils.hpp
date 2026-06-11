@@ -59,10 +59,17 @@ static inline typename cu_result<C, Comp>::type cu_make(const Comp& re, const Co
 // *_format rules apply.  (A trailing `decltype(...)` return type is both redundant and, for
 // ap_fixed subtraction, mis-deduced -- so the body is the single source of truth.)
 
+// cmult / cadd / csub take **mixed** operand element types (CA, CB): the result type is still
+// deduced from the body, so it follows the native ap_int / ap_fixed / float widening for the
+// actual operand formats -- the same growth the Python *_format rules apply for unequal inputs.
+// Same-type callers (e.g. the complex conformance) just deduce CA == CB; differently-scaled
+// operands (e.g. VMAC's alpha[F] * A·op(B)[2F] -> [3F]) compose without an intermediate widen.
+// The result family follows the first operand CA (both std::complex / both wf_cint in practice).
+
 // --- cmult: (ar*br - ai*bi) + j(ar*bi + ai*br), full precision ------------------
 // Named products (matching cmult's p_rr / p_ii / p_ri / p_ir) keep the op order explicit.
-template <typename C>
-static inline auto cmult(const C& a, const C& b) {
+template <typename CA, typename CB>
+static inline auto cmult(const CA& a, const CB& b) {
 #pragma HLS INLINE
     auto p_rr = cu_re(a) * cu_re(b);
     auto p_ii = cu_im(a) * cu_im(b);
@@ -70,25 +77,25 @@ static inline auto cmult(const C& a, const C& b) {
     auto p_ir = cu_im(a) * cu_re(b);
     auto re = p_rr - p_ii;   // sub_format(P, P) -> (2W+1, 2I+1, signed)
     auto im = p_ri + p_ir;   // add_format(P, P) -> same format
-    return cu_make<C>(re, im);
+    return cu_make<CA>(re, im);
 }
 
 // --- cadd: (ar+br) + j(ai+bi) (add_format: int bits +1; inner signedness rule) --
-template <typename C>
-static inline auto cadd(const C& a, const C& b) {
+template <typename CA, typename CB>
+static inline auto cadd(const CA& a, const CB& b) {
 #pragma HLS INLINE
     auto re = cu_re(a) + cu_re(b);
     auto im = cu_im(a) + cu_im(b);
-    return cu_make<C>(re, im);
+    return cu_make<CA>(re, im);
 }
 
 // --- csub: (ar-br) + j(ai-bi) (sub_format: always signed) -----------------------
-template <typename C>
-static inline auto csub(const C& a, const C& b) {
+template <typename CA, typename CB>
+static inline auto csub(const CA& a, const CB& b) {
 #pragma HLS INLINE
     auto re = cu_re(a) - cu_re(b);
     auto im = cu_im(a) - cu_im(b);
-    return cu_make<C>(re, im);
+    return cu_make<CA>(re, im);
 }
 
 // --- conj: ar - j(ai) (result (W+1, I+1, signed); im = 0 - ai, re widened to match) --
