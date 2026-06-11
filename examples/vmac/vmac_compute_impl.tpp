@@ -108,7 +108,7 @@ void vmac_compute_core(
 
     // per-column complex accumulators (reduce_rows): summed over rows.
     ACC_CX acc[MAX_COLS];
-#pragma HLS ARRAY_PARTITION variable=acc cyclic factor=16 dim=1
+#pragma HLS ARRAY_PARTITION variable=acc cyclic factor=PF dim=1
     if (reduce_rows) {
         for (int j = 0; j < (int)n_cols; ++j) {
 #pragma HLS PIPELINE II=1
@@ -217,18 +217,18 @@ void vmac_compute(VmacCmd cmd, ap_uint<MEM_BW>* mem) {
     typedef typename vmac_in_au::value_type CXIN;
     vmac_compute_core<MEM_BW, MEM_AWIDTH, DATA_BW, INT_BITS, ACC_BW, OUT_BW, Q_RND, O_SAT, MAX_COLS>(
         mem,
-        (ap_uint<16>)cmd.n_rows, (ap_uint<16>)cmd.n_cols,
+        cmd.n_rows, cmd.n_cols,
         (bool)cmd.b_one, (bool)cmd.c_zero, (bool)cmd.b_conj, (bool)cmd.reduce_rows,
-        (ap_uint<MEM_AWIDTH>)cmd.a.addr, (ap_int<MEM_AWIDTH>)cmd.a.row_stride,
-        (ap_uint<MEM_AWIDTH>)cmd.b.addr, (ap_int<MEM_AWIDTH>)cmd.b.row_stride,
-        (ap_uint<MEM_AWIDTH>)cmd.c.addr, (ap_int<MEM_AWIDTH>)cmd.c.row_stride,
-        (ap_uint<MEM_AWIDTH>)cmd.d.addr, (ap_int<MEM_AWIDTH>)cmd.d.row_stride,
+        cmd.a.addr, cmd.a.row_stride,
+        cmd.b.addr, cmd.b.row_stride,
+        cmd.c.addr, cmd.c.row_stride,
+        cmd.d.addr, cmd.d.row_stride,
         (bool)cmd.alpha.direct,
-        complex_utils::cx_from_codes<CXIN>((ap_int<DATA_BW>)cmd.alpha.re, (ap_int<DATA_BW>)cmd.alpha.im),
-        (ap_uint<MEM_AWIDTH>)cmd.alpha.addr, (ap_int<MEM_AWIDTH>)cmd.alpha.stride,
+        complex_utils::cx_from_codes<CXIN>(cmd.alpha.re, cmd.alpha.im),
+        cmd.alpha.addr, cmd.alpha.stride,
         (bool)cmd.beta.direct,
-        complex_utils::cx_from_codes<CXIN>((ap_int<DATA_BW>)cmd.beta.re, (ap_int<DATA_BW>)cmd.beta.im),
-        (ap_uint<MEM_AWIDTH>)cmd.beta.addr, (ap_int<MEM_AWIDTH>)cmd.beta.stride);
+        complex_utils::cx_from_codes<CXIN>(cmd.beta.re, cmd.beta.im),
+        cmd.beta.addr, cmd.beta.stride);
 }
 
 }  // namespace vmac_impl
