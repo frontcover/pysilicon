@@ -45,6 +45,20 @@
 
 namespace vmac_impl {
 
+// Operand code <-> packed ComplexField component, via the generated serialization's
+// fixed<->bits helpers (ap_fixed's raw .V is not directly convertible to ap_int).  fx_code
+// reinterprets the stored bits as the signed integer code; fx_from_code is its inverse.
+template <typename FX>
+static inline ap_int<FX::width> fx_code(const FX& x) {
+#pragma HLS INLINE
+    return (ap_int<FX::width>)streamutils::fixed_to_bits<FX>(x);
+}
+template <typename FX>
+static inline FX fx_from_code(ap_int<FX::width> code) {
+#pragma HLS INLINE
+    return streamutils::bits_to_fixed<FX>((ap_uint<FX::width>)code);
+}
+
 template <int MEM_BW, int DATA_BW, int INT_BITS, int ACC_BW, int OUT_BW,
           bool Q_RND, bool O_SAT, int MAX_COLS>
 void vmac_compute(VmacCmd cmd, ap_uint<MEM_BW>* mem) {
@@ -104,13 +118,13 @@ void vmac_compute(VmacCmd cmd, ap_uint<MEM_BW>* mem) {
 #pragma HLS ARRAY_PARTITION variable=a_lane complete dim=1
 #pragma HLS ARRAY_PARTITION variable=b_lane complete dim=1
 #pragma HLS ARRAY_PARTITION variable=c_lane complete dim=1
-            vmac_in_au::template read_array_elem<MEM_BW>(
+            vmac_in_au::read_array_elem<MEM_BW>(
                 mem + (a_addr + i * a_rs + col0) / PF, a_lane, cols);
             if (!b_one)
-                vmac_in_au::template read_array_elem<MEM_BW>(
+                vmac_in_au::read_array_elem<MEM_BW>(
                     mem + (b_addr + i * b_rs + col0) / PF, b_lane, cols);
             if (!c_zero)
-                vmac_in_au::template read_array_elem<MEM_BW>(
+                vmac_in_au::read_array_elem<MEM_BW>(
                     mem + (c_addr + i * c_rs + col0) / PF, c_lane, cols);
 
             CXO y_lane[PF];
@@ -120,7 +134,7 @@ void vmac_compute(VmacCmd cmd, ap_uint<MEM_BW>* mem) {
                 const int j = col0 + k;
                 if (j >= n_cols) continue;
 
-                const A_T are = a_lane[k].real().V, aim = a_lane[k].imag().V;
+                const A_T are = fx_code(a_lane[k].real()), aim = fx_code(a_lane[k].imag());
 
                 // per-column alpha/beta (indirect): one complex element per column, read from
                 // the word containing it (arbitrary alignment -> pick the lane).
@@ -128,14 +142,14 @@ void vmac_compute(VmacCmd cmd, ap_uint<MEM_BW>* mem) {
                 if (!al_direct) {
                     const int e = (int)cmd.alpha.addr + j * (int)cmd.alpha.stride;
                     CX sb[PF];
-                    vmac_in_au::template read_array_elem<MEM_BW>(mem + e / PF, sb, PF);
-                    alre = sb[e % PF].real().V; alim = sb[e % PF].imag().V;
+                    vmac_in_au::read_array_elem<MEM_BW>(mem + e / PF, sb, PF);
+                    alre = fx_code(sb[e % PF].real()); alim = fx_code(sb[e % PF].imag());
                 }
                 if (!be_direct && !c_zero) {
                     const int e = (int)cmd.beta.addr + j * (int)cmd.beta.stride;
                     CX sb[PF];
-                    vmac_in_au::template read_array_elem<MEM_BW>(mem + e / PF, sb, PF);
-                    bere = sb[e % PF].real().V; beim = sb[e % PF].imag().V;
+                    vmac_in_au::read_array_elem<MEM_BW>(mem + e / PF, sb, PF);
+                    bere = fx_code(sb[e % PF].real()); beim = fx_code(sb[e % PF].imag());
                 }
 
                 // A * op(B)  (explicit re/im, full precision).  op(B): identity or conj.
@@ -143,7 +157,7 @@ void vmac_compute(VmacCmd cmd, ap_uint<MEM_BW>* mem) {
                 if (b_one) {
                     abre = (ACC_T)are; abim = (ACC_T)aim;
                 } else {
-                    const A_T bre = b_lane[k].real().V, bim = b_lane[k].imag().V;
+                    const A_T bre = fx_code(b_lane[k].real()), bim = fx_code(b_lane[k].imag());
                     const ACC_T obre = bre;
                     const ACC_T obim = b_conj ? (ACC_T)(-bim) : (ACC_T)bim;
                     abre = (ACC_T)are * obre - (ACC_T)aim * obim;
@@ -154,7 +168,7 @@ void vmac_compute(VmacCmd cmd, ap_uint<MEM_BW>* mem) {
                 ACC_T tim = (ACC_T)alre * abim + (ACC_T)alim * abre;
                 // + beta * C  (aligned up to the accumulator fractional depth when !b_one)
                 if (!c_zero) {
-                    const A_T cre = c_lane[k].real().V, cim = c_lane[k].imag().V;
+                    const A_T cre = fx_code(c_lane[k].real()), cim = fx_code(c_lane[k].imag());
                     ACC_T bcre = (ACC_T)bere * (ACC_T)cre - (ACC_T)beim * (ACC_T)cim;
                     ACC_T bcim = (ACC_T)bere * (ACC_T)cim + (ACC_T)beim * (ACC_T)cre;
                     tre += bcre << c_align;
@@ -165,14 +179,13 @@ void vmac_compute(VmacCmd cmd, ap_uint<MEM_BW>* mem) {
                     acc_re[j] += tre;
                     acc_im[j] += tim;
                 } else {
-                    OUT_FX yr, yi;
-                    yr.V = vmac_requantize<OUT_BW, Q_RND, O_SAT>(tre, shift);
-                    yi.V = vmac_requantize<OUT_BW, Q_RND, O_SAT>(tim, shift);
+                    OUT_FX yr = fx_from_code<OUT_FX>(vmac_requantize<OUT_BW, Q_RND, O_SAT>(tre, shift));
+                    OUT_FX yi = fx_from_code<OUT_FX>(vmac_requantize<OUT_BW, Q_RND, O_SAT>(tim, shift));
                     y_lane[k] = CXO(yr, yi);
                 }
             }
             if (!reduce_rows)
-                vmac_out_au::template write_array_elem<MEM_BW>(
+                vmac_out_au::write_array_elem<MEM_BW>(
                     y_lane, mem + (d_addr + i * d_rs + col0) / PF, cols);
         }
     }
@@ -188,12 +201,11 @@ void vmac_compute(VmacCmd cmd, ap_uint<MEM_BW>* mem) {
 #pragma HLS UNROLL
                 const int j = col0 + k;
                 if (j >= n_cols) continue;
-                OUT_FX yr, yi;
-                yr.V = vmac_requantize<OUT_BW, Q_RND, O_SAT>(acc_re[j], shift);
-                yi.V = vmac_requantize<OUT_BW, Q_RND, O_SAT>(acc_im[j], shift);
+                OUT_FX yr = fx_from_code<OUT_FX>(vmac_requantize<OUT_BW, Q_RND, O_SAT>(acc_re[j], shift));
+                OUT_FX yi = fx_from_code<OUT_FX>(vmac_requantize<OUT_BW, Q_RND, O_SAT>(acc_im[j], shift));
                 y_lane[k] = CXO(yr, yi);
             }
-            vmac_out_au::template write_array_elem<MEM_BW>(
+            vmac_out_au::write_array_elem<MEM_BW>(
                 y_lane, mem + (d_addr + col0) / PF, cols);
         }
     }
