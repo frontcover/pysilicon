@@ -59,9 +59,22 @@ static inline FX fx_from_code(ap_int<FX::width> code) {
     return streamutils::bits_to_fixed<FX>((ap_uint<FX::width>)code);
 }
 
+// The datapath, taking the command as **plain scalars** (not the VmacCmd struct).  The
+// synthesizable top calls this directly: a nested struct passed by value mis-decomposes
+// through HLS's Array/Struct optimization at csynth (loop bounds fold to 0 -> the kernel is
+// DCE'd), whereas scalar s_axilite args lower cleanly.  vmac_compute(cmd, mem) below is the
+// thin struct-taking wrapper the csim conformance harness drives.
 template <int MEM_BW, int DATA_BW, int INT_BITS, int ACC_BW, int OUT_BW,
           bool Q_RND, bool O_SAT, int MAX_COLS>
-void vmac_compute(VmacCmd cmd, ap_uint<MEM_BW>* mem) {
+void vmac_compute_core(
+    ap_uint<MEM_BW>* mem,
+    int n_rows, int n_cols, bool b_one, bool c_zero, bool b_conj, bool reduce_rows,
+    int a_addr, int a_rs, int b_addr, int b_rs, int c_addr, int c_rs, int d_addr, int d_rs,
+    bool al_direct, int al_re, int al_im, int al_addr, int al_stride,
+    bool be_direct, int be_re, int be_im, int be_addr, int be_stride) {
+#pragma HLS INLINE
+    // Inline into the synthesizable top so the m_axi reads/writes belong to the top's gmem
+    // port (kept as a separate module, the top would have "no outputs" and gmem would dangle).
     typedef ap_int<DATA_BW> A_T;              // operand (re/im) integer code
     typedef ap_int<ACC_BW> ACC_T;             // full-precision integer accumulator
     typedef typename vmac_in_au::value_type CX;    // std::complex<ap_fixed<DATA_BW,…>>
@@ -70,30 +83,17 @@ void vmac_compute(VmacCmd cmd, ap_uint<MEM_BW>* mem) {
     static const int F_IN = DATA_BW - INT_BITS;
     static const int PF = MEM_BW / (2 * DATA_BW);  // complex columns / word
 
-    const int n_rows = (int)cmd.n_rows;
-    const int n_cols = (int)cmd.n_cols;
-    const bool b_one = (bool)cmd.b_one;
-    const bool c_zero = (bool)cmd.c_zero;
-    const bool b_conj = (bool)cmd.b_conj;
-    const bool reduce_rows = (bool)cmd.reduce_rows;
-
     // Derived requantize shift: F_acc = (b_one?2:3)*F_in, F_out = F_in -> SHIFT = F_acc - F_in.
     const int shift = (b_one ? 1 : 2) * F_IN;
     // beta*C lands at scale 2*F_in; the alpha*A*op(B) term sits at scale (b_one?2:3)*F_in, so
     // when !b_one the addend must be aligned up by F_in to the accumulator's fractional depth.
     const int c_align = b_one ? 0 : F_IN;
 
-    const int a_addr = (int)cmd.a.addr, a_rs = (int)cmd.a.row_stride;
-    const int b_addr = (int)cmd.b.addr, b_rs = (int)cmd.b.row_stride;
-    const int c_addr = (int)cmd.c.addr, c_rs = (int)cmd.c.row_stride;
-    const int d_addr = (int)cmd.d.addr, d_rs = (int)cmd.d.row_stride;
-
     // alpha / beta immediates (direct); per-column (indirect) reads are loaded per column.
-    const bool al_direct = (bool)cmd.alpha.direct, be_direct = (bool)cmd.beta.direct;
-    const A_T al_re_imm = (A_T)(ap_int<DATA_BW>)cmd.alpha.re;
-    const A_T al_im_imm = (A_T)(ap_int<DATA_BW>)cmd.alpha.im;
-    const A_T be_re_imm = (A_T)(ap_int<DATA_BW>)cmd.beta.re;
-    const A_T be_im_imm = (A_T)(ap_int<DATA_BW>)cmd.beta.im;
+    const A_T al_re_imm = (A_T)(ap_int<DATA_BW>)al_re;
+    const A_T al_im_imm = (A_T)(ap_int<DATA_BW>)al_im;
+    const A_T be_re_imm = (A_T)(ap_int<DATA_BW>)be_re;
+    const A_T be_im_imm = (A_T)(ap_int<DATA_BW>)be_im;
 
     // per-column accumulators (reduce_rows): one complex ACC_T per column, summed over rows.
     ACC_T acc_re[MAX_COLS], acc_im[MAX_COLS];
@@ -140,13 +140,13 @@ void vmac_compute(VmacCmd cmd, ap_uint<MEM_BW>* mem) {
                 // the word containing it (arbitrary alignment -> pick the lane).
                 A_T alre = al_re_imm, alim = al_im_imm, bere = be_re_imm, beim = be_im_imm;
                 if (!al_direct) {
-                    const int e = (int)cmd.alpha.addr + j * (int)cmd.alpha.stride;
+                    const int e = al_addr + j * al_stride;
                     CX sb[PF];
                     vmac_in_au::read_array_elem<MEM_BW>(mem + e / PF, sb, PF);
                     alre = fx_code(sb[e % PF].real()); alim = fx_code(sb[e % PF].imag());
                 }
                 if (!be_direct && !c_zero) {
-                    const int e = (int)cmd.beta.addr + j * (int)cmd.beta.stride;
+                    const int e = be_addr + j * be_stride;
                     CX sb[PF];
                     vmac_in_au::read_array_elem<MEM_BW>(mem + e / PF, sb, PF);
                     bere = fx_code(sb[e % PF].real()); beim = fx_code(sb[e % PF].imag());
@@ -209,6 +209,24 @@ void vmac_compute(VmacCmd cmd, ap_uint<MEM_BW>* mem) {
                 y_lane, mem + (d_addr + col0) / PF, cols);
         }
     }
+}
+
+// Struct-taking wrapper — extracts the command's scalar fields and calls the core.  Used by
+// the csim conformance harness (where the by-value struct is fine); the synthesizable top
+// calls vmac_compute_core directly to avoid the nested-struct csynth pitfall above.
+template <int MEM_BW, int DATA_BW, int INT_BITS, int ACC_BW, int OUT_BW,
+          bool Q_RND, bool O_SAT, int MAX_COLS>
+void vmac_compute(VmacCmd cmd, ap_uint<MEM_BW>* mem) {
+    vmac_compute_core<MEM_BW, DATA_BW, INT_BITS, ACC_BW, OUT_BW, Q_RND, O_SAT, MAX_COLS>(
+        mem,
+        (int)cmd.n_rows, (int)cmd.n_cols, (bool)cmd.b_one, (bool)cmd.c_zero,
+        (bool)cmd.b_conj, (bool)cmd.reduce_rows,
+        (int)cmd.a.addr, (int)cmd.a.row_stride, (int)cmd.b.addr, (int)cmd.b.row_stride,
+        (int)cmd.c.addr, (int)cmd.c.row_stride, (int)cmd.d.addr, (int)cmd.d.row_stride,
+        (bool)cmd.alpha.direct, (int)cmd.alpha.re, (int)cmd.alpha.im,
+        (int)cmd.alpha.addr, (int)cmd.alpha.stride,
+        (bool)cmd.beta.direct, (int)cmd.beta.re, (int)cmd.beta.im,
+        (int)cmd.beta.addr, (int)cmd.beta.stride);
 }
 
 }  // namespace vmac_impl

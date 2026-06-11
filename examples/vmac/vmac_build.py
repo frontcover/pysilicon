@@ -534,6 +534,250 @@ class CsimStep(BuildStep):
         return {"csim_report": out}
 
 
+# --- throughput sweep (mem_dwidth scaling) ------------------------------------
+# One synthesized accelerator per mem_dwidth; PF = mem_dwidth / (2*data_bw) complex columns
+# packed per memory word.  With the inner column loop unrolled to PF lanes, the per-row column
+# iterations fall ~1/PF, so cosim transaction cycles should roughly halve as mem_dwidth doubles
+# — the bus-width parallelism the wide packing is meant to deliver.  The cosim also re-checks
+# the result against the golden, so it validates the PF > 1 lane packing (which the PF = 1
+# csim conformance does not exercise).
+TPUT_MEM_BWS = [16, 32, 64]                  # PF = 1, 2, 4  (element = 2*data_bw = 16 bits)
+TPUT_N_ROWS = 8
+TPUT_N_COLS = 64                             # multiple of every PF; row_stride = N_COLS
+TPUT_MAX_COLS = 64                           # kernel acc[] capacity for the sweep
+
+
+def _tput_cfg(mem_bw: int) -> StructCfg:
+    return StructCfg(out_bw=8, q_rnd=0, o_sat=0, mem_dwidth=mem_bw)
+
+
+def _tput_vectors(cfg: StructCfg):
+    """The fixed throughput problem: a Hadamard product D = A·B (c_zero, alpha = 1.0) over an
+    N_ROWS x N_COLS image — a per-element op whose inner column loop is the unroll target.
+
+    Returns ``(scalar_args, mem_in_words, mem_exp_words)`` — the cmd is reduced to the scalar
+    fields the top rebuilds it from (so it crosses into RTL as plain s_axilite registers, not a
+    nested struct that cosim mis-marshals)."""
+    rng = np.random.default_rng(7)
+    n, m = TPUT_N_ROWS, TPUT_N_COLS
+    a = _pair(rng.integers(-30, 31, (n, m)), rng.integers(-30, 31, (n, m)))
+    b = _pair(rng.integers(-30, 31, (n, m)), rng.integers(-30, 31, (n, m)))
+    c = _pair(np.zeros((n, m)), np.zeros((n, m)))
+    cmd, mem = build(cfg.accel(), dict(c_zero=1), a, b, c, _pair(16, 0), _pair(0, 0))
+    post = mem.copy()
+    cfg.accel().execute(cmd, post)
+    in_elem = cfg.in_elem()
+    flags = (int(cmd.b_one) | (int(cmd.c_zero) << 1)
+             | (int(cmd.b_conj) << 2) | (int(cmd.reduce_rows) << 3))
+    scalars = [int(cmd.n_rows), int(cmd.n_cols),
+               int(cmd.a.addr), int(cmd.a.row_stride), int(cmd.b.addr), int(cmd.b.row_stride),
+               int(cmd.c.addr), int(cmd.c.row_stride), int(cmd.d.addr), int(cmd.d.row_stride),
+               int(cmd.alpha.re), int(cmd.alpha.im), int(cmd.beta.re), int(cmd.beta.im), flags]
+    return (scalars,
+            _mem_words(mem, in_elem, cfg.mem_dwidth),
+            _mem_words(post, in_elem, cfg.mem_dwidth))
+
+
+_TOP_ARGS = ("int n_rows, int n_cols, int a_addr, int a_rs, int b_addr, int b_rs, "
+             "int c_addr, int c_rs, int d_addr, int d_rs, int al_re, int al_im, "
+             "int be_re, int be_im, unsigned flags")
+
+
+def _vmac_hpp(cfg: StructCfg) -> str:
+    in_ns = _array_utils_namespace(cfg.in_elem())
+    in_hdr = _array_utils_filename(cfg.in_elem())
+    return "\n".join([
+        "#ifndef VMAC_HPP", "#define VMAC_HPP",
+        "#include <ap_int.h>", "#include <ap_fixed.h>", "#include <complex>",
+        f'#include "{INCLUDE_DIR}/vmac_cmd_data_bw{cfg.data_bw}_mem_awidth32.h"',
+        f'#include "{in_hdr}"',
+        "namespace vmac_impl {",
+        f"typedef VmacCmd_data_bw{cfg.data_bw}_mem_awidth32 VmacCmd;",
+        f"namespace vmac_in_au  = ::{in_ns};",
+        f"namespace vmac_out_au = ::{in_ns};",
+        "}",
+        '#include "vmac_compute_impl.tpp"',
+        "#endif", "",
+    ])
+
+
+def render_top(cfg: StructCfg, depth: int) -> str:
+    mbw = cfg.mem_dwidth
+    scalar_ports = ("n_rows n_cols a_addr a_rs b_addr b_rs c_addr c_rs d_addr d_rs "
+                    "al_re al_im be_re be_im flags").split()
+    lines = [
+        "// Synthesizable VMAC top — m_axi shared memory + scalar s_axilite command fields —",
+        "// wrapping the vmac_compute hook at one structural mem_dwidth (PF = mem_dwidth/(2*data_bw)).",
+        "// The command is rebuilt from plain scalar registers (a nested struct mis-marshals over",
+        "// cosim's s_axilite adapter), then handed to the same .tpp datapath the csim conformance runs.",
+        '#include "vmac.hpp"',
+        "",
+        f"void vmac(ap_uint<{mbw}>* gmem, {_TOP_ARGS}) {{",
+        f"#pragma HLS INTERFACE m_axi port=gmem offset=slave bundle=gmem depth={depth}",
+    ]
+    lines += [f"#pragma HLS INTERFACE s_axilite port={p} bundle=control" for p in scalar_ports]
+    lines += [
+        "#pragma HLS INTERFACE s_axilite port=return bundle=control",
+        "    // Call the scalar-arg core directly (no VmacCmd struct — it mis-decomposes at csynth).",
+        f"    vmac_impl::vmac_compute_core<{mbw}, {cfg.data_bw}, {cfg.int_bits}, {cfg.acc_bw}, "
+        f"{cfg.out_bw}, {cfg.q_rnd}, {cfg.o_sat}, {TPUT_MAX_COLS}>(",
+        "        gmem, n_rows, n_cols, flags & 1, (flags >> 1) & 1, (flags >> 2) & 1,",
+        "        (flags >> 3) & 1, a_addr, a_rs, b_addr, b_rs, c_addr, c_rs, d_addr, d_rs,",
+        "        true, al_re, al_im, 0, 0, true, be_re, be_im, 0, 0);",
+        "}",
+        "",
+    ]
+    return "\n".join(lines)
+
+
+def render_cosim_tb(cfg: StructCfg, scalars: list[int], nmem: int, depth: int) -> str:
+    mbw = cfg.mem_dwidth
+    call_args = ", ".join(str(v) for v in scalars)
+    return "\n".join([
+        "// Cosim testbench: load the mem image, drive the vmac top with the (baked) command",
+        "// fields, and re-check the result against the golden — so cosim validates the PF>1 lane",
+        "// packing as well as the timing.",
+        '#include "vmac.hpp"',
+        "#include <fstream>", "#include <iostream>", "#include <string>", "#include <vector>",
+        "",
+        f"void vmac(ap_uint<{mbw}>* gmem, {_TOP_ARGS});",
+        "",
+        "static std::vector<unsigned long long> rw(const std::string& p) {",
+        "    std::ifstream f(p.c_str()); std::vector<unsigned long long> v; unsigned long long x;",
+        "    while (f >> x) v.push_back(x); return v;",
+        "}",
+        "",
+        f"static ap_uint<{mbw}> mem[{depth}];",
+        "",
+        "int main(int argc, char** argv) {",
+        "    std::string d = argv[1];",
+        '    std::vector<unsigned long long> mw = rw(d + "/mem_in.txt");',
+        '    std::vector<unsigned long long> ew = rw(d + "/mem_exp.txt");',
+        f"    if ((int)mw.size() < {nmem} || (int)ew.size() < {nmem}) {{",
+        '        std::cerr << "VMAC_TB_ERROR: short vector files" << char(10); return 2; }',
+        f"    for (int i = 0; i < {nmem}; ++i) mem[i] = (ap_uint<{mbw}>)mw[i];",
+        f"    vmac(mem, {call_args});",
+        "    int bad = 0;",
+        f"    for (int i = 0; i < {nmem}; ++i) if ((unsigned long long)mem[i] != ew[i]) ++bad;",
+        '    if (bad) { std::cerr << "VMAC_COSIM_MISMATCH " << bad << char(10); return 1; }',
+        '    std::cout << "VMAC_COSIM_OK" << char(10);',
+        "    return 0;",
+        "}",
+        "",
+    ])
+
+
+_TPUT_TCL = """# Vitis HLS csim -> csynth -> cosim for one VMAC mem_dwidth (throughput point).
+set d [file dirname [file normalize [info script]]]
+set data_dir [file join $d data]
+open_project -reset vmac_tput_proj
+set_top vmac
+add_files vmac_top.cpp -cflags "-I. -Iinclude"
+add_files -tb vmac_tb.cpp -cflags "-I. -Iinclude"
+set su [file join $d include streamutils.cpp]
+if {[file exists $su]} { add_files -tb $su -cflags "-I. -Iinclude" }
+open_solution -reset "solution1"
+set_part {xc7z020clg484-1}
+create_clock -period 10
+foreach {stage cmd} {csim csim_design csynth csynth_design cosim cosim_design} {
+    if {$stage eq "csim"}  { set rc [catch {csim_design -argv $data_dir} res] }
+    if {$stage eq "csynth"} { set rc [catch {csynth_design} res] }
+    if {$stage eq "cosim"} { set rc [catch {cosim_design -argv $data_dir -trace_level none} res] }
+    if {$rc} { puts "WAVEFLOW_ERROR: vmac $stage failed."; puts $res; exit 1 }
+}
+puts "WAVEFLOW_SUCCESS: vmac tput csim/csynth/cosim passed."
+exit 0
+"""
+
+
+def gen_tput_config(cfg: StructCfg, tdir: Path) -> dict:
+    tdir = Path(tdir).resolve()
+    tdir.mkdir(parents=True, exist_ok=True)
+    bc = BuildConfig(root_dir=tdir)
+    dag = BuildDag()
+    dag.add(StreamUtilsStep(output_dir=INCLUDE_DIR))
+    for sch in (Region.specialize(mem_awidth=32),
+                Scalar.specialize(mem_awidth=32, data_bw=cfg.data_bw),
+                VmacCmd.specialize(mem_awidth=32, data_bw=cfg.data_bw)):
+        dag.add(DataSchemaStep(sch, word_bw_supported=WORD_BW_SUPPORTED, include_dir=INCLUDE_DIR))
+    dag.add(ArrayUtilsStep(cfg.in_elem(), MEM_WORD_BWS))
+    dag.run(bc)
+    for fname in ("vmac_compute_impl.tpp", "vmac_utils.h"):
+        shutil.copy(_SOURCE_DIR / fname, tdir / fname)
+
+    scalars, mem_in_w, mem_exp_w = _tput_vectors(cfg)
+    nmem = len(mem_in_w)
+    depth = nmem
+    (tdir / "vmac.hpp").write_text(_vmac_hpp(cfg), encoding="utf-8")
+    (tdir / "vmac_top.cpp").write_text(render_top(cfg, depth), encoding="utf-8")
+    (tdir / "vmac_tb.cpp").write_text(render_cosim_tb(cfg, scalars, nmem, depth), encoding="utf-8")
+    (tdir / "run.tcl").write_text(_TPUT_TCL, encoding="utf-8")
+    data = tdir / "data"
+    data.mkdir(parents=True, exist_ok=True)
+    (data / "mem_in.txt").write_text("\n".join(str(w) for w in mem_in_w) + "\n", encoding="utf-8")
+    (data / "mem_exp.txt").write_text("\n".join(str(w) for w in mem_exp_w) + "\n", encoding="utf-8")
+    return {"mem_dwidth": cfg.mem_dwidth, "pf": cfg.mem_dwidth // (2 * cfg.data_bw), "nmem": nmem}
+
+
+@dataclass(kw_only=True)
+class GenTputStep(BuildStep):
+    description = "Generate the per-mem_dwidth synthesizable top + cosim TB + vectors (PF sweep)."
+    consumes = ["vmac_source", "tpp_source"]
+    produces = {"tput_dir": Path("tput")}
+
+    def run(self, config: BuildConfig, **_) -> dict[str, Any]:
+        tput = config.root_dir / "tput"
+        for mbw in TPUT_MEM_BWS:
+            gen_tput_config(_tput_cfg(mbw), tput / f"m{mbw}")
+        return {"tput_dir": tput}
+
+
+@dataclass(kw_only=True)
+class CosimStep(BuildStep):
+    description = "Per mem_dwidth: Vitis csim/csynth/cosim (cosim re-checks the golden)."
+    consumes = ["tput_dir"]
+    produces = {"cosim_done": Path("results/cosim_done.json")}
+    params: dict = field(default_factory=lambda: {"live_output": False})
+
+    def run(self, config: BuildConfig, live_output, **_) -> dict[str, Any]:
+        tput = config.root_dir / "tput"
+        done = []
+        for mbw in TPUT_MEM_BWS:
+            d = (tput / f"m{mbw}").resolve()
+            toolchain.run_vitis_hls(d / "run.tcl", work_dir=d, capture_output=not live_output)
+            done.append({"mem_dwidth": mbw})
+        out = config.root_dir / "results" / "cosim_done.json"
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(json.dumps(done, indent=2), encoding="utf-8")
+        return {"cosim_done": out}
+
+
+@dataclass(kw_only=True)
+class ExtractCosimTimingStep(BuildStep):
+    description = "Parse cosim transaction cycles per mem_dwidth; report throughput vs PF."
+    consumes = ["cosim_done"]
+    produces = {"cosim_timing": Path("results/cosim_timing.json")}
+
+    def run(self, config: BuildConfig, **_) -> dict[str, Any]:
+        from waveflow.utils.cosimparse import CosimReportParser
+        tput = config.root_dir / "tput"
+        rows = []
+        for mbw in TPUT_MEM_BWS:
+            sol = tput / f"m{mbw}" / "vmac_tput_proj" / "solution1"
+            cycles = CosimReportParser(sol_path=sol, top="vmac").get_transaction_cycles()
+            rows.append({"mem_dwidth": mbw, "pf": mbw // (2 * StructCfg(out_bw=8, q_rnd=0,
+                         o_sat=0).data_bw), "transaction_cycles": cycles})
+        base = next((r["transaction_cycles"] for r in rows if r["pf"] == 1), None)
+        for r in rows:
+            r["speedup_vs_pf1"] = (base / r["transaction_cycles"]
+                                   if base and r["transaction_cycles"] else None)
+        out = config.root_dir / "results" / "cosim_timing.json"
+        out.parent.mkdir(parents=True, exist_ok=True)
+        out.write_text(json.dumps({"n_rows": TPUT_N_ROWS, "n_cols": TPUT_N_COLS, "points": rows},
+                                  indent=2), encoding="utf-8")
+        return {"cosim_timing": out}
+
+
 def build_vmac_dag() -> BuildDag:
     dag = BuildDag()
     dag.add(SourceStep(artifact="vmac_source", path=_SOURCE_DIR / "vmac.py"))
@@ -541,6 +785,9 @@ def build_vmac_dag() -> BuildDag:
     dag.add(GenStep(name="gen"))
     dag.add(PySimStep(name="py_sim"))
     dag.add(CsimStep(name="csim"))
+    dag.add(GenTputStep(name="gen_tput"))
+    dag.add(CosimStep(name="cosim"))
+    dag.add(ExtractCosimTimingStep(name="extract_cosim_timing"))
     return dag
 
 
