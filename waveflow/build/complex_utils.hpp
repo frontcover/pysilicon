@@ -117,14 +117,16 @@ static inline auto conj(const C& a) {
 // stored codes, losslessly widen into a wider accumulator element, and requantize down to an
 // output element -- with no hand-split re/im.  (std::complex<ap_fixed> elements.)
 
-// cx_from_codes: build a std::complex<ap_fixed> element from its stored (re, im) integer codes,
-// i.e. the generated ComplexField (re, im) constructor (stored bits -> ap_fixed value).
+// cx_from_codes: build a std::complex<ap_fixed> element from one complex stored-code element
+// (the generated integer-inner ComplexField, wf_cint<W> = interleaved re/im stored codes),
+// reinterpreting each component's bits as the ap_fixed value -- the bits->ap_fixed counterpart
+// of cx_requantize, with no hand-split re/im at the call site.
 template <typename CXT, int W>
-static inline CXT cx_from_codes(ap_int<W> re, ap_int<W> im) {
+static inline CXT cx_from_codes(const wf_cint<W>& codes) {
 #pragma HLS INLINE
     typedef typename CXT::value_type FX;
-    return CXT(streamutils::bits_to_fixed<FX>((ap_uint<W>)re),
-               streamutils::bits_to_fixed<FX>((ap_uint<W>)im));
+    return CXT(streamutils::bits_to_fixed<FX>((ap_uint<W>)codes.re),
+               streamutils::bits_to_fixed<FX>((ap_uint<W>)codes.im));
 }
 
 // cwiden: value-preserving widen of a complex value into element type ACC -- the lossless

@@ -6,8 +6,8 @@ VMAC is **complex-only** and the numeric format is **structural** (on ``VmacAcce
 serialize / deserialize back to an identical value across word widths — the wire-format
 contract for the (Phase-3) HLS kernel.  The structural widths live on ``VmacAccel`` (an
 ``HwComponent`` with ``HwParam`` fields); its computed ``Cmd`` specializes the command schema
-so a command's field widths track the silicon (``addr`` = ``mem_awidth`` bits; immediate
-``re`` / ``im`` = ``data_bw`` bits); same params → same schema class object.
+so a command's field widths track the silicon (``addr`` = ``mem_awidth`` bits; the immediate
+complex ``value`` = ``data_bw`` bits per component); same params → same schema class object.
 """
 import pytest
 
@@ -27,8 +27,8 @@ def _full_cmd():
     cmd.b = {"addr": 24, "row_stride": 4}
     cmd.c = {"addr": 48, "row_stride": 8}          # row pitch wider than n_cols (sub-matrix)
     cmd.d = {"addr": 72, "row_stride": 4}
-    cmd.alpha = {"direct": 1, "re": -16, "im": 8, "addr": 0, "stride": 0}
-    cmd.beta = {"direct": 0, "re": 0, "im": 0, "addr": 96, "stride": 1}
+    cmd.alpha = {"direct": 1, "value": (-16, 8), "addr": 0, "stride": 0}
+    cmd.beta = {"direct": 0, "value": (0, 0), "addr": 96, "stride": 1}
     cmd.b_one, cmd.c_zero, cmd.b_conj, cmd.reduce_rows = 0, 1, 1, 1
     return cmd
 
@@ -46,10 +46,11 @@ def test_nested_region_scalar_roundtrip():
     r2 = Region().deserialize(reg.serialize(32), 32)
     assert r2.val == reg.val == {"addr": 12, "row_stride": -3}
 
-    sc = Scalar(direct=1, re=-100, im=77, addr=5, stride=-1)
+    sc = Scalar(direct=1, value=(-100, 77), addr=5, stride=-1)
     s2 = Scalar().deserialize(sc.serialize(32), 32)
     assert s2.val == sc.val
     assert s2.direct is True                                     # BooleanField -> Python bool
+    assert int(s2.value["re"]) == -100 and int(s2.value["im"]) == 77
 
 
 def test_default_cmd_roundtrips():
@@ -61,10 +62,10 @@ def test_default_cmd_roundtrips():
 def test_signed_fields_preserve_negatives():
     cmd = _full_cmd()
     cmd.a = {"addr": 10, "row_stride": -4}
-    cmd.alpha = {"direct": 1, "re": -32768, "im": -1, "addr": 0, "stride": 0}  # data_bw=16 range
+    cmd.alpha = {"direct": 1, "value": (-32768, -1), "addr": 0, "stride": 0}  # data_bw=16 range
     restored = Cmd().deserialize(cmd.serialize(32), 32)
     assert restored.a.row_stride == -4
-    assert restored.alpha.re == -32768 and restored.alpha.im == -1
+    assert int(restored.alpha.value["re"]) == -32768 and int(restored.alpha.value["im"]) == -1
     assert restored.val == cmd.val
 
 
@@ -116,17 +117,18 @@ def test_cmd_specialize_cached_and_matches_accel():
 
 
 def test_cmd_field_widths_track_mem_awidth_and_data_bw():
-    # addr (and strides) follow mem_awidth; immediate re/im follow data_bw
+    # addr (and strides) follow mem_awidth; the immediate complex value's components follow data_bw
     region = ACCEL.Cmd.get_element_schema("a")
     scalar = ACCEL.Cmd.get_element_schema("alpha")
     assert region.get_element_schema("addr").get_bitwidth() == 32
     assert region.get_element_schema("row_stride").get_bitwidth() == 32
-    assert scalar.get_element_schema("re").get_bitwidth() == 16
-    assert scalar.get_element_schema("im").get_bitwidth() == 16
+    value = scalar.get_element_schema("value")
+    assert value.inner_type.get_bitwidth() == 16                 # per-component data_bw
+    assert value.get_bitwidth() == 32                            # packed re/im = 2*data_bw
 
     wide = VmacAccel(mem_dwidth=256, mem_awidth=40, data_bw=24, acc_bw=64, out_bw=24)
     assert wide.Cmd.get_element_schema("a").get_element_schema("addr").get_bitwidth() == 40
-    assert wide.Cmd.get_element_schema("alpha").get_element_schema("re").get_bitwidth() == 24
+    assert wide.Cmd.get_element_schema("alpha").get_element_schema("value").inner_type.get_bitwidth() == 24
 
 
 def test_region_scalar_specialize_cached_and_sized():
@@ -134,8 +136,10 @@ def test_region_scalar_specialize_cached_and_sized():
     assert Region.specialize(mem_awidth=40) is not Region.specialize(mem_awidth=32)
     assert Region.specialize(mem_awidth=40).get_element_schema("addr").get_bitwidth() == 40
     assert Scalar.specialize(mem_awidth=32, data_bw=16) is Scalar.specialize(mem_awidth=32, data_bw=16)
-    assert Scalar.specialize(mem_awidth=32, data_bw=16).get_element_schema("re").get_bitwidth() == 16
-    assert Scalar.specialize(mem_awidth=32, data_bw=24).get_element_schema("re").get_bitwidth() == 24
+    assert Scalar.specialize(
+        mem_awidth=32, data_bw=16).get_element_schema("value").inner_type.get_bitwidth() == 16
+    assert Scalar.specialize(
+        mem_awidth=32, data_bw=24).get_element_schema("value").inner_type.get_bitwidth() == 24
 
 
 def test_format_fields_removed_from_cmd():

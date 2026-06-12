@@ -169,8 +169,8 @@ def build(accel, cfg, a, b, c, alpha, beta):
 
 def _scalar_field(s, addr):
     if np.ndim(s[0]) == 0:
-        return {"direct": 1, "re": int(s[0]), "im": int(s[1]), "addr": 0, "stride": 0}
-    return {"direct": 0, "re": 0, "im": 0, "addr": int(addr), "stride": 1}
+        return {"direct": 1, "value": (int(s[0]), int(s[1])), "addr": 0, "stride": 0}
+    return {"direct": 0, "value": (0, 0), "addr": int(addr), "stride": 1}
 
 
 def run(cfg, a, b, c, alpha, beta):

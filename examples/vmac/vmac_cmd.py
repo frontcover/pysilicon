@@ -21,7 +21,8 @@ accumulator fractional depth is ``2·F_in`` or ``3·F_in`` per ``b_one`` / ``c_z
 variable shift on a fixed-width accumulator, not a dynamic type.
 
 The width-bearing fields are set by the accelerator that produces/consumes the command
-(``addr`` is ``mem_awidth`` bits; the immediate ``re`` / ``im`` are ``data_bw`` bits).
+(``addr`` is ``mem_awidth`` bits; the immediate complex ``value`` is a ``data_bw``-per-component
+``ComplexField``).
 These schemas are **Level-2 declarative** (:class:`~waveflow.hw.dataschema.ParamSchema`):
 each declares :class:`~waveflow.hw.param.Param` attributes and a dict-literal ``elements``
 that references them directly — the core ``IntField.specialize`` / ``Region.specialize``
@@ -32,6 +33,7 @@ so it serializes / deserializes and code-generates like any schema.
 from __future__ import annotations
 
 from waveflow.hw import BooleanField, IntField, Param, ParamSchema
+from waveflow.hw.complexfield import ComplexField
 
 # --- field aliases (names match the auto-generated IntField subclass __name__) ----
 UInt16 = IntField.specialize(16, signed=False)
@@ -56,16 +58,23 @@ class Region(ParamSchema):
 
 
 class Scalar(ParamSchema):
-    """An ``alpha`` / ``beta`` operand: direct immediate (``re`` / ``im`` stored ints) or
-    indirect (per-column pointer ``addr`` + ``stride``; ``stride 0`` broadcasts)."""
+    """An ``alpha`` / ``beta`` operand: direct immediate (one complex ``value``) or indirect
+    (per-column pointer ``addr`` + ``stride``; ``stride 0`` broadcasts).
+
+    The direct immediate is a single :class:`~waveflow.hw.complexfield.ComplexField` element
+    (one interleaved re/im pair of stored ints, ``data_bw`` bits each) rather than two split
+    ``IntField``s -- so it matches the indirect path's complex element and the kernel reads
+    ``cmd.alpha.value`` as one complex code, no re/im reconstruction.  The inner stays a raw
+    ``IntField`` (stored codes; the command is format-free -- ``int_bits`` is structural), and
+    the packed bit order is unchanged (re low, im high), so it is bit-neutral."""
 
     mem_awidth = Param(32)
     data_bw = Param(32)
     elements = {
         "direct": {"schema": BooleanField,
-                   "description": "True = immediate re/im; False = indirect addr/stride"},
-        "re": IntField.specialize(data_bw, signed=True),    # immediate stored int (real part)
-        "im": IntField.specialize(data_bw, signed=True),    # immediate stored int (imag part)
+                   "description": "True = immediate complex value; False = indirect addr/stride"},
+        # immediate complex stored-code (re low, im high; data_bw bits per component)
+        "value": ComplexField.specialize(IntField.specialize(data_bw, signed=True)),
         "addr": IntField.specialize(mem_awidth, signed=False),
         "stride": IntField.specialize(mem_awidth, signed=True),
     }

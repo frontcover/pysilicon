@@ -142,7 +142,7 @@ class VmacAccel(HwComponent):
     def _scalar(cls, sc, n_cols: int, in_fmt: Format, mem: np.ndarray) -> DataArray:
         """Build an alpha/beta operand: direct immediate (shape (1,)) or indirect per-column."""
         if bool(sc.direct):
-            M = cx.make_complex([int(sc.re)], [int(sc.im)], in_fmt)
+            M = cx.make_complex([int(cx.re_of(sc.value))], [int(cx.im_of(sc.value))], in_fmt)
         else:
             idx = int(sc.addr) + np.arange(n_cols) * int(sc.stride)
             M = mem[idx]

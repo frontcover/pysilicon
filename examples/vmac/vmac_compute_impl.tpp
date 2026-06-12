@@ -224,10 +224,10 @@ void vmac_compute(VmacCmd cmd, ap_uint<MEM_BW>* mem) {
         cmd.c.addr, cmd.c.row_stride,
         cmd.d.addr, cmd.d.row_stride,
         (bool)cmd.alpha.direct,
-        complex_utils::cx_from_codes<CXIN>(cmd.alpha.re, cmd.alpha.im),
+        complex_utils::cx_from_codes<CXIN>(cmd.alpha.value),
         cmd.alpha.addr, cmd.alpha.stride,
         (bool)cmd.beta.direct,
-        complex_utils::cx_from_codes<CXIN>(cmd.beta.re, cmd.beta.im),
+        complex_utils::cx_from_codes<CXIN>(cmd.beta.value),
         cmd.beta.addr, cmd.beta.stride);
 }
 
