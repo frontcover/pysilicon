@@ -4231,6 +4231,25 @@ class DataSchemaStep(Buildable):
             "tb_include": Path(self.tb_include_path()),
         }
 
+    def _member_codegen_include_lines(self) -> list[str]:
+        """Return ``#include`` lines a member element's ``cpp_type`` needs (its
+        ``get_codegen_includes`` bodies, e.g. ``"wf_cint.h"`` for an integer-inner
+        ``ComplexField`` element), deduped + order-preserved.  Only the direct element
+        types are gathered: a nested ``DataSchema`` member emits its own header (pulled in
+        by :meth:`_dep_include_lines`), so its includes need not be re-emitted here."""
+        iter_elems = getattr(self._schema, "_iter_element_schemas", None)
+        if iter_elems is None:
+            return []
+        lines: list[str] = []
+        seen: set[str] = set()
+        for _, schema_cls in iter_elems():
+            for body in schema_cls.get_codegen_includes():
+                line = f"#include {body}"
+                if line not in seen:
+                    seen.add(line)
+                    lines.append(line)
+        return lines
+
     def _dep_include_lines(self) -> list[str]:
         """Return ``#include`` lines for schema dependencies."""
         dep_step_map = {d._schema: d for d in self.deps if isinstance(d, DataSchemaStep)}
@@ -4276,6 +4295,14 @@ class DataSchemaStep(Buildable):
             f'#include "{sutils_hls_rel}"',
             "",
         ]
+
+        # Includes that a member element's cpp_type needs beyond streamutils_hls.h (e.g. the
+        # wf_cint.h / <complex> for a ComplexField element), so the struct header is
+        # self-contained — nested DataSchema members get their own headers via dep includes.
+        member_include_lines = self._member_codegen_include_lines()
+        if member_include_lines:
+            lines.extend(member_include_lines)
+            lines.append("")
 
         dep_include_lines = self._dep_include_lines()
         if dep_include_lines:

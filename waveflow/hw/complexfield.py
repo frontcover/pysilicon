@@ -29,6 +29,7 @@ from typing import Any, ClassVar
 import numpy as np
 
 from waveflow.hw.dataschema import DataArray, DataField, FloatField, IntField, _elem_kind
+from waveflow.hw.param import defer_if_symbolic
 from waveflow.utils import complexutils as cx
 from waveflow.utils import fixputils
 from waveflow.utils.complexutils import complex_dtype, int_format
@@ -58,8 +59,15 @@ class ComplexField(DataField):
 
     # --- specialization -------------------------------------------------------
     @classmethod
+    @defer_if_symbolic
     def specialize(cls, inner: type[DataField], **kwargs: Any) -> type["ComplexField"]:
-        """Return a cached ``ComplexField`` over a scalar ``inner`` field (one per inner)."""
+        """Return a cached ``ComplexField`` over a scalar ``inner`` field (one per inner).
+
+        Like the other ``specialize`` methods, this defers (returns a ``LazyField``) when the
+        ``inner`` is symbolic -- e.g. a ``ParamSchema`` element ``ComplexField.specialize(
+        IntField.specialize(data_bw, ...))`` over a symbolic ``data_bw`` ``Param``, where the
+        inner ``IntField.specialize`` is itself a deferred ``LazyField`` -- so the cascade
+        resolves both layers when the schema is specialized."""
         if not isinstance(inner, type) or not issubclass(inner, DataField):
             raise TypeError("ComplexField inner must be a scalar DataField subclass.")
         kind = _inner_kind(inner)

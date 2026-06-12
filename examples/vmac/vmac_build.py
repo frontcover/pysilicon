@@ -139,8 +139,8 @@ def _flat(pair):
 
 def _scalar_field(s, addr):
     if np.ndim(s[0]) == 0:
-        return {"direct": 1, "re": int(s[0]), "im": int(s[1]), "addr": 0, "stride": 0}
-    return {"direct": 0, "re": 0, "im": 0, "addr": int(addr), "stride": 1}
+        return {"direct": 1, "value": (int(s[0]), int(s[1])), "addr": 0, "stride": 0}
+    return {"direct": 0, "value": (0, 0), "addr": int(addr), "stride": 1}
 
 
 def build(accel: VmacAccel, flags: dict, a, b, c, alpha, beta):
@@ -580,7 +580,8 @@ def _tput_vectors(cfg: StructCfg):
     scalars = [int(cmd.n_rows), int(cmd.n_cols),
                int(cmd.a.addr), int(cmd.a.row_stride), int(cmd.b.addr), int(cmd.b.row_stride),
                int(cmd.c.addr), int(cmd.c.row_stride), int(cmd.d.addr), int(cmd.d.row_stride),
-               int(cmd.alpha.re), int(cmd.alpha.im), int(cmd.beta.re), int(cmd.beta.im), flags]
+               int(cx.re_of(cmd.alpha.value)), int(cx.im_of(cmd.alpha.value)),
+               int(cx.re_of(cmd.beta.value)), int(cx.im_of(cmd.beta.value)), flags]
     return (scalars,
             _mem_words(mem, in_elem, cfg.mem_dwidth),
             _mem_words(post, in_elem, cfg.mem_dwidth))
@@ -627,13 +628,14 @@ def render_top(cfg: StructCfg, depth: int) -> str:
     lines += [
         "#pragma HLS INTERFACE s_axilite port=return bundle=control",
         "    // Call the scalar-arg core directly (no VmacCmd struct — it mis-decomposes at csynth).",
-        "    // The complex scalars are built locally from the s_axilite (re, im) codes (a flat",
+        "    // The complex scalars are built locally from the s_axilite (re, im) codes — packed",
+        "    // into one wf_cint complex-code element, then reinterpreted by cx_from_codes (a flat",
         "    // std::complex<ap_fixed> by-value param does not DCE; the nested struct did).",
         "    typedef vmac_impl::vmac_in_au::value_type cx_t;",
-        f"    cx_t alpha = complex_utils::cx_from_codes<cx_t>((ap_int<{cfg.data_bw}>)al_re, "
-        f"(ap_int<{cfg.data_bw}>)al_im);",
-        f"    cx_t beta = complex_utils::cx_from_codes<cx_t>((ap_int<{cfg.data_bw}>)be_re, "
-        f"(ap_int<{cfg.data_bw}>)be_im);",
+        f"    cx_t alpha = complex_utils::cx_from_codes<cx_t>("
+        f"wf_cint<{cfg.data_bw}>((ap_int<{cfg.data_bw}>)al_re, (ap_int<{cfg.data_bw}>)al_im));",
+        f"    cx_t beta = complex_utils::cx_from_codes<cx_t>("
+        f"wf_cint<{cfg.data_bw}>((ap_int<{cfg.data_bw}>)be_re, (ap_int<{cfg.data_bw}>)be_im));",
         f"    vmac_impl::vmac_compute_core<{mbw}, {MEM_AWIDTH}, {cfg.data_bw}, {cfg.int_bits}, "
         f"{cfg.acc_bw}, {cfg.out_bw}, {cfg.q_rnd}, {cfg.o_sat}, {TPUT_MAX_COLS}>(",
         "        gmem, n_rows, n_cols, flags & 1, (flags >> 1) & 1, (flags >> 2) & 1,",
