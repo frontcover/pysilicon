@@ -42,14 +42,16 @@ SALSA is a **tile-based wireless processor** — *not a fixed pipeline*, but a r
 machine whose behavior changes with the wireless environment and the application. It is organized in three
 levels around a shared bus:
 
-![SALSA system architecture: RF tiles, interconnected distributed tiles, and common (control / LDPC / upper-layer) tiles around a shared bus](./figures/salsa_system.svg)
+![SALSA system architecture: RF tiles, interconnected distributed tiles, common (multi-user / MIMO) tiles, and separate control / LDPC / upper-layer processing around a shared bus](./figures/salsa_system.svg)
 
 - **RF tiles** sit at the antennas — each drives the RF front-end for a group of the antenna elements,
   exchanging that group's IQ streams with the layer below.
-- **Distributed tiles** do the per-group signal processing. Crucially they connect **to their neighbors**
+- **Distributed tiles** do the per-antenna or per-user signal processing. Crucially they connect **to their neighbors**
   (left/right) as well as up to the RF tiles and down to the bus — this neighbor-to-neighbor mesh is what lets
   array-wide operations (beamforming, angle-of-arrival, nulling) span tiles.
-- **Common tiles** on the bus handle control, LDPC, and upper-layer processing.
+- **Common tiles** perform multi-user processing, including certain MIMO matrix operations.
+
+LDPC decoders, physical-layer control, and upper-layer processing are handled outside the SALSA tile array, since they are better suited to specialized hardware or more general-purpose DSPs and processors.
 
 Each distributed tile is itself **heterogeneous** — FIR, FFT, and systolic-array processing elements plus
 general-purpose processor cores, sharing the tile's memory and fed by **serial interfaces** (up to the RF
@@ -57,7 +59,12 @@ tiles, left/right to neighbor tiles, and down to the bus):
 
 ![A distributed tile: FIR / FFT / systolic-array PEs and processor cores behind serial and bus/memory interfaces](./figures/salsa_tile.svg)
 
-The dataflow across this fabric is **workload-dependent**: each task — communication, spectrum sensing,
+
+## Dynamic Task Reconfiguration
+
+Dynamic processing is configured in **flows** in an architecture that builds on the team's work in the [DARPA TRACER project](https://ieeexplore.ieee.org/abstract/document/11310646).  Specifically, computation is performed in flows, with each flow being a sequence of atomic operations or **tasklets**.  For example, a flow could consist of tasklets such as channelization filtering, FFT, spatial covariance estimation, and an eigenvector-based AoA estimation that could be activated, for example, after a signal of interest and its bandwidth are identified.
+Each tasklet in a flow is run on a PE specific to the type of processing and exchanges messages and data with other tasklets on other PEs over the interconnect fabric and shared memory.  Importantly, PEs may be assigned multiple tasklets and have a job queue and micro-scheduler for selecting tasklets to process.  
+The flow configuration across this fabric is **workload-dependent**: each flow — communication, spectrum sensing,
 angle-of-arrival, beam nulling, interference mitigation — lights up a different graph across the tiles and
 PEs, and several run *concurrently*.
 
@@ -72,6 +79,11 @@ onto a Waveflow abstraction, and the whole thing simulates, verifies, and genera
   speed, verified bit-exact against its golden, and lowered to HLS. The reconfigurable **vector-MAC
   engine (VMAC)** is the first PE through that flow — already bit-exact on real Vitis and
   throughput-characterized — a concrete SALSA building block, not a sketch.
+- **The tasklet vocabulary maps straight onto Waveflow.** A *tasklet* is a compute hook on a PE
+  `HwComponent`; a *flow* is a sequence of tasklets wired through the typed interfaces; and a PE's
+  *job queue + micro-scheduler* is an **AXI-MM command-queue interface** feeding the hook. So the one
+  model that simulates a tasklet bit-exact also describes the queue that schedules it — one source for
+  the compute *and* its dispatch.
 - **The dataflow fabric is interfaces + concurrency.** Tiles connect through typed, transactional
   interfaces, and the simulator runs them as **truly concurrent processes**, so the *simultaneous,
   runtime-reconfigured* dataflows that define SALSA are modeled directly — something a sequential HLS
@@ -90,3 +102,6 @@ SALSA is a reconfigurable, concurrent, heterogeneous system whose **correctness*
 and **firmware** must all be reasoned about *together* — and Waveflow keeps them in one fast,
 bit-exact, executable model. VMAC is the first tile through that flow; the rest of SALSA follows the
 same path.
+
+
+[Tracer] French, Matthew, et al. "TRACER, the Next Generation Ultra-wideband Spectrum Processor." MILCOM 2025-2025 IEEE Military Communications Conference (MILCOM). IEEE, 2025.
