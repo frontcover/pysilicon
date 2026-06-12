@@ -29,6 +29,7 @@ notebooks, HDL fragments, and build glue.
 ## Start here
 
 - **[Overview](./overview/)** — the motivation, what makes Waveflow different, and the flow
+- **[Project status](./overview/status.md)** — what works today, what's next, and the first integrated milestone
 - **[Installation](./guide/installation/)** — install Waveflow from source
 - **[Guide](./guide/)** — schemas, interfaces, components, simulation, synthesis, and builds
 - **[Examples](./examples/)** — worked designs, starting with [basic vectorization](./examples/basic_vec/)
