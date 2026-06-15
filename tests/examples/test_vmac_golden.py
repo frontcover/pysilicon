@@ -1,19 +1,21 @@
-"""VMAC golden tests — bit-level results for every config vs an independent oracle.
+"""VMAC golden tests — bit-level results for every op vs an independent oracle.
 
 VMAC is **complex-only**: every element is an ``(re, im)`` pair, and the numeric format is
 structural (on :class:`~examples.vmac.vmac.VmacAccel`), not in the command.  The production
 golden (:meth:`VmacAccel.execute`) composes the integer-backed numpy ``ComplexField``
-operators.  The **oracle** here is independent: it works in exact rational (``Fraction``)
-space over ``(re, im)`` pairs, computes the accumulator value exactly (full precision), then
-quantizes once with the right-shift → round → saturate spec.  The requantize shift is
-**derived** — the output sits at the input fractional scale ``F_out = F_in`` (so
-``SHIFT = F_acc − F_in``), exactly as :meth:`VmacAccel.output_format` defines.  Two
-independent implementations of the same datapath must agree bit-for-bit.  A few literal
-hand-checked outputs anchor the oracle.
+operators.  The **oracle** here is independent: exact rational (``Fraction``) arithmetic over
+``(re, im)`` pairs, the accumulator value computed exactly (full precision), then quantized once
+with the right-shift → round → saturate spec.  The requantize shift is **derived** — the output
+sits at the input fractional scale ``F_out = F_in`` (``SHIFT = F_acc − F_in``), exactly as
+:meth:`VmacAccel.output_format` defines.  Two independent implementations must agree bit-for-bit;
+a few literal hand-checked outputs anchor the oracle.
 
-Operands are supplied as **stored integers** at fractional scale ``F = in_bw - int_bits``;
-real value = ``stored · 2**-F`` (exact).  Real-valued cases just carry ``im = 0``.
+The three element-wise ops are ``scalar_mult`` (``alpha[i]·A``), ``inner_prod`` (``A·conj(B)``),
+and ``sum`` (``A+B``), each with an optional row reduction ``Y[j] = Σ_i R[i, j]``.  Operands are
+supplied as **stored integers** at fractional scale ``F = in_bw - int_bits``; real value =
+``stored · 2**-F`` (exact).  Real-valued cases just carry ``im = 0``.
 """
+
 import math
 from fractions import Fraction
 
@@ -21,6 +23,7 @@ import numpy as np
 import pytest
 
 from examples.vmac.vmac import VmacAccel
+from examples.vmac.vmac_cmd import OpCode
 from waveflow.utils import complexutils as cx
 from waveflow.utils.fixputils import Format
 
@@ -29,14 +32,6 @@ from waveflow.utils.fixputils import Format
 def _cmul(a, b):
     (ar, ai), (br, bi) = a, b
     return (ar * br - ai * bi, ar * bi + ai * br)
-
-
-def _cadd(a, b):
-    return (a[0] + b[0], a[1] + b[1])
-
-
-def _conj(a):
-    return (a[0], -a[1])
 
 
 def _q_real(value: Fraction, out_frac: int, W: int, q_rnd: bool, o_sat: bool) -> int:
@@ -50,12 +45,13 @@ def _q_real(value: Fraction, out_frac: int, W: int, q_rnd: bool, o_sat: bool) ->
 
 
 # --- the oracle (independent of the production golden) ------------------------
-def oracle(cfg, a, b, c, alpha, beta):
-    """a/b/c: (n, m) stored-int pairs (re, im arrays); alpha/beta: (re, im) scalars or
-    per-column (m,) arrays.  Returns the expected dst stored ints — (n,m) or (m,) reduced —
-    as a pair (re, im) of int arrays (im all-zero for real mode)."""
+def oracle(cfg, a, b, alpha):
+    """a/b: (n, m) stored-int pairs (re, im arrays); alpha: a scalar (re, im) or per-row (n,)
+    array (scalar_mult only).  Returns the expected dst stored ints — (n, m) or (m,) reduced —
+    as a pair (re, im) of int arrays."""
     F = cfg["in_bw"] - cfg["int_bits"]
     scale = Fraction(2) ** F
+    op = cfg["op"]
     n, m = a[0].shape
 
     def fr(stored):
@@ -64,120 +60,123 @@ def oracle(cfg, a, b, c, alpha, beta):
     def at(operand, i, j):
         return (fr(operand[0][i, j]), fr(operand[1][i, j]))
 
-    def scal(s, j):
-        if np.ndim(s[0]) == 0:
-            return (fr(s[0]), fr(s[1]))
-        return (fr(s[0][j]), fr(s[1][j]))
+    def alpha_at(i):
+        if np.ndim(alpha[0]) == 0:
+            return (fr(alpha[0]), fr(alpha[1]))
+        return (fr(alpha[0][i]), fr(alpha[1][i]))
 
-    # output at the structural input scale F_out = F_in (the derived shift = F_acc - F_in).
-    out_frac = F
-
+    out_frac = F  # F_out = F_in (derived shift = F_acc - F_in)
     cols_re, cols_im = [], []
     for j in range(m):
         terms = []
         for i in range(n):
             av = at(a, i, j)
-            if cfg["b_one"]:
-                ab = av
-            else:
+            if op is OpCode.scalar_mult:
+                t = _cmul(alpha_at(i), av)
+            elif op is OpCode.inner_prod:
                 bv = at(b, i, j)
-                if cfg["b_conj"]:
-                    bv = _conj(bv)
-                ab = _cmul(av, bv)
-            t = _cmul(scal(alpha, j), ab)
-            if not cfg["c_zero"]:
-                t = _cadd(t, _cmul(scal(beta, j), at(c, i, j)))
+                t = _cmul(av, (bv[0], -bv[1]))  # A · conj(B)
+            else:  # sum
+                bv = at(b, i, j)
+                t = (av[0] + bv[0], av[1] + bv[1])
             terms.append(t)
-        acc = terms[0]
-        if cfg["reduce_rows"]:
+        if cfg["reduce"]:
+            acc = terms[0]
             for t in terms[1:]:
-                acc = _cadd(acc, t)
+                acc = (acc[0] + t[0], acc[1] + t[1])
             rows = [acc]
         else:
             rows = terms
-        col_re = [_q_real(r[0], out_frac, cfg["out_bw"], cfg["q_rnd"], cfg["o_sat"]) for r in rows]
-        col_im = [_q_real(r[1], out_frac, cfg["out_bw"], cfg["q_rnd"], cfg["o_sat"]) for r in rows]
-        cols_re.append(col_re)
-        cols_im.append(col_im)
-    re = np.array(cols_re, dtype=np.int64).T          # (rows, m)
+        cols_re.append(
+            [
+                _q_real(r[0], out_frac, cfg["out_bw"], cfg["q_rnd"], cfg["o_sat"])
+                for r in rows
+            ]
+        )
+        cols_im.append(
+            [
+                _q_real(r[1], out_frac, cfg["out_bw"], cfg["q_rnd"], cfg["o_sat"])
+                for r in rows
+            ]
+        )
+    re = np.array(cols_re, dtype=np.int64).T  # (rows, m)
     im = np.array(cols_im, dtype=np.int64).T
-    if cfg["reduce_rows"]:
-        re, im = re[0], im[0]                          # (m,)
+    if cfg["reduce"]:
+        re, im = re[0], im[0]  # (m,)
     return re, im
 
 
 # --- harness: lay operands into mem + build the matching VmacCmd --------------
 def _flat(pair):
-    """Flatten a complex operand to structured mem slots (row-major re/im)."""
     re = np.asarray(pair[0]).ravel()
     im = np.asarray(pair[1]).ravel()
-    return cx.make_complex(re, im, Format(8, 4, True))   # dtype only; format irrelevant here
+    return cx.make_complex(
+        re, im, Format(8, 4, True)
+    )  # dtype only; format irrelevant here
 
 
 def _accel(cfg):
-    """The accelerator carrying the structural widths + format for this config."""
     return VmacAccel(
-        mem_dwidth=512, mem_awidth=32,
-        data_bw=cfg["in_bw"], int_bits=cfg["int_bits"],
-        acc_bw=cfg.get("acc_bw", 48), out_bw=cfg["out_bw"],
-        q_rnd=cfg["q_rnd"], o_sat=cfg["o_sat"],
+        mem_dwidth=512,
+        mem_awidth=32,
+        data_bw=cfg["in_bw"],
+        int_bits=cfg["int_bits"],
+        acc_bw=cfg.get("acc_bw", 48),
+        out_bw=cfg["out_bw"],
+        q_rnd=cfg["q_rnd"],
+        o_sat=cfg["o_sat"],
     )
 
 
-def build(accel, cfg, a, b, c, alpha, beta):
-    """Lay a/b/c (+ per-column alpha/beta) into mem and build the Cmd. Returns (cmd, mem)."""
+def _alpha_field(op, alpha, addr):
+    if op is OpCode.scalar_mult and np.ndim(alpha[0]) > 0:  # per-row indirect
+        return {"direct": 0, "imm": (0, 0), "addr": int(addr), "stride": 1}
+    re = int(alpha[0]) if np.ndim(alpha[0]) == 0 else 0
+    im = int(alpha[1]) if np.ndim(alpha[0]) == 0 else 0
+    return {"direct": 1, "imm": (re, im), "addr": 0, "stride": 0}
+
+
+def build(accel, cfg, a, b, alpha):
+    """Lay a (+ b for inner_prod/sum, + per-row alpha for indirect scalar_mult) into mem and
+    build the Cmd. Returns (cmd, mem)."""
+    op = cfg["op"]
     n, m = a[0].shape
     nm = n * m
-    blocks, addr = [], {}
-    cur = 0
-    for name, op in (("a", a), ("b", b), ("c", c)):
-        addr[name] = cur
-        blocks.append(_flat(op))
+    need_b = op in (OpCode.inner_prod, OpCode.sum)
+    alpha_pr = op is OpCode.scalar_mult and np.ndim(alpha[0]) > 0
+
+    blocks, addr, cur = [], {}, 0
+    addr["a"] = cur
+    blocks.append(_flat(a))
+    cur += nm
+    if need_b:
+        addr["b"] = cur
+        blocks.append(_flat(b))
         cur += nm
-    alpha_pc = np.ndim(alpha[0]) > 0
-    beta_pc = np.ndim(beta[0]) > 0
-    if alpha_pc:
+    if alpha_pr:
         addr["alpha"] = cur
-        blocks.append(_flat((alpha[0], alpha[1])))
-        cur += m
-    if beta_pc:
-        addr["beta"] = cur
-        blocks.append(_flat((beta[0], beta[1])))
-        cur += m
-    addr["d"] = cur
+        blocks.append(_flat(alpha))
+        cur += n
+    addr["y"] = cur
     cur += nm
     mem = cx.make_complex(np.zeros(cur), np.zeros(cur), Format(8, 4, True))
-    # write each block at its address (row-major)
-    order = ["a", "b", "c"] + (["alpha"] if alpha_pc else []) + (["beta"] if beta_pc else [])
+    order = ["a"] + (["b"] if need_b else []) + (["alpha"] if alpha_pr else [])
     for name, blk in zip(order, blocks):
-        mem[addr[name]:addr[name] + len(blk)] = blk
+        mem[addr[name] : addr[name] + len(blk)] = blk
 
     cmd = accel.Cmd()
-    cmd.n_rows, cmd.n_cols = n, m
-    cmd.a = {"addr": addr["a"], "row_stride": m}
-    cmd.b = {"addr": addr["b"], "row_stride": m}
-    cmd.c = {"addr": addr["c"], "row_stride": m}
-    cmd.d = {"addr": addr["d"], "row_stride": m}
-    cmd.alpha = _scalar_field(alpha, addr.get("alpha"))
-    cmd.beta = _scalar_field(beta, addr.get("beta"))
-    # format (in_bw / int_bits / out_bw / acc_bw / q_rnd / o_sat) is structural (on the
-    # accelerator); the command carries only the op flags + geometry.
-    for f in ("b_one", "c_zero", "b_conj", "reduce_rows"):
-        setattr(cmd, f, cfg[f])
+    cmd.op, cmd.reduce, cmd.n_rows, cmd.n_cols = op, int(cfg["reduce"]), n, m
+    for name in ("a", "b", "y"):
+        setattr(cmd, name, {"addr": addr.get(name, 0), "row_stride": m})
+    cmd.alpha = _alpha_field(op, alpha, addr.get("alpha"))
     return cmd, mem
 
 
-def _scalar_field(s, addr):
-    if np.ndim(s[0]) == 0:
-        return {"direct": 1, "value": (int(s[0]), int(s[1])), "addr": 0, "stride": 0}
-    return {"direct": 0, "value": (0, 0), "addr": int(addr), "stride": 1}
-
-
-def run(cfg, a, b, c, alpha, beta):
+def run(cfg, a, b, alpha):
     accel = _accel(cfg)
-    cmd, mem = build(accel, cfg, a, b, c, alpha, beta)
+    cmd, mem = build(accel, cfg, a, b, alpha)
     dst = accel.execute(cmd, mem)
-    exp_re, exp_im = oracle(cfg, a, b, c, alpha, beta)
+    exp_re, exp_im = oracle(cfg, a, b, alpha)
     got_re, got_im = np.asarray(dst.val["re"]), np.asarray(dst.val["im"])
     return (got_re, got_im), (exp_re, exp_im)
 
@@ -190,132 +189,130 @@ def _pair(re, im=None):
 
 
 def _cfg(**kw):
-    # VMAC is complex-only; the command carries only flags + geometry. The numeric
-    # format (in_bw / int_bits / out_bw / acc_bw / q_rnd / o_sat) is structural (passed
-    # to the accelerator via _accel); the requantize shift is derived (F_acc - F_in).
-    base = dict(in_bw=8, int_bits=4, out_bw=8, acc_bw=48,
-                b_one=0, c_zero=0, b_conj=0, reduce_rows=0, q_rnd=0, o_sat=0)
+    # VMAC is complex-only; the command carries only op + reduce + geometry. The numeric
+    # format (in_bw / int_bits / out_bw / acc_bw / q_rnd / o_sat) is structural (passed to
+    # the accelerator via _accel); the requantize shift is derived (F_acc - F_in).
+    base = dict(
+        op=OpCode.sum,
+        reduce=0,
+        in_bw=8,
+        int_bits=4,
+        out_bw=8,
+        acc_bw=48,
+        q_rnd=0,
+        o_sat=0,
+    )
     base.update(kw)
     return base
 
 
 # --- literal hand-checked anchors --------------------------------------------
-def test_scaled_copy_literal():
-    # dst = 1.0 * a, F=4: alpha=16 (=1.0); a=[1.5,2.0]=[24,32] -> dst=[24,32]
-    # b_one -> F_acc=2*4=8, derived shift=F_acc-F_in=4 -> F_out=4.
-    cfg = _cfg(b_one=1, c_zero=1)
-    a = _pair([[24, 32]])
-    (gr, _), (er, _) = run(cfg, a, _pair([[0, 0]]), _pair([[0, 0]]), _pair(16), _pair(0))
-    np.testing.assert_array_equal(gr, [[24, 32]])
+def test_scalar_mult_literal():
+    # R = alpha · A, alpha = 2.0 (code 32), A = [1.5, 2.0] = [24, 32] -> [3.0, 4.0] = [48, 64].
+    cfg = _cfg(op=OpCode.scalar_mult)
+    (gr, _), (er, _) = run(cfg, _pair([[24, 32]]), _pair([[0, 0]]), _pair(32, 0))
+    np.testing.assert_array_equal(gr, [[48, 64]])
     np.testing.assert_array_equal(gr, er)
 
 
-def test_hadamard_literal():
-    # dst = a*b, alpha=1.0, c_zero. a=[2.0]=32, b=[1.5]=24 -> 3.0; F_acc=3*4=12, shift=8 -> F_out=4
-    cfg = _cfg(c_zero=1)
+def test_inner_prod_literal():
+    # R = A · conj(B): A = 2.0 = 32, B = 1.5 = 24 -> 3.0 = 48 (im 0).
+    cfg = _cfg(op=OpCode.inner_prod)
     a, b = _pair([[32]]), _pair([[24]])
-    (gr, _), (er, _) = run(cfg, a, b, _pair([[0]]), _pair(16), _pair(0))
-    np.testing.assert_array_equal(gr, [[48]])      # 3.0 at F=4 = 48
+    (gr, _), (er, _) = run(cfg, a, b, _pair(16, 0))
+    np.testing.assert_array_equal(gr, [[48]])
     np.testing.assert_array_equal(gr, er)
 
 
-def test_column_sum_literal():
-    # b_one, c_zero, alpha=1, reduce=rows: dst = sum_rows(a). a col=[1.0,2.0,0.5]=[16,32,8] -> 3.5=56
-    cfg = _cfg(b_one=1, c_zero=1, reduce_rows=1)
+def test_sum_literal():
+    # R = A + B: same scale, codes add. A = [1.0, 2.0] = [16, 32], B = [0.5, 0.5] = [8, 8].
+    cfg = _cfg(op=OpCode.sum)
+    (gr, _), (er, _) = run(cfg, _pair([[16, 32]]), _pair([[8, 8]]), _pair(0, 0))
+    np.testing.assert_array_equal(gr, [[24, 40]])
+    np.testing.assert_array_equal(gr, er)
+
+
+def test_sum_reduce_literal():
+    # R = A + B, reduce over rows. col A = [1.0, 2.0, 0.5] = [16, 32, 8], B = 0 -> sum 3.5 = 56.
+    cfg = _cfg(op=OpCode.sum, reduce=1)
     a = _pair([[16], [32], [8]])
-    (gr, _), (er, _) = run(cfg, a, _pair(np.zeros((3, 1))), _pair(np.zeros((3, 1))),
-                           _pair(16), _pair(0))
+    (gr, _), (er, _) = run(cfg, a, _pair(np.zeros((3, 1))), _pair(0, 0))
     np.testing.assert_array_equal(gr, [56])
     np.testing.assert_array_equal(gr, er)
 
 
-# --- config sweep vs the oracle (complex-only) --------------------------------
+def test_scalar_mult_per_row_indirect_literal():
+    # R[i,j] = alpha[i] · A[i,j], alpha = [1.0, 2.0] = [16, 32] (per row).
+    cfg = _cfg(op=OpCode.scalar_mult)
+    a = _pair([[16, 32], [16, 16]])  # rows 1.0,2.0 / 1.0,1.0
+    (gr, _), (er, _) = run(cfg, a, _pair(np.zeros((2, 2))), _pair([16, 32]))
+    np.testing.assert_array_equal(gr, [[16, 32], [32, 32]])  # row0·1, row1·2
+    np.testing.assert_array_equal(gr, er)
+
+
+# --- op × reduce × alpha-mode sweep vs the oracle (complex-only) ---------------
 @pytest.mark.parametrize("q_rnd,o_sat", [(0, 0), (1, 0), (0, 1), (1, 1)])
-def test_configs_vs_oracle(q_rnd, o_sat):
+def test_ops_vs_oracle(q_rnd, o_sat):
     rng = np.random.default_rng(2)
     n, m = 4, 3
+
     def cop():
         return _pair(rng.integers(-60, 61, (n, m)), rng.integers(-60, 61, (n, m)))
-    a, b, c = cop(), cop(), cop()
+
+    a, b = cop(), cop()
     alpha_s = _pair(20, -8)
-    beta_s = _pair(-12, 5)
-    alpha_pc = _pair(rng.integers(-30, 31, m), rng.integers(-30, 31, m))
-    beta_pc = _pair(rng.integers(-30, 31, m), rng.integers(-30, 31, m))
-    configs = [
-        _cfg(b_one=1, c_zero=1, q_rnd=q_rnd, o_sat=o_sat),                       # scaled copy
-        _cfg(c_zero=1, q_rnd=q_rnd, o_sat=o_sat),                                # hadamard
-        _cfg(b_conj=1, c_zero=1, q_rnd=q_rnd, o_sat=o_sat),                      # conj hadamard
-        _cfg(q_rnd=q_rnd, o_sat=o_sat),                                          # full MAC
-        _cfg(b_one=1, q_rnd=q_rnd, o_sat=o_sat),                                 # alpha*a + beta*c
-        _cfg(b_one=1, c_zero=1, reduce_rows=1, q_rnd=q_rnd, o_sat=o_sat),        # column sum
-        _cfg(b_conj=1, c_zero=1, reduce_rows=1, q_rnd=q_rnd, o_sat=o_sat),       # conj inner product
-        _cfg(reduce_rows=1, q_rnd=q_rnd, o_sat=o_sat),                           # reduced MAC
-    ]
-    for cfg in configs:
-        for al, be in [(alpha_s, beta_s), (alpha_pc, beta_pc)]:      # scalar + per-column
-            got, exp = run(cfg, a, b, c, al, be)
-            np.testing.assert_array_equal(got[0], exp[0], err_msg=f"{cfg} re")
-            np.testing.assert_array_equal(got[1], exp[1], err_msg=f"{cfg} im")
+    alpha_pr = _pair(rng.integers(-30, 31, n), rng.integers(-30, 31, n))
+    for reduce in (0, 1):
+        for op in (OpCode.scalar_mult, OpCode.inner_prod, OpCode.sum):
+            alphas = [alpha_s, alpha_pr] if op is OpCode.scalar_mult else [alpha_s]
+            for alpha in alphas:
+                cfg = _cfg(op=op, reduce=reduce, q_rnd=q_rnd, o_sat=o_sat)
+                got, exp = run(cfg, a, b, alpha)
+                np.testing.assert_array_equal(got[0], exp[0], err_msg=f"{cfg} re")
+                np.testing.assert_array_equal(got[1], exp[1], err_msg=f"{cfg} im")
 
 
 # --- saturation + rounding are actually exercised -----------------------------
 def test_saturation_triggered():
-    # large product saturates at OUT_BW=8 signed (range +-8 at F_out=4). alpha=1.0, a=b=7.0
-    # -> 49.0, way over range. c_zero, not b_one -> F_acc=12, derived shift=8 -> F_out=4.
-    cfg = _cfg(c_zero=1, o_sat=1)
-    a, b = _pair([[112]]), _pair([[112]])               # 7.0 * 7.0 = 49 >> way over +-8 range
-    (gr, _), (er, _) = run(cfg, a, b, _pair([[0]]), _pair(16), _pair(0))
-    assert gr[0, 0] == 127                                # saturated to OUT_BW max
+    # inner_prod: 7.0 * 7.0 = 49.0, way over the +-8 OUT_BW=8 range -> saturate to max.
+    cfg = _cfg(op=OpCode.inner_prod, o_sat=1)
+    a, b = _pair([[112]]), _pair([[112]])
+    (gr, _), (er, _) = run(cfg, a, b, _pair(16, 0))
+    assert gr[0, 0] == 127
     np.testing.assert_array_equal(gr, er)
 
 
 def test_rounding_triggered():
-    # a value landing between LSBs differs under TRN vs RND (derived shift = 8 here)
+    # a value landing between LSBs differs under TRN vs RND (derived shift = F_in = 4 here).
     rng = np.random.default_rng(9)
     a = _pair(rng.integers(-120, 121, (3, 2)))
     b = _pair(rng.integers(-120, 121, (3, 2)))
-    trn = run(_cfg(c_zero=1, q_rnd=0), a, b, _pair(np.zeros((3, 2))), _pair(16), _pair(0))
-    rnd = run(_cfg(c_zero=1, q_rnd=1), a, b, _pair(np.zeros((3, 2))), _pair(16), _pair(0))
+    trn = run(_cfg(op=OpCode.inner_prod, q_rnd=0), a, b, _pair(16, 0))
+    rnd = run(_cfg(op=OpCode.inner_prod, q_rnd=1), a, b, _pair(16, 0))
     np.testing.assert_array_equal(trn[0][0], trn[1][0])
     np.testing.assert_array_equal(rnd[0][0], rnd[1][0])
-    assert not np.array_equal(trn[0][0], rnd[0][0])      # the two modes genuinely differ
+    assert not np.array_equal(trn[0][0], rnd[0][0])  # the two modes genuinely differ
 
 
-# --- CG op coverage (the complex configs the CG matrix inverse needs) ----------
-def test_cg_complex_axpy_steps():
-    # X = X - P·α[col]:  a=P, b_one, α=-vec (per-col), c=X, β=1
-    rng = np.random.default_rng(11)
-    n, m = 5, 3
-    P = _pair(rng.integers(-100, 101, (n, m)), rng.integers(-100, 101, (n, m)))
-    X = _pair(rng.integers(-100, 101, (n, m)), rng.integers(-100, 101, (n, m)))
-    neg_alpha = _pair(-rng.integers(-30, 31, m), -rng.integers(-30, 31, m))   # -α per column
-    beta_one = _pair(16, 0)                              # β = 1.0 in F4
-    cfg = _cfg(b_one=1)                                  # alpha·P + 1·X, no reduce
-    got, exp = run(cfg, P, _pair(np.zeros((n, m)), np.zeros((n, m))), X, neg_alpha, beta_one)
-    np.testing.assert_array_equal(got[0], exp[0])
-    np.testing.assert_array_equal(got[1], exp[1])
-
-
-def test_cg_complex_inner_product_conj():
-    # ps = Σ conj(P)·S:  a=S, b=P, b_conj, c_zero, reduce=rows (complex)
+# --- complex-op coverage ------------------------------------------------------
+def test_conj_inner_product_reduce():
+    # ps[j] = Σ_i S[i,j]·conj(P[i,j]) (the column inner product).
     rng = np.random.default_rng(13)
     n, m = 6, 2
     S = _pair(rng.integers(-50, 51, (n, m)), rng.integers(-50, 51, (n, m)))
     P = _pair(rng.integers(-50, 51, (n, m)), rng.integers(-50, 51, (n, m)))
-    cfg = _cfg(b_conj=1, c_zero=1, reduce_rows=1)
-    got, exp = run(cfg, S, P, _pair(np.zeros((n, m)), np.zeros((n, m))), _pair(16, 0), _pair(0, 0))
+    got, exp = run(_cfg(op=OpCode.inner_prod, reduce=1), S, P, _pair(16, 0))
     np.testing.assert_array_equal(got[0], exp[0])
     np.testing.assert_array_equal(got[1], exp[1])
 
 
-def test_cg_rnorm_sum_abs_sq_is_real():
-    # rnorm = Σ |R|²:  a=R, b=R, b_conj, c_zero, reduce=rows -> result is REAL (im == 0)
+def test_rnorm_sum_abs_sq_is_real():
+    # rnorm[j] = Σ_i |R[i,j]|² (R·conj(R), reduced) -> REAL (im == 0), non-negative.
     rng = np.random.default_rng(14)
     n, m = 6, 2
     R = _pair(rng.integers(-50, 51, (n, m)), rng.integers(-50, 51, (n, m)))
-    # saturate so the (non-negative) magnitude clamps to OUT_BW max rather than wrapping
-    cfg = _cfg(b_conj=1, c_zero=1, reduce_rows=1, out_bw=12, o_sat=1)
-    got, exp = run(cfg, R, R, _pair(np.zeros((n, m)), np.zeros((n, m))), _pair(16, 0), _pair(0, 0))
+    cfg = _cfg(op=OpCode.inner_prod, reduce=1, out_bw=12, o_sat=1)
+    got, exp = run(cfg, R, R, _pair(16, 0))
     np.testing.assert_array_equal(got[0], exp[0])
-    np.testing.assert_array_equal(got[1], np.zeros_like(got[1]))   # |R|² is real
-    assert np.all(got[0] >= 0)                                     # and non-negative (no wrap)
+    np.testing.assert_array_equal(got[1], np.zeros_like(got[1]))  # |R|² is real
+    assert np.all(got[0] >= 0)
