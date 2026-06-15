@@ -1128,6 +1128,85 @@ def _gen_write_axi4_stream_elem_specializations(
     return "\n".join(lines)
 
 
+def _gen_lane_helpers(
+    elem_type: type[DataSchema],
+    indent_level: int = 0,
+) -> str:
+    """Regime-agnostic lane methods (Phase 1a) over all three interfaces.
+
+    Each call moves the next ``LW = lane_capacity<W>() = max(1, pf)`` elements:
+
+    - ``pf >= 1`` (``LW = pf``): one word/beat -> ``pf`` lanes; ``n`` (``1 <= n <= LW``) is the
+      valid count (``pf`` for a full word, fewer only for the final partial one).
+    - ``pf == 0`` (``LW = 1``, wide element): one element spanning ``ceil(elem/W)`` words/beats
+      -> ``dst[0]``; ``n`` is ignored (always 1).
+
+    Both regimes are already implemented by the corresponding ``*_elem_impl<W>::run`` structs (the
+    ``pf >= 1`` lane logic and the ``pf == 0`` multi-word assembly the bulk ``read_array`` also
+    does), so the lane methods delegate to them, passing ``pf >= 1 ? n : 1`` so the wide-element
+    call always moves its single element regardless of the supplied ``n``.  (They call the
+    ``*_impl::run`` structs, not the ``*_elem`` wrappers: the wrappers declare a
+    ``value_type out[pf<W>()]`` buffer, which is an illegal zero-length array for ``pf == 0``,
+    whereas ``run`` takes a plain ``value_type*``.)  Memory methods act at the given word pointer
+    and do not advance -- the caller advances by ``get_nwords<W>(LW)`` words.
+    """
+    indent = elem_type._get_indent(indent_level)
+    i1 = elem_type._get_indent(indent_level + 1)
+    lc = "lane_capacity<word_bw>()"
+    sel = "pf<word_bw>() >= 1 ? n : 1"
+    axis = "hls::stream<streamutils::axi4s_word<word_bw>>&"
+
+    return "\n".join([
+        "// --- lane methods (Phase 1a): move LW = lane_capacity<W>() = max(1, pf) elements ---",
+        "// dst is a buffer of length LW; pf >= 1 -> n valid lanes of one word/beat, pf == 0 ->",
+        "// one wide element across ceil(elem/W) words/beats (n ignored).  Memory: the caller",
+        "// advances the word pointer by get_nwords<W>(LW); streams self-sequence.",
+        "",
+        "template<int word_bw>",
+        f"{indent}inline void read_array_lane(const ap_uint<word_bw>* src, value_type dst[{lc}], int n = {lc}) {{",
+        f"{i1}#pragma HLS INLINE",
+        f"{i1}read_array_elem_impl<word_bw>::run(src, dst, {sel});",
+        f"{indent}}}",
+        "",
+        "template<int word_bw>",
+        f"{indent}inline void write_array_lane(const value_type src[{lc}], ap_uint<word_bw>* dst, int n = {lc}) {{",
+        f"{i1}#pragma HLS INLINE",
+        f"{i1}write_array_elem_impl<word_bw>::run(src, dst, {sel});",
+        f"{indent}}}",
+        "",
+        "template<int word_bw>",
+        f"{indent}inline void read_stream_lane(hls::stream<ap_uint<word_bw>>& s, value_type dst[{lc}], int n = {lc}) {{",
+        f"{i1}#pragma HLS INLINE",
+        f"{i1}read_stream_elem_impl<word_bw>::run(s, dst, {sel});",
+        f"{indent}}}",
+        "",
+        "template<int word_bw>",
+        f"{indent}inline void write_stream_lane(const value_type src[{lc}], hls::stream<ap_uint<word_bw>>& s, int n = {lc}) {{",
+        f"{i1}#pragma HLS INLINE",
+        f"{i1}write_stream_elem_impl<word_bw>::run(s, src, {sel});",
+        f"{indent}}}",
+        "",
+        "template<int word_bw>",
+        f"{indent}inline void read_axi4_stream_lane({axis} s, value_type dst[{lc}], int n, streamutils::tlast_status& tl) {{",
+        f"{i1}#pragma HLS INLINE",
+        f"{i1}read_axi4_stream_elem_impl<word_bw>::run(s, dst, tl, {sel});",
+        f"{indent}}}",
+        "",
+        "template<int word_bw>",
+        f"{indent}inline void read_axi4_stream_lane({axis} s, value_type dst[{lc}], int n = {lc}) {{",
+        f"{i1}#pragma HLS INLINE",
+        f"{i1}streamutils::tlast_status tl = streamutils::tlast_status::no_tlast;",
+        f"{i1}read_axi4_stream_lane<word_bw>(s, dst, n, tl);",
+        f"{indent}}}",
+        "",
+        "template<int word_bw>",
+        f"{indent}inline void write_axi4_stream_lane(const value_type src[{lc}], {axis} s, bool tlast = false, int n = {lc}) {{",
+        f"{i1}#pragma HLS INLINE",
+        f"{i1}write_axi4_stream_elem_impl<word_bw>::run(s, src, tlast, {sel});",
+        f"{indent}}}",
+    ])
+
+
 def _gen_stream_elem_helpers(
     elem_type: type[DataSchema],
     word_bw_supported: list[int],
@@ -1143,6 +1222,13 @@ def _gen_stream_elem_helpers(
         "template<int word_bw>",
         f"{indent}static constexpr int pf() {{",
         f"{i1}return word_bw / {elem_bw};",
+        f"{indent}}}",
+        "",
+        "// lane_capacity = max(1, pf): the lane-buffer size and loop step (call it LW). It is pf",
+        "// in the vectorized regime (pf >= 1) and 1 in the wide-element regime (pf == 0).",
+        "template<int word_bw>",
+        f"{indent}static constexpr int lane_capacity() {{",
+        f"{i1}return pf<word_bw>() >= 1 ? pf<word_bw>() : 1;",
         f"{indent}}}",
         "",
         _gen_read_array_elem_specializations(
@@ -1180,6 +1266,8 @@ def _gen_stream_elem_helpers(
             word_bw_supported=word_bw_supported,
             indent_level=indent_level,
         ),
+        "",
+        _gen_lane_helpers(elem_type=elem_type, indent_level=indent_level),
         "",
         "template<int word_bw>",
         f"{indent}inline void read_stream(hls::stream<ap_uint<word_bw>>& s, value_type* dst, int len) {{",
