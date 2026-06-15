@@ -1207,6 +1207,105 @@ def _gen_lane_helpers(
     ])
 
 
+def _gen_slice_helpers(
+    elem_type: type[DataSchema],
+    indent_level: int = 0,
+) -> str:
+    """Element-indexed range methods (Phase 1b) over memory, built on the 1a lane methods.
+
+    ``read_array_slice<W>(words, i0, i1, out)`` reads elements ``[i0, i1)`` into ``out[0 ..
+    i1-i0)``; ``write_array_slice<W>(in, words, i0, i1)`` is the inverse.  The caller works in
+    **element coordinates** -- no ``i0/PF`` in the kernel.
+
+    Layout is word-aligned (matching the Python golden): element ``i`` is lane ``i % LW`` of group
+    ``i / LW``, where ``LW = lane_capacity<W>()`` and a group spans ``WPU = get_nwords<W>(LW)``
+    words -- ``1`` word holding ``pf`` lanes when ``pf >= 1``, or ``ceil(elem/W)`` words for one
+    wide element when ``pf == 0``.  The walk keeps a running word pointer (advanced by ``WPU`` per
+    group) and a per-group lane index, so there is no per-element divide; ``i0`` is located once
+    with the compile-time-constant ``LW`` (a multiply/shift, not a hardware divider), correct for
+    any ``pf`` -- non-powers-of-two and ``pf == 0`` included.
+
+    ``write_array_slice`` read-modify-writes a **partial boundary group** (one whose word it shares
+    with neighbor elements outside ``[i0, i1)``) so those neighbors are preserved; a fully-covered
+    group skips the read.  A statically-sized whole-array overload (range ``[0, N)``) deduces ``N``.
+    """
+    indent = elem_type._get_indent(indent_level)
+    i1 = elem_type._get_indent(indent_level + 1)
+    i2 = elem_type._get_indent(indent_level + 2)
+
+    return "\n".join([
+        "// --- range methods (Phase 1b): element-indexed [i0, i1) over memory, on the lane methods ---",
+        "// Word-aligned layout: element i is lane (i % LW) of group (i / LW); a group is one word",
+        "// (pf >= 1) or ceil(elem/W) words (pf == 0, one wide element). Walk groups with a running",
+        "// word pointer (advance WPU = get_nwords<W>(LW) per group) + a per-group lane index -- no",
+        "// per-element divide. Element coordinates throughout: the caller never computes i0/PF.",
+        "",
+        "template<int word_bw>",
+        f"{indent}inline void read_array_slice(const ap_uint<word_bw>* words, int i0, int i1, value_type* out) {{",
+        f"{i1}#pragma HLS INLINE",
+        f"{i1}if (words == nullptr || out == nullptr || i1 <= i0) {{",
+        f"{i2}return;",
+        f"{i1}}}",
+        f"{i1}constexpr int LW = lane_capacity<word_bw>();",
+        f"{i1}constexpr int WPU = get_nwords<word_bw>(LW);",
+        f"{i1}const int q0 = i0 / LW;                          // first group (LW is compile-time)",
+        f"{i1}const ap_uint<word_bw>* wp = words + q0 * WPU;",
+        f"{i1}int o = 0;",
+        f"{i1}for (int gb = q0 * LW; gb < i1; gb += LW) {{     // gb = group base element index",
+        f"{i2}const int lstart = (gb < i0) ? (i0 - gb) : 0;",
+        f"{i2}const int lend = (gb + LW > i1) ? (i1 - gb) : LW;",
+        f"{i2}value_type lane[LW];",
+        f"{i2}read_array_lane<word_bw>(wp, lane, LW);",
+        f"{i2}for (int l = lstart; l < lend; ++l) {{",
+        f"{i2}    out[o++] = lane[l];",
+        f"{i2}}}",
+        f"{i2}wp += WPU;",
+        f"{i1}}}",
+        f"{indent}}}",
+        "",
+        "template<int word_bw>",
+        f"{indent}inline void write_array_slice(const value_type* in, ap_uint<word_bw>* words, int i0, int i1) {{",
+        f"{i1}#pragma HLS INLINE",
+        f"{i1}if (words == nullptr || in == nullptr || i1 <= i0) {{",
+        f"{i2}return;",
+        f"{i1}}}",
+        f"{i1}constexpr int LW = lane_capacity<word_bw>();",
+        f"{i1}constexpr int WPU = get_nwords<word_bw>(LW);",
+        f"{i1}const int q0 = i0 / LW;",
+        f"{i1}ap_uint<word_bw>* wp = words + q0 * WPU;",
+        f"{i1}int o = 0;",
+        f"{i1}for (int gb = q0 * LW; gb < i1; gb += LW) {{",
+        f"{i2}const int lstart = (gb < i0) ? (i0 - gb) : 0;",
+        f"{i2}const int lend = (gb + LW > i1) ? (i1 - gb) : LW;",
+        f"{i2}value_type lane[LW];",
+        f"{i2}// Partial boundary group shares its word with neighbors outside [i0, i1):",
+        f"{i2}// read-modify-write to preserve them. A fully-covered group skips the read.",
+        f"{i2}if (lstart != 0 || lend != LW) {{",
+        f"{i2}    read_array_lane<word_bw>(wp, lane, LW);",
+        f"{i2}}}",
+        f"{i2}for (int l = lstart; l < lend; ++l) {{",
+        f"{i2}    lane[l] = in[o++];",
+        f"{i2}}}",
+        f"{i2}write_array_lane<word_bw>(lane, wp, LW);",
+        f"{i2}wp += WPU;",
+        f"{i1}}}",
+        f"{indent}}}",
+        "",
+        "// Whole-array overloads (range [0, N)); N is deduced from the statically-sized buffer.",
+        "template<int word_bw, int N>",
+        f"{indent}inline void read_array_slice(const ap_uint<word_bw>* words, value_type (&out)[N]) {{",
+        f"{i1}#pragma HLS INLINE",
+        f"{i1}read_array_slice<word_bw>(words, 0, N, out);",
+        f"{indent}}}",
+        "",
+        "template<int word_bw, int N>",
+        f"{indent}inline void write_array_slice(const value_type (&in)[N], ap_uint<word_bw>* words) {{",
+        f"{i1}#pragma HLS INLINE",
+        f"{i1}write_array_slice<word_bw>(in, words, 0, N);",
+        f"{indent}}}",
+    ])
+
+
 def _gen_stream_elem_helpers(
     elem_type: type[DataSchema],
     word_bw_supported: list[int],
@@ -1268,6 +1367,8 @@ def _gen_stream_elem_helpers(
         ),
         "",
         _gen_lane_helpers(elem_type=elem_type, indent_level=indent_level),
+        "",
+        _gen_slice_helpers(elem_type=elem_type, indent_level=indent_level),
         "",
         "template<int word_bw>",
         f"{indent}inline void read_stream(hls::stream<ap_uint<word_bw>>& s, value_type* dst, int len) {{",
