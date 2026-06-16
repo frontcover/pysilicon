@@ -56,7 +56,7 @@ retargeting the channel width is a one-constant change, and the bytes match the 
 | | `struct` | `raw` |
 |---|---|---|
 | C++ shape | a wrapper struct (`data[N]` + methods) | a flat `elem_t[N]` |
-| Packing | hidden inside the methods | explicit (`read_array_elem` free functions) |
+| Packing | hidden inside the methods | explicit (`read_array_lane` / `read_array_slice` free functions) |
 | Lane control | no | yes — the unrolled lane loop |
 | Best for | a field of a schema, a port payload, whole-array I/O | throughput kernels, per-cycle lane scheduling |
 
