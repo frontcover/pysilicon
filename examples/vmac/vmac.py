@@ -14,19 +14,21 @@ component's ``HwParam`` with the schema's symbolic ``Param``::
     cmd   = accel.Cmd(...)                     # VmacCmd.specialize(mem_awidth=…, data_bw=…)
     dst   = accel.execute(cmd, mem)            # the bit-exact golden (instance method)
 
-The fused op is ``D = α·A·op(B) + β·C [, reduce_rows]`` over a shared-memory array.  The
-**single** synthesizable hook is :meth:`vmac_compute` — read operands, fused op, requantize,
-write — whose **Python body is the golden** (it delegates to :meth:`execute`) and whose **C++
-is hand-written** in ``vmac_compute_impl.tpp`` (linked via ``@synthesizable(impl_file=…)``).
+The op is one of three **element-wise** complex ops over a row-major shared-memory region —
+``scalar_mult`` (``α[i]·A``), ``inner_prod`` (``A·conj(B)``), ``sum`` (``A+B``) — with an
+optional row reduction ``Y[j] = Σ_i R[i, j]``.  The **single** synthesizable hook is
+:meth:`vmac_compute` — read operands, op, requantize, write — whose **Python body is the
+golden** (it delegates to :meth:`execute`) and whose **C++ is hand-written** in
+``vmac_compute_impl.tpp`` (linked via ``@synthesizable(impl_file=…)``).
 This mirrors :class:`~examples.shared_mem.hist.HistAccel`: declare the structure, hand-write
 the compute, with a golden that auto-checks it.
 
 The golden :meth:`execute` composes the merged integer-backed numpy ``ComplexField``
 operators (``cmult`` / ``cadd`` / ``conj``), the wide-accumulator column reduction
-:func:`~waveflow.hw.complexfield.csum` for ``reduce_rows``, and the output requantize
+:func:`~waveflow.hw.complexfield.csum` when ``reduce`` is set, and the output requantize
 (right-shift + round + saturate) via the ``ap_fixed``-exact integer requantizer.  The
-datapath: **multiply → wide accumulate (full precision, ≤ acc_bw) → right-shift → round +
-saturate → write (out_bw)**.  The right-shift is the single lossy step (an ``ap_fixed``
+datapath: **element-wise op → wide accumulate (full precision, ≤ acc_bw) → right-shift →
+round + saturate → write (out_bw)**.  The right-shift is the single lossy step (an ``ap_fixed``
 assignment); its amount ``SHIFT = F_acc − F_in`` is *derived* from the flags + the structural
 format (not in the command — see :meth:`output_format` / :meth:`derived_shift`), so the golden
 is bit-exact with the Vitis kernel.  ``mem`` is the shared memory: a 1-D structured
@@ -95,7 +97,7 @@ class VmacAccel(HwComponent):
             object.__setattr__(self, "_hw_construction_complete", True)
         else:
             super().__post_init__()
-            # The m_axi data port (the shared memory the fused op reads/writes) and the
+            # The m_axi data port (the shared memory the op reads/writes) and the
             # command stream; mirror HistAccel's endpoint set.
             self.s_in = StreamIFSlave(
                 name=f"{self.name}_s_in", sim=self.sim, bitwidth=int(self.mem_dwidth)
@@ -307,8 +309,8 @@ class VmacAccel(HwComponent):
     # --- the synthesizable hook + kernel body --------------------------------
     @synthesizable(impl_file="vmac_compute_impl.tpp")
     def vmac_compute(self, cmd: VmacCmd, mem: np.ndarray) -> ProcessGen[DataArray]:
-        """The fused op ``D = α·A·op(B) + β·C [, reduce_rows]`` — the **single** hook (the
-        whole datapath: read operands, fused op, requantize, write).
+        """The element-wise op (``scalar_mult`` / ``inner_prod`` / ``sum``, optional row
+        reduce) — the **single** hook (the whole datapath: read operands, op, requantize, write).
 
         Its Python body is the golden (delegates to :meth:`execute`); its C++ is the
         hand-written ``vmac_compute_impl.tpp`` (the ``ap_fixed`` accumulator =
@@ -322,7 +324,7 @@ class VmacAccel(HwComponent):
     def run_proc(self) -> ProcessGen[None]:
         """Kernel body (single ap_ctrl_hs invocation) — the codegen root.
 
-        Read one :class:`VmacCmd` off ``s_in``, then run the fused op in the
+        Read one :class:`VmacCmd` off ``s_in``, then run the op in the
         :meth:`vmac_compute` hook against the ``m_mem`` shared memory.  The m_axi
         read/write plumbing around the hook (the strided gather/scatter the
         ``.tpp`` performs lane-by-lane) and the codegen wiring are completed in the
