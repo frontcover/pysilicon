@@ -41,8 +41,9 @@ dag.run(cfg)
 -  `include/float32_array_utils.h` containing the class definition and helpers to be used in synthesizable code
 - `float32_array_utils_tb.h` for helpers that may not be synthesizable (like file I/O) that can the testbench. 
 
-The first file declares the `float32_array_utils::` namespace with `pf<>`, the bulk `read_array`/`write_array`, the
-per-word `read_array_elem`/`write_array_elem`, and the stream variants.
+The first file declares the `float32_array_utils::` namespace with the geometry constants
+(`pf<>` / `lane_capacity<>` / `get_nwords<>`), the element-range `read_array_slice`/`write_array_slice`, the
+per-call lane methods `read_array_lane`/`write_array_lane`, and the stream variants.
 
 The defining property of `raw` mode: **the generated code is keyed on the element type, not on a particular
 array.** There is no per-array struct — the same `float32_array_utils` helpers serve *every* `raw` array of
@@ -98,9 +99,10 @@ After we generate the include file `point_2d.hpp`:  We can obtain the parameters
 ```cpp
 #include "point_2d_array_utils.h"
 namespace point2d = point2d_array_utils;
-static constexpr int PF      = point2d::pf<WORD_BW>();           // WORD_BW / 64 (0 if WORD_BW < 64)
-static constexpr int elem_bw = point2d::value_bitwidth;         // 64
-static constexpr int wpe     = point2d::get_nwords<WORD_BW>(1);  // ceil(64 / WORD_BW): words per element
+static constexpr int PF      = point2d::pf<WORD_BW>();             // WORD_BW / 64 (0 if WORD_BW < 64)
+static constexpr int LW      = point2d::lane_capacity<WORD_BW>();  // max(1, PF): lane-buffer size + loop step
+static constexpr int elem_bw = point2d::value_bitwidth;           // 64
+static constexpr int wpe     = point2d::get_nwords<WORD_BW>(1);    // ceil(64 / WORD_BW): words per element
 ```
 
 Each `pf` element slot in a word is a **lane**. When `pf ≥ 1`, a loop that touches all `pf` lanes per cycle
@@ -120,100 +122,95 @@ per-transfer cycle cost — see [Serialization](../schema/serialization.md).)
 
 
 
-## Serialization and deserialization of a full vector
+## Reading and writing a range — `read_array_slice`
 
-Conceptually this is the same serialization described for [data schemas](../schema/serialization.md): bits
-to and from `ap_uint<WORD_BW>` words. For an array, the **bulk** helpers move the whole array in one call:
+When you want the array (or a sub-range) resident — a coefficient table loaded once, a strided row — and
+don't need cycle-level scheduling, `read_array_slice` moves an arbitrary element range `[i0, i1)` in one
+call, working entirely in **element coordinates**:
 
 ```cpp
-static const int NWORDS = au::get_nwords<WORD_BW>(N);   // packed words for N elements
-ap_uint<WORD_BW> words[NWORDS];  
 float x[N];
-au::read_array<WORD_BW>(words, x, N);    // words: const ap_uint<WORD_BW>*  → x[0..N)
-// ... compute on x ...
-au::write_array<WORD_BW>(x, words, N);   // x → words
+au::read_array_slice<WORD_BW>(x_words, x);            // whole array → x[0..N)   (static-size overload)
+au::read_array_slice<WORD_BW>(x_words, i0, i1, x);    // elements [i0, i1)  → x[0 .. i1-i0)
+au::write_array_slice<WORD_BW>(x, x_words, i0, i1);   // x → words [i0, i1)
 ```
 
-The packed word count is `get_nwords<WORD_BW>(N) = ⌈N · element_bits / WORD_BW⌉` — the array-utils helper
-that mirrors the schema-level `n_words`. The whole-array helpers are pipelined: they retire `pf` elements
-per cycle when `WORD_BW ≥ element_bits`, and one element per `words_per_elem` cycles when the element is
-wider than the word.
+It locates `i0`'s word for you and is **division-free** — a running bit offset plus a wrapping lane counter,
+correct for *any* `pf` (including non-powers-of-two, where `i / pf` and `i % pf` would otherwise synthesize as
+real hardware dividers). It handles partial-word ends and wide elements (`pf = 0`) internally, so the kernel
+never writes `i0 / pf` or `i % pf`. An unaligned `write_array_slice` read-modify-writes the shared boundary
+words rather than clobbering the neighbor elements packed beside the range.
 
-Random access into the packed words depends on how the element lines up with the word, so there is no
-single index formula:
+The packed word count for `N` elements is `get_nwords<WORD_BW>(N) = ⌈N · element_bits / WORD_BW⌉` — the
+array-utils helper that mirrors the schema-level `n_words`.
 
-- **`WORD_BW ≥ element_bits`** (and a multiple of it): element `i` is lane `i % pf` of word `⌊i / pf⌋`. A
-  slice that starts on a word boundary (`start % pf == 0`) is then just a pointer offset:
+Use `read_array_slice` when you want the data resident; when you want **throughput**, drop to the lane loop
+below.
 
-  ```cpp
-  const int pf = au::pf<WORD_BW>();
-  au::read_array<WORD_BW>(words + start / pf, x, len);   // elements [start, start+len), start % pf == 0
-  ```
+## The lane loop
 
-- **`element_bits > WORD_BW`**: element `i` occupies words `[i · words_per_elem, (i+1) · words_per_elem)`.
-
-When `WORD_BW` is not a multiple of `element_bits`, elements straddle word boundaries — compute the bit
-offset `i · element_bits` and locate the word yourself rather than relying on a per-element word index.
-
-Use the whole-array helpers when you want the array resident and don't need cycle-level scheduling (a
-coefficient table loaded once, say). When you *do* want throughput, drop to the lane primitives below.
-
-## Serialization and deserialization of a lane
-
-The lane primitives expose one word — `pf` lanes — at a time, which is what you unroll over. This is the
-pattern for the **vectorized regime** (`WORD_BW ≥ element_bits`, so `pf ≥ 1`); for a wide element (`pf = 0`)
-the loop below is invalid — use the bulk `read_array` above. Walk the array in steps of `pf`, read a word
-into a **partitioned** lane array, `UNROLL` the compute across the lanes, and write the word back. Here the
-kernel computes `y[i] = x[i] * x[i]`:
+The **lane methods** move the next `LW = lane_capacity<WORD_BW>() = max(1, pf)` elements per call — `pf`
+lanes of a word in the vectorized regime (`WORD_BW ≥ element_bits`), or one wide element spanning
+`⌈element_bits / WORD_BW⌉` words when `pf = 0`. You step the loop by `LW`, read into a **partitioned** lane
+buffer, `UNROLL` the compute across the lanes, and write back — **one shape that covers both regimes with no
+branch**. Here the kernel computes `y[i] = x[i] * x[i]`:
 
 ```cpp
 #include "float32_array_utils.h"
 namespace au = float32_array_utils;
-static const int PF = au::pf<WORD_BW>();   // >= 1 in this regime (WORD_BW >= element_bits)
+static const int PF  = au::pf<WORD_BW>();              // 0 if element wider than the word
+static const int LW  = au::lane_capacity<WORD_BW>();   // = max(1, PF): elements per step and per buffer
+const int WPU = au::get_nwords<WORD_BW>(LW);           // words advanced per step
 
-int iword = 0;                             // word index — incremented, so no per-iteration divide
-for (int i = 0; i < N; i += PF) {
+const ap_uint<WORD_BW>* xp = x_words;                  // running pointers — no per-iteration divide
+ap_uint<WORD_BW>*       yp = y_words;
+for (int i = 0; i < N; i += LW) {
 #pragma HLS PIPELINE II=1
-    float lane[PF];
+    float lane[LW];
 #pragma HLS ARRAY_PARTITION variable=lane complete dim=1     // lanes in parallel registers
-    const int n = (N - i < PF) ? (N - i) : PF;               // tail: last (partial) word
+    const int n = (N - i < LW) ? (N - i) : LW;               // tail: last (partial) word
 
-    au::read_array_elem<WORD_BW>(&x_words[iword], lane, n);  // one word → pf lanes
-    for (int k = 0; k < PF; ++k) {
+    au::read_array_lane<WORD_BW>(xp, lane, n);               // LW elements in
+    for (int k = 0; k < LW; ++k) {
 #pragma HLS UNROLL
         if (k < n) lane[k] = lane[k] * lane[k];              // one element per lane
     }
-    au::write_array_elem<WORD_BW>(lane, &y_words[iword], n); // pf lanes → one word
-    ++iword;
+    au::write_array_lane<WORD_BW>(lane, yp, n);              // LW elements out
+    xp += WPU; yp += WPU;
 }
 ```
 
 The three pragmas are what vectorize the loop:
 
-- **`ARRAY_PARTITION variable=lane complete`** — splits the lane array into `pf` registers so every lane is
+- **`ARRAY_PARTITION variable=lane complete`** — splits the lane buffer into `LW` registers so every lane is
   live in the same cycle (otherwise it is a BRAM and the `UNROLL` serializes on memory ports).
-- **`UNROLL`** — instantiates `pf` parallel copies of the compute.
-- **`PIPELINE II=1`** — issues one word (so `pf` elements) per cycle.
+- **`UNROLL`** — instantiates `LW` parallel copies of the compute.
+- **`PIPELINE II=1`** — issues one word (so `pf` elements) per cycle in the vectorized regime.
 
-The `iword` counter is a small but real win: advancing it by one word per iteration gives the address
-`&x_words[iword]` rather than `x_words + i / PF`, avoiding a per-iteration hardware divide (and the matching
-`y_words[iword]` for the output).
+The **running pointers** `xp`/`yp` are a small but real win: advancing by a constant `WPU` words per iteration
+gives the address directly, rather than `x_words + i / PF` — avoiding a per-iteration hardware divide.
+
+The same loop covers the **wide-element regime for free**: when `pf = 0`, `LW = 1` and `WPU = ⌈element_bits /
+WORD_BW⌉`, so each step pulls one element across `WPU` words and HLS relaxes `II` to `WPU` — one element per
+`WPU` cycles, the honest cost of a wide element. There is no `pf = 0` special case, and the `n` argument is
+simply ignored (`LW = 1`).
 
 Widen `WORD_BW` and `PF` rises with it; the same loop retires more elements per cycle. That is the
 bus-width → throughput relationship made concrete (and what the VMAC `mem_dwidth` sweep measures).
 
 ### Streams instead of memory
 
-For an AXI-Stream port the shape is identical, but the lane read/write use the stream variants, which also
-carry `TLAST`:
+For an AXI-Stream port the shape is identical, but you **drop the running pointers** (`xp`/`yp`/`WPU` — the
+stream sequences itself) and use the stream lane variants, which also carry `TLAST`:
 
 ```cpp
-au::read_axi4_stream_elem<WORD_BW>(s_in,  lane, n);                 // pf lanes off the stream
-au::write_axi4_stream_elem<WORD_BW>(s_out, lane, /*tlast=*/last, n);
+streamutils::tlast_status tl;
+au::read_axi4_stream_lane<WORD_BW>(s_in,  lane, n, tl);             // LW elements off the stream
+au::write_axi4_stream_lane<WORD_BW>(s_out, lane, /*tlast=*/last, n);
 ```
 
-`examples/stream_inband/poly_evaluate_impl.tpp` is the worked stream example;
-`examples/vmac/vmac_compute_impl.tpp` is the worked `m_axi` example.
+`examples/vmac/vmac_compute_impl.tpp` is the worked `m_axi` example (the lane loop above);
+`examples/stream_inband/poly_evaluate_impl.tpp` is the worked stream example.
 
 ## See also
 

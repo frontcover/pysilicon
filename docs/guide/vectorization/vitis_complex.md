@@ -39,8 +39,8 @@ CFixed = ComplexField.specialize(FixedField.specialize(16, 4, signed=True))
 dag.add(ArrayUtilsStep(CFixed, [64, 128]))    # generates <type>_array_utils.h for the complex element
 ```
 
-This emits the usual `<type>_array_utils::` namespace (`pf<>`, `read_array`/`read_array_elem`,
-`write_array`/`write_array_elem`, …) — complex elements pack/unpack like any other, re in the low
+This emits the usual `<type>_array_utils::` namespace (`pf<>` / `lane_capacity<>`, `read_array_slice` /
+`read_array_lane`, and the write/stream variants) — complex elements pack/unpack like any other, re in the low
 `data_bw` bits and im in the high `data_bw` bits of each slot. The arithmetic comes from two headers shipped
 with Waveflow:
 
@@ -58,24 +58,24 @@ just a complex element type and `complex_utils::` arithmetic. A complex multiply
 #include "complex_utils.hpp"
 namespace au = cfixed_array_utils;
 
-au::value_type a[N], b[N], y[N];           // complex elements (std::complex<ap_fixed>)
-au::read_array<WORD_BW>(a_words, a, N);
-au::read_array<WORD_BW>(b_words, b, N);
+au::value_type a[N], b[N], y[N];               // complex elements (std::complex<ap_fixed>)
+au::read_array_slice<WORD_BW>(a_words, a);     // whole array resident (static-size overload)
+au::read_array_slice<WORD_BW>(b_words, b);
 
 for (int i = 0; i < N; ++i) {
 #pragma HLS PIPELINE II=1
     y[i] = complex_utils::cmult(a[i], b[i]);   // full-precision complex multiply
 }
 
-au::write_array<WORD_BW>(y, y_words, N);
+au::write_array_slice<WORD_BW>(y, y_words, 0, N);
 ```
 
 `conj` / `cadd` / `csub` follow the same shape (`complex_utils::conj(a[i])`, etc.). Call them **qualified**
 (`complex_utils::conj`): an unqualified `conj` on a `std::complex` argument resolves to `std::conj` via ADL,
 which is not the full-precision Waveflow operator.
 
-For lane-level throughput, the [raw lane loop](./vitis_raw.md#serialization-and-deserialization-of-a-lane)
-works unchanged — `read_array_elem<WORD_BW>` delivers `pf` complex lanes per word and you unroll
+For lane-level throughput, the [raw lane loop](./vitis_raw.md#the-lane-loop)
+works unchanged — `read_array_lane<WORD_BW>` delivers `LW` complex lanes per word and you unroll
 `complex_utils::cmult` across them. Note that because a complex element is `2·data_bw` bits, a *real* array
 of the same `data_bw` packs **twice** the lanes per word — the real-vs-complex throughput difference is just
 the packing factor.
@@ -83,7 +83,7 @@ the packing factor.
 ## Worked example
 
 `examples/schemas/complex` is the bit-exact conformance: it lays operands out with `arrayutils.write_array`,
-runs `cmult` / `cadd` / `csub` / `conj` kernels built from `<type>_array_utils::read_array` +
+runs `cmult` / `cadd` / `csub` / `conj` kernels built from the `<type>_array_utils` serialization helpers +
 `complex_utils.hpp`, and checks the C++ words against the Python `DataArray[ComplexField]` model —
 bit-for-bit, on real Vitis.
 
