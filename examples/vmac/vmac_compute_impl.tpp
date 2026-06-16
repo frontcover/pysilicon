@@ -53,12 +53,17 @@ static const int VMAC_OP_INNER_PROD = 1;
 static const int VMAC_OP_SUM = 2;
 
 // Map an *element* index/stride to its *word* index for PF-packed memory (PF elements/word):
-// the divide is a shift (PF is a compile-time power of two), with a PF-alignment check — the
-// per-row operand regions (bases + strides) must be word-aligned.  (The per-row indirect alpha
-// is genuinely element-addressed and is read via read_array_slice, not this aligned helper.)
+// elem / PF — a shift when PF is a power of two (a static_assert enforces that, so a non-power-
+// of-two config fails loud at compile time rather than silently synthesizing a real divider),
+// plus a PF-alignment check — the per-row operand regions (bases + strides) must be word-aligned.
+// (The per-row indirect alpha is genuinely element-addressed and is read via read_array_slice,
+// not this aligned helper.)
 template <int PF, typename T>
 static inline T elem_to_word(T elem) {
 #pragma HLS INLINE
+    static_assert(PF > 0 && (PF & (PF - 1)) == 0,
+                  "VMAC requires a power-of-two PF (MEM_BW / element_bits) so the element->word "
+                  "map is a shift; a non-power-of-two PF would synthesize a real hardware divider.");
     assert(elem % PF == 0 && "VMAC operand region must be PF-aligned (word-packed rows)");
     return elem / PF;
 }
