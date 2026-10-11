@@ -152,3 +152,7 @@ def test_markov_kernel_resources_files_four_tops_with_owners(tmp_path):
             recs = store.read(key, "resource")
             assert recs and all(r.source == "hls_estimate" for r in recs), (inst, key)
             assert recs[-1].payload["owner"] == entry["owner"]
+    # A second build with no new csynth files nothing: records are once per synthesis.
+    count = {k: len(store.read(k, "resource")) for k in store.keys()}
+    step.run(cfg, **inputs)
+    assert {k: len(store.read(k, "resource")) for k in store.keys()} == count
