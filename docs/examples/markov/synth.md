@@ -121,7 +121,7 @@ leaves, the crossbar -- each with the pysim object it realizes. Four more steps 
 
 ```bash
 python markov_build.py --through resource_report --platform <name>            # seconds
-python markov_build.py --through system_synth --platform <name>               # ~11 min of Vivado
+python markov_build.py --through system_synth --platform <name>               # ~2 min of Vivado
 ```
 
 `kernel_resources` files each top's csynth attribution; `resource_report` prints the estimate, a row per
@@ -129,14 +129,15 @@ pysim object. After `system_synth` (xc7z020, 10 ns) the measured total sits besi
 
 | row | LUT | FF | BRAM18 |
 |---|---:|---:|---:|
-| `mem` (`MemoryMod`: the BRAM window and its memory) | 12,435 | 32,982 | 0 |
-| `chain` (`MarkovChain`) | 2,034 | 3,115 | 0 |
-| `u` (`MmCreditStreamIF`: two writers and a FIFO) | 1,362 | 1,658 | 2 |
-| `gen` (`MarkovGen`) | 1,192 | 1,298 | 0 |
-| `xbar` (the crossbar) | 848 | 680 | 0 |
-| `chain_mm`, `gen_mm` (the adaptors) | 722 | 395 | 0 |
-| system integration | 0 | 2 | 0 |
-| **total** | **18,593** | **40,130** | **2** |
+| `chain` (`MarkovChain`) | 2,032 | 3,115 | 0 |
+| `u` (`MmCreditStreamIF`: two writers and a FIFO) | 1,377 | 1,658 | 2 |
+| `gen` (`MarkovGen`) | 1,193 | 1,298 | 0 |
+| `xbar` (the crossbar) | 849 | 680 | 0 |
+| `chain_mm`, `gen_mm` (the adaptors) | 732 | 395 | 0 |
+| `mem` (`MemoryMod`: the BRAM window and its memory) | 140 | 39 | 2 |
+| system integration | −36 | 2 | 0 |
+| **total** | **6,287** | **7,187** | **4** |
 
-The on-chip memory is two thirds of the LUTs: `bram_t2p` infers no block RAM and its 32 Kbit become
-flip-flops. The kernels are about half what their csynth reports estimated.
+The kernels are the cost, and each is about half what its csynth report estimated. The memory is one
+RAMB36 -- since `bram_t2p` was recoded with one `always` block per port: the first synthesis found it
+built from flip-flops, 8,769 LUT and 32,832 FF of a 18,593 / 40,130 total.

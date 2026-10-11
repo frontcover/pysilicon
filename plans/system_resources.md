@@ -287,39 +287,46 @@ Built as planned, with these decisions and findings:
   `LayeredModuleStore` answers per `(key, target)` from the first tier holding a record.
 - **Stage 4.**  Per-instance records file under a new target, `instance`, not `resource`: a
   composite kernel's whole instance is not its own cost, and `resource` is where a per-module lookup
-  reads.  The crossbar IP is regenerated for the synthesis part (the simulation IP is the RFSoC's,
-  which this Vivado cannot synthesize).  Markov on xc7z020 at 10 ns: 653 s, all 15 instances
-  attributed, total 18593 LUT / 40130 FF / 2 BRAM18, integration 0 LUT / 2 FF.
-  - **Gap, hls_estimate vs in-context synthesis (LUT):** markov_gen 2585 / 1192, markov_chain
-    4423 / 2034, queue writer 1531 / 812, credit writer 1097 / 492 -- csynth overestimates LUT ~2x;
+  reads.  They carry the system's identity, and the estimate matches in-context records on it (not on
+  the top's name: a stale run of the same top describes another design).  The crossbar IP is
+  regenerated for the synthesis part (the simulation IP is the RFSoC's, which this Vivado cannot
+  synthesize).
+  - **First run (xc7z020, 10 ns, 653 s):** total 18593 LUT / 40130 FF / 2 BRAM18.  **`bram_t2p`
+    inferred no BRAM** (512 x 64 -> 8769 LUT / 32832 FF; its front +3625 LUT of read mux): both ports
+    were written in one `always` block, which Vivado's true-dual-port template does not match.
+  - **`bram_t2p` recoded** with one `always` block per port (read-first, `ram_style = "block"`, the
+    collision check under `translate_off`).  All 168 XSI gates unchanged.  OOC 512 x 64: 4 BRAM18 /
+    2 LUT (was 83194 LUT / 32896 FF; 58 s, was 1249 s).
+  - **Markov now (116 s):** total **6287 LUT / 7187 FF / 4 BRAM18**; worst slack after synthesis
+    -0.70 ns at 10 ns.
+  - **Attribution granularity under `rebuilt` (the open question below) -- answered.**  With block
+    RAM, Vivado dissolved `u_mem_mem` and `u_mem` into the top: no rows, and the RAMB36 counted in no
+    child.  `KEEP_HIERARCHY` on every instance keeps the rows but costs +25% LUT / +30% FF (markov
+    7829 / 9314) -- a design nobody would ship -- so it is an option, off by default.  Instead an
+    instance with no row is priced by the primitives under its name prefix (`wf_prims`: REF_NAME
+    census, LUTRAM / BRAM weighted as `report_utilization` counts them); flattening keeps cell names.
+    The census and the report's site-level LUT count differ slightly: markov's integration reads
+    -36 LUT.
+  - **Gap, hls_estimate vs in-context synthesis (LUT):** markov_gen 2585 / 1193, markov_chain
+    4423 / 2032, queue writer 1531 / 811, credit writer 1097 / 508 -- csynth overestimates LUT ~2x;
     FF within ~30%.
-  - **`bram_t2p` infers no BRAM** (512 x 64 -> 8769 LUT / 32832 FF), and the BRAM window's front adds
-    3625 LUT of read mux: two thirds of markov's LUTs.  A fix belongs in `bram_t2p.v`'s coding style;
-    deferred, since the XSI gates run that file.
-  - Under `-flatten_hierarchy rebuilt` the adaptors' inline decoders do not show as integration (0
-    LUT): cross-boundary optimisation folded them into neighbouring instances.  Acceptable so far.
 - **Stage 5.**  The kernel row prefers this system's in-context record (the plan's example table
   shows `chain` as `vivado_synth (in markov_top)`), then a class model, then the `hls_estimate`
   records.  Views roll up into their adaptor's row.  CLI: `python -m waveflow.build.system_estimate
   <module:callable> --platform NAME [--composed] [--json]`.
 - **Stage 6.**  Not a `SweepRunner`: the leaves are a heterogeneous list of configurations, not a
   grid.  `measure_instances` gives what the runner would -- failure isolation (a failed
-  configuration is a row), and per-identity caching (a re-run synthesizes nothing).  Markov's eleven
-  configurations: ~32 min the first time (bram_t2p alone 1249 s), 0 s on a re-run.
-  - **Gap, composed prediction vs measured total:** LUT +411.6% (95,130 / 18,593), FF +2.1%, BRAM
-    exact.  With in-context records the estimate reproduces the total exactly (the gate).
-  - Cause, nearly all of it: **out-of-context `bram_t2p` is the full two-port memory (83,194 LUT);
-    in markov port B is tied idle and synthesis prunes it (8,769).**  An OOC number is an upper bound
-    for an instance whose ports the design ties off -- a leaf identity that ignores the tie-offs
-    cannot be priced from the library.  The rest: HLS LUT estimates ~2x, crossbar OOC 1292 vs 848 in
-    context.
-  - In context, the read mux is reported inside `u_mem_front` (3625 LUT vs 130 OOC): the
-    rebuilt-hierarchy smearing the open question below anticipated -- per-instance shares move, the
-    total does not.
+  configuration is a row), and per-identity caching (a re-run synthesizes nothing).
+  - **Gap, composed prediction vs measured total:** LUT +89.9% (11938 / 6287), FF +12.5%, BRAM
+    +50% (6 / 4).  With in-context records the estimate reproduces the total exactly (the gate).
+  - LUT: the kernels' hls_estimates, 5092 of the 5651-LUT excess; the crossbar OOC 1292 vs 849.
+    BRAM: out of context `bram_t2p` has both ports live (two RAMB36); in markov port B is tied idle
+    and one RAMB36 serves.  (Before the recode the composed gap was +412% LUT, nearly all the
+    flip-flop memory's tied-off port: 83194 LUT OOC vs 8769 in context.)
 
 **New open questions (from the results):** key a leaf on its tie-offs (an idle port is a
 different configuration -- `bram_t2p` with port B idle), or price a tied-off instance in context
-only; and whether `bram_t2p` should infer block RAM at all (its coding style, measured by this flow).
+only; and calibrate the hls_estimate -> vivado_synth LUT ratio, which dominates the composed gap.
 
 ## Not in scope
 

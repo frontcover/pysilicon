@@ -65,36 +65,47 @@ def _file_kernels(spec, store):
 
 
 def test_kernels_from_records_leaves_in_context_first(tmp_path):
-    from waveflow.build.system_synth import INSTANCE_TARGET
+    from waveflow.build.system_dag import rtl_rel
+    from waveflow.build.system_synth import INSTANCE_TARGET, system_identity
+    from waveflow.build.system_top import render_system_top
     from waveflow.calib.record_store import Record
 
-    sysm, spec, _here = _markov()
+    sysm, spec, here = _markov()
+    kdirs = {m: here / rtl_rel(m) for m in spec.modules}
+    if not all(d.is_dir() for d in kdirs.values()):
+        pytest.skip("no csynth RTL for markov -- in-context records are keyed by the system identity")
+    sys_key = system_identity(spec, render_system_top(spec), kdirs, part="", period_ns=0.0,
+                              impl=False)[0].key
     plat = _platform(tmp_path)
     store = plat.module_store()
     _file_kernels(spec, store)
+
+    def in_context(i, counters, system=sys_key):
+        r = resource_record(i.identity, counters, source="vivado_synth",
+                            extra={"context": spec.top, "system": system, "inst": i.inst})
+        store.append(Record(**{**r.__dict__, "target": INSTANCE_TARGET}), identity=i.identity)
+
     qu = next(i for i in spec.instances() if i.inst == "u_chain_qu")
     store.append(resource_record(qu.identity, {"lut": 300, "ff": 200}, source="vivado_synth",
                                  extra={"context": "ooc"}), identity=qu.identity)
-    rec = resource_record(qu.identity, {"lut": 280, "ff": 190}, source="vivado_synth",
-                          extra={"context": spec.top})
-    store.append(Record(**{**rec.__dict__, "target": INSTANCE_TARGET}), identity=qu.identity)
-
+    in_context(qu, {"lut": 280, "ff": 190})
+    # A synthesis of another version of this system (same top name) describes another design.
+    resp = next(i for i in spec.instances() if i.inst == "u_chain_qresp")
+    in_context(resp, {"lut": 9999}, system="markov_top-00000000")
     # Two instances of one configuration share a key; in context each keeps its own number.
     for inst, lut in (("u_gen_mm_front", 79), ("u_chain_mm_front", 69)):
-        i = next(x for x in spec.instances() if x.inst == inst)
-        r = resource_record(i.identity, {"lut": lut}, source="vivado_synth",
-                            extra={"context": spec.top, "inst": inst})
-        store.append(Record(**{**r.__dict__, "target": INSTANCE_TARGET}), identity=i.identity)
+        in_context(next(x for x in spec.instances() if x.inst == inst), {"lut": lut})
 
-    est = estimate_system(sysm, plat, spec=spec)
+    est = estimate_system(sysm, plat, spec=spec, root=here)
     parts = {p.inst: p for r in est.rows for p in r.parts}
+    assert parts["u_chain_qresp"].level == ConfidenceLevel.UNCALIBRATED      # the stale run ignored
     assert (parts["u_gen_mm_front"].counters["lut"], parts["u_chain_mm_front"].counters["lut"]) == \
         (79, 69)
     assert parts["u_chain"].level == ConfidenceLevel.EXACT
     assert parts["u_chain"].counters["lut"] == 2 * 100 + 10          # chain_core + chain_w + own
     assert parts["u_u_fwd_wr"].counters["lut"] == 110 and parts["u_u_fwd_wr"].source == "hls_estimate"
     assert (parts["u_chain_qu"].counters["lut"], parts["u_chain_qu"].context) == (280, "in markov_top")
-    composed = estimate_system(sysm, plat, spec=spec, use_in_context=False)
+    composed = estimate_system(sysm, plat, spec=spec, root=here, use_in_context=False)
     q = next(p for r in composed.rows for p in r.parts if p.inst == "u_chain_qu")
     assert (q.counters["lut"], q.context) == (300, "ooc")
     # The adaptor row holds its front and its views.

@@ -181,21 +181,24 @@ def _counters(payload: dict) -> dict:
     return {c: int(payload[c]) for c in COUNTERS if c in payload and payload[c] is not None}
 
 
-def _in_context(i, store, top: str):
-    """The best ``instance`` record of *i* from this system's own synthesis, or ``None``."""
+def _in_context(i, store, system_key: str | None):
+    """The best ``instance`` record of *i* from a synthesis of **this** system -- the one whose
+    identity is *system_key* -- or ``None``.  Matched by the system's identity, not the top's name:
+    after any change to the system (a leaf edited, a kernel re-synthesized) the old run's numbers
+    describe another design."""
     from waveflow.build.system_synth import INSTANCE_TARGET
 
-    if store is None or i.identity is None:
+    if store is None or i.identity is None or not system_key:
         return None
     # By instance as well as identity: two instances of one configuration (markov's two adaptor
     # fronts) share a key, and in context each has its own number.
     recs = [r for r in store.read(i.identity.key, INSTANCE_TARGET)
-            if r.payload.get("context") == top and r.payload.get("inst", i.inst) == i.inst]
+            if r.payload.get("system") == system_key and r.payload.get("inst", i.inst) == i.inst]
     return max(recs, key=lambda r: (r.fidelity, recs.index(r))) if recs else None
 
 
-def _kernel_estimate(i, store, platform, cost: float, top: str,
-                     use_in_context: bool) -> InstanceEstimate:
+def _kernel_estimate(i, store, platform, cost: float, top: str, use_in_context: bool,
+                     system_key: str | None = None) -> InstanceEstimate:
     """A kernel instance: this system's in-context measurement, else its class's model if it
     declares one, else the hls_estimate records."""
     from waveflow.calib.module_key import walk_modules
@@ -204,7 +207,7 @@ def _kernel_estimate(i, store, platform, cost: float, top: str,
     hw = i.hw
     base = dict(inst=i.inst, module=i.module, kind="kernel", key=i.identity.key if i.identity else "",
                 measure_with="csynth", cost_seconds=cost)
-    rec = _in_context(i, store, top) if use_in_context else None
+    rec = _in_context(i, store, system_key) if use_in_context else None
     if rec is not None:
         return InstanceEstimate(counters=_counters(rec.payload), level=ConfidenceLevel.EXACT,
                                 source=rec.source, how="lookup", context=f"in {top}", **base)
@@ -243,13 +246,14 @@ def _kernel_estimate(i, store, platform, cost: float, top: str,
                             source=" + ".join(dict.fromkeys(sources)), **base)
 
 
-def _rtl_estimate(i, store, platform, top: str, use_in_context: bool) -> InstanceEstimate:
+def _rtl_estimate(i, store, platform, top: str, use_in_context: bool,
+                  system_key: str | None = None) -> InstanceEstimate:
     """A leaf or IP instance: in-context, else out-of-context, else its owner's model hook."""
     measure = _MEASURE_WITH[i.kind]
     base = dict(inst=i.inst, module=i.module, kind=i.kind, key=i.identity.key if i.identity else "",
                 measure_with=measure, cost_seconds=TYPICAL_COST_SECONDS[measure])
     if store is not None and i.identity is not None:
-        rec = _in_context(i, store, top) if use_in_context else None
+        rec = _in_context(i, store, system_key) if use_in_context else None
         if rec is not None:
             return InstanceEstimate(counters=_counters(rec.payload), level=ConfidenceLevel.EXACT,
                                     source=rec.source, how="lookup", context=f"in {top}",
@@ -321,6 +325,14 @@ def estimate_system(sysm, platform=None, *, top: str | None = None, inside=None,
     store = platform_store(platform) if platform is not None else None
     groups = _group(spec)
 
+    # The system's identity: what its own synthesis records are filed under (in-context, the
+    # integration term, the measured total).  Needs the kernels' csynth output under *root*.
+    sys_ident = None
+    kdirs = ({m: Path(root) / rtl_rel(m) for m in spec.modules} if root is not None else None)
+    if store is not None and kdirs is not None and all(d.is_dir() for d in kdirs.values()):
+        sys_ident, _run = system_identity(spec, render_system_top(spec), kdirs, part="",
+                                          period_ns=0.0, impl=False)
+
     csynth_cost = TYPICAL_COST_SECONDS["csynth"]
     rows: dict[str, EstimateRow] = {}
     for i in spec.instances():
@@ -332,9 +344,10 @@ def estimate_system(sysm, platform=None, *, top: str | None = None, inside=None,
                 csynth_cost = synth_seconds_of(Path(root) / seconds_rel(i.module)) or csynth_cost
             k = next(k for k in spec.kernels if k.inst == i.inst)
             est = _kernel_estimate(_KernelView(i, k.hw), store, platform, csynth_cost, spec.top,
-                                   use_in_context)
+                                   use_in_context, sys_ident.key if sys_ident else None)
         else:
-            est = _rtl_estimate(i, store, platform, spec.top, use_in_context)
+            est = _rtl_estimate(i, store, platform, spec.top, use_in_context,
+                                sys_ident.key if sys_ident else None)
         rows.setdefault(groups[i.inst], EstimateRow(owner=groups[i.inst])).parts.append(est)
 
     # The system's own term and its measured total, keyed by the system's identity.
@@ -346,10 +359,8 @@ def estimate_system(sysm, platform=None, *, top: str | None = None, inside=None,
                                                     "and cross-boundary effects: measured only by "
                                                     "system_synth"})
     measured = measured_source = measured_at = None
-    kdirs = ({m: Path(root) / rtl_rel(m) for m in spec.modules} if root is not None else None)
-    if store is not None and kdirs is not None and all(d.is_dir() for d in kdirs.values()):
-        ident, _run = system_identity(spec, render_system_top(spec), kdirs, part="", period_ns=0.0,
-                                      impl=False)
+    if sys_ident is not None:
+        ident = sys_ident
         integ_part.key = ident.key
         if use_in_context:
             rec = store.best(ident.key, INTEGRATION_TARGET)

@@ -684,6 +684,10 @@ class SystemSynthStep(_SystemStep):
 
     rtl: "SystemRtlStep"
     impl: bool = False
+    #: ``KEEP_HIERARCHY`` on every inventory instance (synthesis copy of the top only).  Off by
+    #: default: it cost markov +25% LUT / +30% FF -- numbers for a design nobody would ship.  An
+    #: instance the default flow dissolves is priced by its cells' names instead.
+    keep_hierarchy: bool = False
 
     @property
     def consumes(self) -> list:  # type: ignore[override]
@@ -712,7 +716,7 @@ class SystemSynthStep(_SystemStep):
         kdirs = self.kernel_dirs(config)
         res = synth_system(spec, top_v=top_v, kernel_dirs=kdirs, ip=ip,
                            out_dir=work.parent / "system_synth", part=part, period_ns=period,
-                           impl=self.impl)
+                           impl=self.impl, keep_hierarchy=self.keep_hierarchy)
         blob = res.to_json()
         plat = getattr(config, "platform_info", None)
         blob["filed_into"] = None
@@ -726,6 +730,7 @@ class SystemSynthStep(_SystemStep):
                                           impl=self.impl)
             # A cached run's records are already filed: file once per synthesis, not per build.
             filed = any(r.payload.get("kind") == "system" and r.provenance.part == part
+                        and r.payload.get("keep_hierarchy", False) == self.keep_hierarchy
                         for r in store.read(ident.key, INSTANCE_TARGET))
             if not filed:
                 for rec, i_ident in system_synth_records(spec, res, top_text, kdirs,

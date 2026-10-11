@@ -60,7 +60,8 @@ def test_the_hierarchical_report_parses():
 
 def test_every_instance_is_attributed_and_the_terms_add_up():
     spec = _spec()
-    total, inst, unclaimed = attribute(spec, parse_utilization_hierarchical(_report()))
+    total, inst, unclaimed, recovered = attribute(spec, parse_utilization_hierarchical(_report()))
+    assert recovered == []
     assert set(inst) == {i.inst for i in spec.instances()} and len(inst) == 15
     assert set(unclaimed) == {"(markov_top)"}                       # the top's own cells
     res = SystemSynth(top=spec.top, digest="d", part="p", period_ns=10.0, impl=False, total=total,
@@ -83,7 +84,7 @@ def test_records_file_under_each_identity_and_never_under_resource(tmp_path):
     kdirs = {m: HERE / rtl_rel(m) for m in spec.modules}
     if not all(d.is_dir() for d in kdirs.values()):
         pytest.skip("no csynth RTL for markov")
-    total, inst, _u = attribute(spec, parse_utilization_hierarchical(_report()))
+    total, inst, _u, _r = attribute(spec, parse_utilization_hierarchical(_report()))
     res = SystemSynth(top=spec.top, digest="d", part="xc7z020clg484-1", period_ns=10.0, impl=False,
                       total=total, instances=inst, seconds=600.0)
     recs = system_synth_records(spec, res, render_system_top(spec), kdirs)
@@ -125,3 +126,29 @@ def test_a_cached_run_starts_no_vivado(tmp_path, monkeypatch):
     _i2, run2 = system_identity(spec, top_v.read_text(), kdirs, part="p", period_ns=4.0,
                                 impl=False)
     assert run2 != run
+
+
+def test_keep_hierarchy_marks_every_inventory_instance_in_the_synthesis_copy():
+    from waveflow.build.system_synth import keep_hierarchy_top
+    from waveflow.build.system_top import render_system_top
+
+    spec = _spec()
+    top = render_system_top(spec)
+    kept = keep_hierarchy_top(top, [i.inst for i in spec.instances()])
+    assert kept.count('(* keep_hierarchy = "yes" *)') == 15
+    assert "keep_hierarchy" not in top                              # the XSI top is untouched
+
+
+def test_a_dissolved_instance_is_priced_by_its_cell_names():
+    """markov with block RAM: synthesis dissolved u_mem_mem's hierarchy; its RAMB36 keeps its name."""
+    from waveflow.build.system_synth import parse_prims, prim_counters
+
+    out = "WF_PRIM_synth u_gen_qcmd LUT6 3\nWF_PRIM_synth u_gen_qcmd FDRE 9\n" \
+          "WF_PRIM_synth u_gen_qcmd RAM32M 2\nWF_PRIM_synth u_gen_qcmd SRLC32E 1\n" \
+          "WF_PRIM_synth u_gen_qcmd RAMB36E1 1\nWF_PRIM_synth u_gen_qcmd CARRY4 5\n"
+    prims = parse_prims(out, "synth")
+    assert prim_counters(prims["u_gen_qcmd"]) == {"lut": 3 + 8 + 1, "ff": 9, "lutram": 8, "srl": 1,
+                                                  "bram": 2}
+    total, inst, _u, recovered = attribute(
+        _spec(), parse_utilization_hierarchical(_report(drop="u_gen_qcmd")), prims)
+    assert recovered == ["u_gen_qcmd"] and inst["u_gen_qcmd"]["bram"] == 2

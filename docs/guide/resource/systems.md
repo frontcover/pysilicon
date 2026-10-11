@@ -78,42 +78,52 @@ published library of the same name, so the next estimate sees what the build jus
 ## The system synthesis
 
 `python markov_build.py --through system_synth --platform <name>` synthesizes markov's top out of context
-(xc7z020, 10 ns; 653 s of Vivado 2025.1) and attributes every inventory instance:
+(xc7z020, 10 ns; 116 s of Vivado 2025.1) and attributes every inventory instance:
 
 | instance | LUT | FF | BRAM18 |
 |---|---:|---:|---:|
-| `u_mem_mem` (`bram_t2p`, 512 × 64) | 8769 | 32832 | 0 |
-| `u_mem_front` (`axi_slave_front`) | 3625 | 76 | 0 |
-| `u_chain` (`markov_chain`) | 2034 | 3115 | 0 |
-| `u_gen` (`markov_gen`) | 1192 | 1298 | 0 |
-| `u_xbar` (`axi_crossbar`, 4 × 3) | 848 | 680 | 0 |
-| `u_u_fwd_wr` (queue writer) | 812 | 1020 | 2 |
-| `u_u_crd_wr` (credit writer) | 492 | 622 | 0 |
-| eight more leaves | 821 | 485 | 0 |
-| **integration** (the top's own cells) | 0 | 2 | 0 |
-| **total** | **18593** | **40130** | **2** |
+| `u_chain` (`markov_chain`) | 2032 | 3115 | 0 |
+| `u_gen` (`markov_gen`) | 1193 | 1298 | 0 |
+| `u_xbar` (`axi_crossbar`, 4 × 3) | 849 | 680 | 0 |
+| `u_u_fwd_wr` (queue writer) | 811 | 1020 | 2 |
+| `u_u_crd_wr` (credit writer) | 508 | 622 | 0 |
+| `u_chain_qu` (`mm_queue_in`, 128 deep) | 322 | 64 | 0 |
+| `u_mem_mem` (`bram_t2p`, 512 × 64) | 64 | 0 | 2 |
+| eight more leaves | 544 | 386 | 0 |
+| **integration** (the top's own cells) | −36 | 2 | 0 |
+| **total** | **6287** | **7187** | **4** |
 
 Instances plus integration equal the total exactly -- integration is *defined* as the remainder, and
-negative would be legal.  An inventory instance with no row is an error, not a zero: a dropped
-instance would make the glue look expensive.
+negative is legal.
 
-Two things the table shows that no estimate before it could:
+**A dissolved instance is still its own.**  Under Vivado's default `-flatten_hierarchy rebuilt`,
+`u_mem_mem` and `u_mem` get no row of their own: synthesis dissolved their hierarchy into the top.
+Their cells keep their names, so the step prices each such instance by the primitives under its name
+prefix (`u_mem_mem/*`: one RAMB36, 64 LUTs) rather than letting its cost read as glue.  Counting
+primitives and the report's site-level LUT count differ slightly (here by 36 LUTs), and the difference
+lands, visibly, in the integration term.  An instance that can be priced neither way is an error, not a
+zero.  `keep_hierarchy=True` would give every instance its row, at a price: +25% LUT and +30% FF on
+markov -- numbers for a design nobody would ship, so it is off by default.
 
-- **The "BRAM" is flip-flops.**  `bram_t2p` infers no block RAM here: its 32 Kbit become 32832 FFs and
-  8769 LUTs, and the BRAM window's front adds 3625 LUTs of read mux.  The on-chip memory is two thirds
-  of markov's LUTs.  A fix belongs in `bram_t2p.v`'s coding style, measured by this same step.
-- **csynth overestimates LUT about 2×.**  The `hls_estimate` of each kernel against its in-context
-  synthesis:
+**The memory used to be flip-flops.**  The first synthesis of markov found `bram_t2p` inferring no
+block RAM: 8769 LUT and 32832 FF of a 18593 / 40130 total, plus 3625 LUT of read mux in its front.  Both
+ports were written in one `always` block, which Vivado's true-dual-port template does not match; with
+one block per port it is one RAMB36 (two out of context, where both ports are live).  No XSI gate
+moved.  This is what the step is for: the system's dominant cost was a coding-style accident that no
+per-module estimate could have shown.
 
-  | kernel | LUT (hls / vivado) | FF (hls / vivado) |
-  |---|---|---|
-  | `markov_gen` | 2585 / 1192 | 1905 / 1298 |
-  | `markov_chain` | 4423 / 2034 | 3030 / 3115 |
-  | `mm_queue_writer_64_128` | 1531 / 812 | 943 / 1020 |
-  | `mm_credit_writer_64` | 1097 / 492 | 874 / 622 |
+**csynth overestimates LUT about 2×.**  The `hls_estimate` of each kernel against its in-context
+synthesis:
 
-  So *how* a number was obtained (an exact lookup) and *what* it measures (an HLS estimate) are
-  separate columns of the report.
+| kernel | LUT (hls / vivado) | FF (hls / vivado) |
+|---|---|---|
+| `markov_gen` | 2585 / 1193 | 1905 / 1298 |
+| `markov_chain` | 4423 / 2032 | 3030 / 3115 |
+| `mm_queue_writer_64_128` | 1531 / 811 | 943 / 1020 |
+| `mm_credit_writer_64` | 1097 / 508 | 874 / 622 |
+
+So *how* a number was obtained (an exact lookup) and *what* it measures (an HLS estimate) are separate
+columns of the report.
 
 ## The estimate
 
@@ -122,12 +132,13 @@ groups them by owner, a multi-view adaptor's views rolled into the adaptor:
 
 | instance | priced by, best first |
 |---|---|
-| kernel | an in-context record from *this* system's synthesis; else its class's own model (`get_rm`); else its modules' `hls_estimate` records plus its top's integration term |
+| kernel | an in-context record from a synthesis of *this* system (matched by the system's identity, not the top's name); else its class's own model (`get_rm`); else its modules' `hls_estimate` records plus its top's integration term |
 | leaf / IP | an in-context record; else the configuration's out-of-context record; else its owner's model hook |
 | system integration | the system identity's integration record |
 
 A part with no data is a row at `UNCALIBRATED` with zero counters **and** what measuring it would cost
-(`weakest()`), never a silent zero.  Before any Vivado run, markov's estimate is its kernels:
+(`weakest()`), never a silent zero -- but the `total` line still sums it, so read the total with the
+`weakest:` verdict beside it.  Before any Vivado run, markov's estimate is its kernels:
 
 ```text
 markov_top   platform scratch_7020
@@ -149,54 +160,53 @@ part from its own measurement, which the measured total is then a check on -- th
 ## Prediction against measurement
 
 With markov's kernels attributed, its eleven leaf / IP configurations measured out of context
-(`--through leaf_resources` with `measure_leaves`; 32 minutes the first time, nothing on a re-run) and
-the top synthesized, the default estimate reads every instance from the system's own synthesis and
-reproduces the measured total:
+(`--through leaf_resources` with `measure_leaves`; a minute or so per configuration the first time,
+nothing on a re-run) and the top synthesized, the default estimate reads every instance from the
+system's own synthesis and reproduces the measured total:
 
 ```text
 markov_top   platform scratch_7020
                                   LUT       FF     BRAM      DSP   how            measured by
-u (MmCreditStreamIF)            1,362    1,658        2        0   EXACT          vivado_synth (in markov_top)
-xbar (AXIMMCrossBarIF)            848      680        0        0   EXACT          vivado_synth (in markov_top)
-gen_mm (MemSlaveAdaptor)          246      217        0        0   EXACT          vivado_synth (in markov_top)
-chain_mm (MemSlaveAdaptor)        476      178        0        0   EXACT          vivado_synth (in markov_top)
-mem (MemoryMod)                12,435   32,982        0        0   EXACT          vivado_synth (in markov_top)
-gen (MarkovGen)                 1,192    1,298        0        0   EXACT          vivado_synth (in markov_top)
-chain (MarkovChain)             2,034    3,115        0        0   EXACT          vivado_synth (in markov_top)
-system integration                  0        2        0        0   EXACT          vivado_synth (in markov_top)
-total                          18,593   40,130        2        0   weakest: EXACT (u (MmCreditStreamIF))
-measured total                 18,593   40,130        2        0   vivado_synth, 2026-10-11   gap +0.0% LUT, +0.0% FF, +0.0% BRAM
+u (MmCreditStreamIF)            1,377    1,658        2        0   EXACT          vivado_synth (in markov_top)
+xbar (AXIMMCrossBarIF)            849      680        0        0   EXACT          vivado_synth (in markov_top)
+gen_mm (MemSlaveAdaptor)          237      217        0        0   EXACT          vivado_synth (in markov_top)
+chain_mm (MemSlaveAdaptor)        495      178        0        0   EXACT          vivado_synth (in markov_top)
+mem (MemoryMod)                   140       39        2        0   EXACT          vivado_synth (in markov_top)
+gen (MarkovGen)                 1,193    1,298        0        0   EXACT          vivado_synth (in markov_top)
+chain (MarkovChain)             2,032    3,115        0        0   EXACT          vivado_synth (in markov_top)
+system integration                -36        2        0        0   EXACT          vivado_synth (in markov_top)
+total                           6,287    7,187        4        0   weakest: EXACT (u (MmCreditStreamIF))
+measured total                  6,287    7,187        4        0   vivado_synth, 2026-10-11   gap +0.0% LUT, +0.0% FF, +0.0% BRAM
 ```
 
 The **composed** prediction (`--composed`: each part from its own measurement, none from this
-synthesis) is the one a design-space exploration has before it synthesizes anything -- and here it is
-far off:
+synthesis) is the one a design-space exploration has before it synthesizes anything:
 
 ```text
 u (MmCreditStreamIF)            2,689    1,833        2        0   EXACT          vivado_synth (ooc) + hls_estimate
 xbar (AXIMMCrossBarIF)          1,292      808        0        0   EXACT          vivado_synth (ooc)
 gen_mm (MemSlaveAdaptor)          262      219        0        0   EXACT          vivado_synth (ooc)
 chain_mm (MemSlaveAdaptor)        538      188        0        0   EXACT          vivado_synth (ooc)
-mem (MemoryMod)                83,341   33,001        0        0   EXACT          vivado_synth (ooc)
+mem (MemoryMod)                   149      105        4        0   EXACT          vivado_synth (ooc)
 gen (MarkovGen)                 2,585    1,905        0        0   EXACT          hls_estimate
 chain (MarkovChain)             4,423    3,030        0        0   EXACT          hls_estimate
 system integration                  0        0        0        0   UNCALIBRATED   --
-total                          95,130   40,984        2        0   weakest: UNCALIBRATED (system integration)
-measured total                 18,593   40,130        2        0   vivado_synth, 2026-10-11   gap +411.6% LUT, +2.1% FF, +0.0% BRAM
+total                          11,938    8,088        6        0   weakest: UNCALIBRATED (system integration)
+measured total                  6,287    7,187        4        0   vivado_synth, 2026-10-11   gap +89.9% LUT, +12.5% FF, +50.0% BRAM
 ```
 
-Every row is `EXACT` -- an exact lookup -- and the total is still 5× the truth, which is the report's
-point about keeping *how* apart from *what*:
+Every row is `EXACT` -- an exact lookup -- and the total is still nearly 2× the truth, which is the
+report's point about keeping *how* apart from *what*:
 
-- **A tied-off port.**  Out of context, `bram_t2p` is a full two-port memory: 83,194 LUT.  In markov
-  its kernel-side port B is tied idle, and synthesis prunes everything that port reached: 8,769.  An
-  out-of-context number is an **upper bound** for an instance whose ports the design ties off.
-- **HLS estimates.**  The kernels' `hls_estimate` rows are ~2× their synthesized LUT (above).
-- **Smearing.**  In context, the memory's read mux is reported inside `u_mem_front` (3,625 LUT, 130
-  out of context): the rebuilt hierarchy moves logic across instance boundaries, so a per-instance
-  in-context number is a share of the design, while the total stays exact.
+- **HLS estimates.**  The four kernels' `hls_estimate` rows are ~2× their synthesized LUT (above):
+  5,092 of the 5,651-LUT gap.
+- **The crossbar out of context** is 1,292 LUT against 849 in the design: 443 more.
+- **A tied-off port.**  Out of context, `bram_t2p` is a two-port memory: two RAMB36.  In markov its
+  kernel-side port B is tied idle, and the one live port fits one RAMB36.  An out-of-context number is
+  an **upper bound** for an instance whose ports the design ties off.
 
-FF, by contrast, composes within 2%.
+(Before the memory was recoded the composed gap was +412% LUT, nearly all of it a tied-off port on a
+flip-flop memory: 83,194 LUT out of context against 8,769 in markov.)
 
 From the command line (`--json` for an agent):
 
