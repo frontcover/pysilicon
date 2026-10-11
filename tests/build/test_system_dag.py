@@ -298,8 +298,9 @@ def test_add_system_steps_derives_the_tops_and_the_defaults():
     dag = BuildDag()
     xsi = add_system_steps(dag, _markov(), work_dir="xsi_work")
     assert dag.step_names()[-1] == "compare"
-    assert set(dag.step_names()) == {"include", "gen", "csynth", "system_rtl", "scenario", "pysim",
-                                     "system_xsi", "compare"}
+    assert set(dag.step_names()) == {"include", "gen", "csynth", "system_rtl", "kernel_resources",
+                                     "scenario", "pysim", "system_xsi", "compare"}
+    assert dag.artifact_owners()["report_markov_gen"] == "csynth"
     assert xsi.rtl.top == "markov_system" and xsi.rtl.spec.xbar.name == "xbar_markov_system"
     assert xsi.work == xsi.rtl.work == Path("xsi_work") / "markov_system"
     assert dag.artifact_owners()["rtl"] == "system_rtl"

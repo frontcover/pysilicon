@@ -148,12 +148,16 @@ def build_dag(probes: bool = False, work_dir=WORK_DIR) -> BuildDag:
 
 
 if __name__ == "__main__":
-    from waveflow.build.cli import run_dag_cli
+    from waveflow.build.cli import PLATFORM_ARGS, platform_config, run_dag_cli
+    from waveflow.build.composite_gen import DEFAULT_PART, DEFAULT_PERIOD_NS
 
     run_dag_cli(lambda a: build_dag(probes=a.probes), description=__doc__.splitlines()[0],
                 default_through=None, root_dir=HERE,
                 extra_args=[(("--synth",), dict(choices=("build", "check"), default="build",
                              help="build: csynth a stale top; check: fail on one instead")),
                             (("--probes",), dict(action="store_true",
-                             help="build the system tops with the timing probes"))],
-                params_from_args=lambda a: {"synth": a.synth})
+                             help="build the system tops with the timing probes")),
+                            *PLATFORM_ARGS],
+                params_from_args=lambda a: {"synth": a.synth},
+                config_from_args=lambda a: platform_config(a, part=DEFAULT_PART,
+                                                           clk_freq=1e9 / DEFAULT_PERIOD_NS))

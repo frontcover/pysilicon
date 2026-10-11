@@ -188,6 +188,17 @@ def boundary_endpoint_ids(top: Any) -> frozenset:
             ids.add(id(entry[1]))
         except (TypeError, IndexError):
             continue
+    # A two-half endpoint (a credit stream's ``fwd_ep`` / ``crd_ep``) whose halves are on the boundary
+    # is on it too: the boundary lists the halves, and the wrapper -- bound to a routed channel that
+    # sets no depth -- would otherwise read as unbound.
+    stack = list((getattr(top, "sub_comps", {}) or {}).values())
+    while stack:
+        comp = stack.pop()
+        for ep in (getattr(comp, "endpoints", {}) or {}).values():
+            halves = (getattr(ep, "fwd_ep", None), getattr(ep, "crd_ep", None))
+            if any(h is not None and id(h) in ids for h in halves):
+                ids.add(id(ep))
+        stack += list((getattr(comp, "sub_comps", {}) or {}).values())
     return frozenset(ids)
 
 

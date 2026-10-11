@@ -183,3 +183,23 @@ def run_dag_cli(
         print(indent(events.format_tree(spans), "    "))
     return spans
 
+
+
+#: ``--platform`` / ``--platforms-root``: the flags an example adds (``extra_args``) when its build
+#: should file what it measures -- csynth reports attributed, a system synthesized -- into a platform.
+PLATFORM_ARGS: tuple[tuple[tuple, dict], ...] = (
+    (("--platform",), {"default": None, "metavar": "NAME",
+                       "help": "file resource records into this calibration platform (created at "
+                               "the build's part and clock if absent; refused if it holds another)"}),
+    (("--platforms-root",), {"default": None, "metavar": "DIR",
+                             "help": "the platform library to write (default calib/platforms)"}),
+)
+
+
+def platform_config(args: argparse.Namespace, *, part: str, clk_freq: float) -> dict:
+    """The ``config_from_args`` for :data:`PLATFORM_ARGS`: the platform with the build's *part* and
+    *clk_freq* -- what its RTL is synthesized for, so the records describe that RTL -- or ``{}``."""
+    if not getattr(args, "platform", None):
+        return {}
+    return {"platform": args.platform, "platforms_root": args.platforms_root, "part": part,
+            "clk_freq": clk_freq}

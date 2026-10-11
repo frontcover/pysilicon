@@ -3,10 +3,14 @@
 
 The outer DAG an example builds::
 
-    codegen ──> csynth ──> system_rtl ──┐
-                                        ├──> system_xsi ──┐
-    scenario ──┬────────────────────────┘                 ├──> compare
-               └──> pysim ────────────────────────────────┘
+    codegen ──> csynth ──┬──> system_rtl ──┐
+                         │                 ├──> system_xsi ──┐
+    scenario ──┬─────────┼─────────────────┘                 ├──> compare
+               └──> pysim┼───────────────────────────────────┘
+                         └──> kernel_resources
+
+``kernel_resources`` (:class:`KernelResourcesStep`) attributes each kernel's csynth report to its
+modules and files the records (``plans/system_resources.md`` Stage 2).
 
 ``codegen`` is the example's (its headers, kernel tops, writer tops and ``.tcl``); everything after it
 is framework, and this module holds it.
@@ -50,6 +54,30 @@ def rtl_rel(top: str) -> Path:
 def rtl_artifact(top: str) -> str:
     """The artifact name of *top*'s RTL in a system DAG."""
     return f"rtl_{top}"
+
+
+def report_rel(top: str) -> Path:
+    """*top*'s Vitis solution directory (its csynth report), relative to the example root."""
+    return Path(f"{top}_proj") / "solution1"
+
+
+def report_artifact(top: str) -> str:
+    """The artifact name of *top*'s csynth report (its solution directory)."""
+    return f"report_{top}"
+
+
+def seconds_rel(top: str) -> Path:
+    """Where :class:`CsynthStep` records how long *top*'s csynth took."""
+    return report_rel(top) / "waveflow_csynth.json"
+
+
+def seconds_artifact(top: str) -> str:
+    return f"synth_seconds_{top}"
+
+
+def _csynth_products(top: str) -> dict:
+    return {rtl_artifact(top): rtl_rel(top), report_artifact(top): report_rel(top),
+            seconds_artifact(top): seconds_rel(top)}
 
 
 def rtl_problem(root, top: str) -> str | None:
@@ -96,7 +124,7 @@ class CsynthStep(BuildStep):
 
     @property
     def produces(self) -> dict:  # type: ignore[override]
-        return {rtl_artifact(self.top): rtl_rel(self.top)}
+        return _csynth_products(self.top)
 
     def is_fresh(self, config: BuildConfig, paths: dict[str, Path]) -> bool:
         return rtl_problem(config.root_dir, self.top) is None
@@ -107,9 +135,12 @@ class CsynthStep(BuildStep):
         return tcl_path(root, self.top) if self.tcl is None else Path(root) / self.tcl
 
     def run(self, config: BuildConfig, synth: str = "build", **_: Any) -> dict[str, Any]:
+        import json
+        import time
+
         _check_synth(synth)
         root = Path(config.root_dir)
-        out = {rtl_artifact(self.top): root / rtl_rel(self.top)}
+        out = {k: root / v for k, v in _csynth_products(self.top).items()}
         problem = rtl_problem(root, self.top)
         if synth == "check":
             if problem is not None:
@@ -122,6 +153,7 @@ class CsynthStep(BuildStep):
 
         import subprocess
 
+        t0 = time.perf_counter()
         try:
             r = run_vitis_hls(self.tcl_file(root), work_dir=root)
         except subprocess.CalledProcessError as exc:     # the tcl exits 1 on a csynth error
@@ -134,6 +166,11 @@ class CsynthStep(BuildStep):
 
         check_maxi_lowered(root, self.top)
         write_stamp(root, self.top)
+        # How long the synthesis took: the cost a record of it carries (``cost_seconds``).
+        secs = root / seconds_rel(self.top)
+        secs.parent.mkdir(parents=True, exist_ok=True)
+        secs.write_text(json.dumps({"synth_seconds": round(time.perf_counter() - t0, 3)}) + "\n",
+                        encoding="utf-8")
         return out
 
 
@@ -167,7 +204,7 @@ class CsynthTopsStep(BuildStep):
 
     @property
     def produces(self) -> dict:  # type: ignore[override]
-        return {rtl_artifact(t): rtl_rel(t) for t in self.tops}
+        return {k: v for t in self.tops for k, v in _csynth_products(t).items()}
 
     def is_fresh(self, config: BuildConfig, paths: dict[str, Path]) -> bool:
         return all(rtl_problem(config.root_dir, t) is None for t in self.tops)
@@ -193,7 +230,7 @@ class CsynthTopsStep(BuildStep):
         bad = [r.message for r in results.values() if not r.success]
         if bad:
             raise RuntimeError("; ".join(bad))
-        return {rtl_artifact(t): root / rtl_rel(t) for t in self.tops}
+        return {k: root / v for t in self.tops for k, v in _csynth_products(t).items()}
 
 
 
@@ -559,13 +596,67 @@ class SystemXsiStep(_SystemStep):
                 self.a("report"): self.work_dir(config) / "report.json"}
 
 
+def owner_label(obj) -> str:
+    """``"u (MmCreditStreamIF)"``: how a report names the pysim object an instance is accounted to."""
+    return f"{getattr(obj, 'name', '?')} ({type(obj).__name__})" if obj is not None else ""
+
+
+@dataclass(kw_only=True)
+class KernelResourcesStep(_SystemStep):
+    """``kernel_resources``: every Vitis kernel of the system, its csynth report attributed to its
+    modules (:func:`~waveflow.build.resource_steps.inspect_synth`) and filed as ``hls_estimate``
+    records into the build's platform -- each record carrying the pysim object it is accounted to
+    (``owner``: the kernel, or the routed channel that brought a bus writer).  Seconds: it reads
+    reports csynth already wrote.  Per top, the attribution goes to
+    ``<work>/kernel_resources/<top>.json``; the index, ``<work>/kernel_resources.json``, maps each
+    kernel instance to its top, owner and module records."""
+
+    description = "Each kernel's csynth report attributed to its modules; hls_estimate records filed."
+    step_name: ClassVar[str] = "kernel_resources"
+
+    rtl: "SystemRtlStep"
+
+    @property
+    def consumes(self) -> list:  # type: ignore[override]
+        return [a for t in self.rtl.tops for a in (report_artifact(t), seconds_artifact(t))]
+
+    @property
+    def produces(self) -> dict:  # type: ignore[override]
+        return {self.a("kernel_resources"): self.work / "kernel_resources.json"}
+
+    def run(self, config: BuildConfig, **inputs: Any) -> dict[str, Any]:
+        import json
+
+        from waveflow.build.resource_steps import inspect_synth, synth_seconds_of
+
+        work = self.work_dir(config)
+        index: dict[str, dict] = {}
+        done: dict[str, dict] = {}
+        for k in self.rtl.spec.kernels:
+            if k.module not in done:              # one csynth per module: attribute it once
+                done[k.module] = inspect_synth(
+                    k.hw, inputs[report_artifact(k.module)], top_name=k.module, config=config,
+                    out=work / "kernel_resources" / f"{k.module}.json",
+                    synth_seconds=synth_seconds_of(inputs.get(seconds_artifact(k.module))),
+                    owner=owner_label(k.owner))
+            blob = done[k.module]
+            index[k.inst] = {"top": k.module, "owner": owner_label(k.owner),
+                             "modules": [m["key"] for m in blob["modules"]],
+                             "top_total": blob["top"], "integration": blob["integration"],
+                             "filed_into": blob["filed_into"]}
+        out = work / "kernel_resources.json"
+        out.write_text(json.dumps(index, indent=2) + "\n", encoding="utf-8")
+        return {self.a("kernel_resources"): out}
+
+
 def add_system_steps(dag: BuildDag, sysm, *, work_dir, top: str | None = None,
                      xbar_name: str | None = None, inside=None, probes: dict | None = None,
                      prefix: str = "", workspace: str | None = None,
                      sources: tuple[str, ...] = ("include", "gen"),
                      tcls: dict[str, Path] | None = None, timeout: int = 3600) -> SystemXsiStep:
     """Add the framework steps of a system's flow to *dag*: ``csynth`` (one inner step per HLS top in
-    the cut), ``system_rtl``, ``scenario``, ``pysim``, ``system_xsi`` and ``compare``.  Returns the
+    the cut), ``system_rtl``, ``kernel_resources``, ``scenario``, ``pysim``, ``system_xsi`` and
+    ``compare``.  Returns the
     ``system_xsi`` step (its ``rtl`` is the ``system_rtl`` step).
 
     *sysm* is the pysim system object, not yet run.  csynth consumes the artifacts *sources* -- the
@@ -596,6 +687,7 @@ def add_system_steps(dag: BuildDag, sysm, *, work_dir, top: str | None = None,
         name = "csynth" if "csynth" not in dag.step_names() else prefix + "csynth"
         dag.add(CsynthTopsStep(name=name, tops=new, tcls=dict(tcls or {}), sources=tuple(sources)))
     dag.add(rtl)
+    dag.add(KernelResourcesStep(sysm=sysm, work=work, prefix=prefix, rtl=rtl))
     dag.add(ScenarioStep(sysm=sysm, work=work, prefix=prefix))
     dag.add(PysimStep(sysm=sysm, work=work, prefix=prefix))
     xsi = SystemXsiStep(sysm=sysm, work=work, prefix=prefix, rtl=rtl, timeout=timeout)
@@ -604,5 +696,7 @@ def add_system_steps(dag: BuildDag, sysm, *, work_dir, top: str | None = None,
     return xsi
 
 
-__all__ = ["CompareStep", "CsynthStep", "CsynthTopsStep", "PysimStep", "SYNTH_MODES", "ScenarioStep",
-           "SystemRtlStep", "SystemXsiStep", "add_system_steps", "rtl_artifact", "rtl_problem", "rtl_rel", "snake"]
+__all__ = ["CompareStep", "CsynthStep", "CsynthTopsStep", "KernelResourcesStep", "PysimStep",
+           "SYNTH_MODES", "ScenarioStep", "SystemRtlStep", "SystemXsiStep", "add_system_steps",
+           "owner_label", "report_artifact", "report_rel", "rtl_artifact", "rtl_problem", "rtl_rel",
+           "seconds_artifact", "snake"]
