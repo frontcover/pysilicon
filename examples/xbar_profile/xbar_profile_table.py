@@ -89,14 +89,21 @@ def render(rows: list[dict]) -> str:
     out += ["", "### Latency in cycles (XSI; first address phase to last response, inclusive)", "",
             "| shape | width | mode | " + " | ".join(LAT_COLS) + " |",
             "|---|---|---|" + "---|" * len(LAT_COLS)]
-    for dw in DATA_WIDTHS:
-        for shape in SHAPES:
-            for mode in MODES:
-                r = by.get((shape, dw, mode))
-                if r is None or not r["latency"]:
-                    continue
-                out.append(f"| {shape} | {dw} | {mode} | "
-                           + " | ".join(_f(r["latency"].get(c)) for c in LAT_COLS) + " |")
+    # One row per (shape, mode) when every width measured the same latencies -- the width only
+    # widens the data path, so it normally does -- and one row per width when they differ.
+    for shape in SHAPES:
+        for mode in MODES:
+            per = {dw: by[(shape, dw, mode)]["latency"] for dw in DATA_WIDTHS
+                   if (shape, dw, mode) in by and by[(shape, dw, mode)]["latency"]}
+            if not per:
+                continue
+            if len({json.dumps(v, sort_keys=True) for v in per.values()}) == 1:
+                groups = [(", ".join(map(str, per)), next(iter(per.values())))]
+            else:
+                groups = [(str(dw), lat) for dw, lat in per.items()]
+            for width, lat in groups:
+                out.append(f"| {shape} | {width} | {mode} | "
+                           + " | ".join(_f(lat.get(c)) for c in LAT_COLS) + " |")
     return "\n".join(out) + "\n"
 
 

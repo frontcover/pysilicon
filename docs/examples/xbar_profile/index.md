@@ -53,11 +53,74 @@ rather than reporting a latency.
 
 ## The results
 
-<!-- XBAR_TABLES -->
+Measured 2026-10-11, Vivado 2025.1, on `xczu7ev-ffvc1156-2-e` (see [the part](#the-part-a-stand-in-for-the-rfsoc)), rendered by `xbar_profile_table` from the record store. No configuration uses block RAM or DSPs. WNS is the routed worst setup slack against the 4 ns clock -- positive means it closes.
+
+### Area and timing closure at 250 MHz (routed, out of context)
+
+| shape | width | SAMD LUT | SAMD FF | SAMD WNS (ns) | SASD LUT | SASD FF | SASD WNS (ns) |
+|---|---|---|---|---|---|---|---|
+| 1x2 | 32 | 237 | 379 | +2.178 | 197 | 166 | +2.526 |
+| 2x1 | 32 | 336 | 313 | +1.862 | 245 | 171 | +2.402 |
+| 2x2 | 32 | 472 | 417 | +1.908 | 285 | 173 | +2.006 |
+| 3x3 | 32 | 798 | 574 | +1.637 | 409 | 179 | +2.148 |
+| 4x4 | 32 | 1213 | 722 | +1.494 | 531 | 187 | +2.104 |
+| 1x2 | 64 | 302 | 507 | +2.308 | 262 | 230 | +2.637 |
+| 2x1 | 64 | 401 | 377 | +1.851 | 296 | 235 | +2.371 |
+| 2x2 | 64 | 604 | 545 | +2.159 | 367 | 237 | +2.265 |
+| 3x3 | 64 | 1049 | 766 | +1.531 | 492 | 243 | +1.887 |
+| 4x4 | 64 | 1679 | 978 | +1.451 | 647 | 251 | +1.730 |
+
+### Latency in cycles (XSI; first address phase to last response, inclusive)
+
+| shape | width | mode | w1 | r1 | w16 | r16 | par_w16 | par_r16 | same_w16 | same_r16 |
+|---|---|---|---|---|---|---|---|---|---|---|
+| 1x2 | 32, 64 | SAMD | 6 | 5 | 20 | 19 | -- | -- | -- | -- |
+| 1x2 | 32, 64 | SASD | 5 | 5 | 20 | 20 | -- | -- | -- | -- |
+| 2x1 | 32, 64 | SAMD | 6 | 5 | 21 | 20 | -- | -- | 39 | 37 |
+| 2x1 | 32, 64 | SASD | 5 | 5 | 20 | 20 | -- | -- | 40 | 40 |
+| 2x2 | 32, 64 | SAMD | 6 | 5 | 21 | 20 | 24 | 23 | 39 | 37 |
+| 2x2 | 32, 64 | SASD | 5 | 5 | 20 | 20 | 40 | 40 | 40 | 40 |
+| 3x3 | 32, 64 | SAMD | 6 | 5 | 21 | 20 | 27 | 26 | 57 | 54 |
+| 3x3 | 32, 64 | SASD | 5 | 5 | 20 | 20 | 60 | 60 | 60 | 60 |
+| 4x4 | 32, 64 | SAMD | 6 | 5 | 21 | 20 | 30 | 29 | 75 | 71 |
+| 4x4 | 32, 64 | SASD | 5 | 5 | 20 | 20 | 80 | 80 | 80 | 80 |
 
 ## Reading them
 
-<!-- XBAR_READING -->
+**Every configuration closes at 250 MHz, with room to spare.** The tightest is the 64-bit 4x4 SAMD
+crossbar at +1.451 ns -- 36% of the period unused -- so none of these shapes needs a register slice
+for its own logic at the RFSoC's fabric clock. Slack falls as the crossbar widens (SAMD: about
++2.2 ns at 1x2 to +1.5 ns at 4x4), the way a wider arbiter and deeper data muxes would make it.
+
+**SASD is the area answer, SAMD is the bandwidth answer.** At 4x4 the shared bus takes 2.3x (32-bit)
+to 2.6x (64-bit) fewer LUTs and about 4x fewer flip-flops. Its flip-flop count barely moves with the
+shape (166 to 187 at 32 bits): it has one data path, and only the arbiter grows. SAMD's LUTs grow
+faster than linearly with the shape -- 472, 798, 1213 from 2x2 to 4x4 at 32 bits -- because it
+has a data path for every master/slave pair. Widening the data from 32 to 64 bits costs SAMD 466 LUTs
+at 4x4 and SASD 116. All of it is small next to the RFSoC's ~425k LUTs: the largest is 0.4%.
+
+**Width never changes latency** -- every probe measured the same cycle count at 32 and 64 bits -- and
+neither does the shape, for a transfer that is alone:
+
+- **Alone**, a read costs 5 cycles plus one per extra beat (`r1` = 5, `r16` = 20) in either mode;
+  a SAMD write costs one more for its response (`w1` = 6, `w16` = 21), a SASD write the same as its
+  read. (A 1x2 SAMD crossbar is a cycle quicker on 16 beats.) That is the pysim crossbar's
+  `latency_init = 4` plus one cycle per word, as the [crossbar guide](../../guide/interface/axi_mm/crossbar.md#matching-pysim-to-it)
+  set it from mm_fir.
+- **Different masters to different slaves** (`par_*`) is where the modes part. SAMD runs them side by
+  side and pays 3 cycles per extra master -- the shared address arbiter grants one address at a time
+  -- so four 16-beat writes finish in 30 cycles rather than 21. SASD serializes them completely: 20
+  cycles per master, 80 for four.
+- **Several masters to one slave** (`same_*`) serializes in both modes, as AXI4 requires. SAMD
+  overlaps the next master's address phase with the current burst, so each extra master adds 18 cycles
+  to a write (16 beats + 2) and 17 to a read; SASD adds the full 20.
+
+**So for one master, or one slave, SASD is nearly free.** A `1x2` crossbar (a host reaching two
+slaves) has no concurrency to lose -- its latencies match SAMD's to within a cycle -- and SASD saves
+40 LUTs and 213 flip-flops at 32 bits. A `2x1` (two masters sharing a memory) serializes at the slave
+anyway: SASD takes one cycle longer for the pair of writes and three for the pair of reads, and saves
+91 LUTs and 142 flip-flops. SAMD earns its
+area only when different pairs genuinely transfer at once.
 
 ## The part: a stand-in for the RFSoC
 

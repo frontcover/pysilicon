@@ -117,7 +117,11 @@ whose corpus is `cls_name="AxiCrossbar"` and whose features are `hw_params()`.
   rendering, span parsing, utilization parsing, records) -- no toolchain;
 - built: `test_axi_xbar_xsi.py -m xsi` unchanged numbers through the shared top renderer;
 - built: the sweep files a `vivado_synth`, a `vivado_impl` and per-probe `xsi` records for every point,
-  and a re-run files nothing new (identical records are not appended);
+  and a re-run files nothing new (identical records are not appended).  **Ran 2026-10-11: 20/20 points,
+  176 records, ~75 min.**  Results in `docs/examples/xbar_profile/`: every point closes at 250 MHz;
+  SASD 2.3-2.6x fewer LUTs at 4x4 but fully serial (`par_w16` 80 vs 30 cycles at 4x4); data width
+  changes no latency; `r1` = 5 = pysim `latency_init` 4 + 1 word, as mm_fir found.  The sweep found a
+  bug: SASD has no MI-side ID ports (fixed, `mi_signals`);
 - to do: stage 4 -- mm_fir's pysim numbers (734 / 792) unchanged when its latencies come from the
   platform;
 - to do: the RFSoC part itself, where licensed.
@@ -125,8 +129,9 @@ whose corpus is `cls_name="AxiCrossbar"` and whose features are `hw_params()`.
 ## Open
 
 - Register slices (`R_REGISTER`, per-slot slices) and data FIFOs: crossbar options a slow part needs
-  for timing; each is a config field and a separate measurement. The sweep shows whether any shape
-  needs them at 250 MHz.
+  for timing; each is a config field and a separate measurement. **Not needed at 250 MHz for any
+  measured shape** (worst routed slack +1.451 ns, 64-bit 4x4 SAMD) -- revisit above 4x4, or at a
+  faster clock, or when a system's port-to-port paths (not timed OOC) fail.
 - Publishing: the sweep's work-tier platform is `zu7ev_xbar_250mhz`; whether a stand-in measurement
   belongs in a tracked library at all, or only the real part's, is a decision for whoever publishes.
 - SmartConnect, for board designs (`plans/board_packaging.md`): a second interconnect kind, measured
