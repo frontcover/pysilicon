@@ -3,14 +3,18 @@
 
 The outer DAG an example builds::
 
-    codegen ──> csynth ──┬──> system_rtl ──┐
-                         │                 ├──> system_xsi ──┐
-    scenario ──┬─────────┼─────────────────┘                 ├──> compare
-               └──> pysim┼───────────────────────────────────┘
-                         └──> kernel_resources
+    codegen ──> csynth ──┬──> system_rtl ──┬──────────────────┐
+                         │                 │                  ├──> system_xsi ──┐
+    scenario ──┬─────────┼─────────────────┼──────────────────┘                 ├──> compare
+               └──> pysim┼─────────────────┼────────────────────────────────────┘
+                         │                 ├──> leaf_resources ──┐
+                         └──> kernel_resources ──────────────────┴──> resource_report
+                                           └──> system_synth   (opt-in; resource_report reads it)
 
-``kernel_resources`` (:class:`KernelResourcesStep`) attributes each kernel's csynth report to its
-modules and files the records (``plans/system_resources.md`` Stage 2).
+The resource half (``plans/system_resources.md``): ``kernel_resources`` (:class:`KernelResourcesStep`)
+attributes each kernel's csynth report and files the records; ``system_synth``
+(:class:`SystemSynthStep`) synthesizes the whole top in Vivado -- minutes, so opt-in.  (The diagram
+shows the steps the plan's later stages add beside them.)
 
 ``codegen`` is the example's (its headers, kernel tops, writer tops and ``.tcl``); everything after it
 is framework, and this module holds it.
@@ -649,14 +653,78 @@ class KernelResourcesStep(_SystemStep):
         return {self.a("kernel_resources"): out}
 
 
+@dataclass(kw_only=True)
+class SystemSynthStep(_SystemStep):
+    """``system_synth``: the system top through Vivado, out of context -- every instance of the
+    inventory attributed from ``report_utilization -hierarchical``, the integration term and the
+    total (:func:`~waveflow.build.system_synth.synth_system`).  Minutes, so **opt-in**: no default
+    target depends on it (``--through system_synth``).  Cached by the system's identity, so a re-run
+    with nothing changed starts no Vivado.  Synthesized for the part and clock the kernels were
+    csynth'd for (:func:`~waveflow.build.composite_gen.tcl_target`: the build's platform, else the
+    default); the crossbar IP is generated for that part beside the simulation one.  With a platform
+    selected the records are filed into it.  *impl* also places and routes (closure in the records).
+
+    Produces ``<work>/system_synth.json`` (the :class:`~waveflow.build.system_synth.SystemSynth`)."""
+
+    description = "The system top synthesized in Vivado; every instance attributed (opt-in, minutes)."
+    step_name: ClassVar[str] = "system_synth"
+
+    rtl: "SystemRtlStep"
+    impl: bool = False
+
+    @property
+    def consumes(self) -> list:  # type: ignore[override]
+        return [self.a("rtl")]
+
+    @property
+    def produces(self) -> dict:  # type: ignore[override]
+        return {self.a("system_synth"): self.work / "system_synth.json"}
+
+    def kernel_dirs(self, config: BuildConfig) -> dict[str, Path]:
+        root = Path(config.root_dir)
+        return {m: root / rtl_rel(m) for m in self.rtl.spec.modules}
+
+    def run(self, config: BuildConfig, **_: Any) -> dict[str, Any]:
+        import dataclasses
+        import json
+
+        from waveflow.build.axi_xbar import generate_axi_xbar
+        from waveflow.build.composite_gen import tcl_target
+        from waveflow.build.system_synth import synth_system, system_synth_records
+
+        spec, work = self.rtl.spec, self.work_dir(config)
+        part, period = tcl_target(config)
+        ip = generate_axi_xbar(dataclasses.replace(spec.xbar, part=part), self.rtl.ip_dir(config))
+        top_v = work / f"{spec.top}.v"
+        kdirs = self.kernel_dirs(config)
+        res = synth_system(spec, top_v=top_v, kernel_dirs=kdirs, ip=ip,
+                           out_dir=work.parent / "system_synth", part=part, period_ns=period,
+                           impl=self.impl)
+        blob = res.to_json()
+        plat = getattr(config, "platform_info", None)
+        blob["filed_into"] = None
+        if plat is not None:
+            from waveflow.calib.record_store import platform_store
+
+            store = platform_store(plat)
+            for rec, ident in system_synth_records(spec, res, top_v.read_text(encoding="utf-8"),
+                                                   kdirs, owner_label=owner_label):
+                store.append(rec, identity=ident)
+            blob["filed_into"] = str(getattr(plat, "write_dir", plat.dir))
+        out = work / "system_synth.json"
+        out.write_text(json.dumps(blob, indent=2) + "\n", encoding="utf-8")
+        i = res.integration
+        print(f"  {spec.top}: {len(res.instances)} instances + integration {i} = total {res.total}")
+        return {self.a("system_synth"): out}
+
+
 def add_system_steps(dag: BuildDag, sysm, *, work_dir, top: str | None = None,
                      xbar_name: str | None = None, inside=None, probes: dict | None = None,
                      prefix: str = "", workspace: str | None = None,
                      sources: tuple[str, ...] = ("include", "gen"),
                      tcls: dict[str, Path] | None = None, timeout: int = 3600) -> SystemXsiStep:
     """Add the framework steps of a system's flow to *dag*: ``csynth`` (one inner step per HLS top in
-    the cut), ``system_rtl``, ``kernel_resources``, ``scenario``, ``pysim``, ``system_xsi`` and
-    ``compare``.  Returns the
+    the cut), ``system_rtl``, ``kernel_resources``, ``system_synth``, ``scenario``, ``pysim``, ``system_xsi`` and ``compare``.  Returns the
     ``system_xsi`` step (its ``rtl`` is the ``system_rtl`` step).
 
     *sysm* is the pysim system object, not yet run.  csynth consumes the artifacts *sources* -- the
@@ -688,6 +756,7 @@ def add_system_steps(dag: BuildDag, sysm, *, work_dir, top: str | None = None,
         dag.add(CsynthTopsStep(name=name, tops=new, tcls=dict(tcls or {}), sources=tuple(sources)))
     dag.add(rtl)
     dag.add(KernelResourcesStep(sysm=sysm, work=work, prefix=prefix, rtl=rtl))
+    dag.add(SystemSynthStep(sysm=sysm, work=work, prefix=prefix, rtl=rtl))
     dag.add(ScenarioStep(sysm=sysm, work=work, prefix=prefix))
     dag.add(PysimStep(sysm=sysm, work=work, prefix=prefix))
     xsi = SystemXsiStep(sysm=sysm, work=work, prefix=prefix, rtl=rtl, timeout=timeout)
@@ -696,7 +765,7 @@ def add_system_steps(dag: BuildDag, sysm, *, work_dir, top: str | None = None,
     return xsi
 
 
-__all__ = ["CompareStep", "CsynthStep", "CsynthTopsStep", "KernelResourcesStep", "PysimStep",
+__all__ = ["CompareStep", "CsynthStep", "CsynthTopsStep", "KernelResourcesStep", "PysimStep", "SystemSynthStep",
            "SYNTH_MODES", "ScenarioStep", "SystemRtlStep", "SystemXsiStep", "add_system_steps",
            "owner_label", "report_artifact", "report_rel", "rtl_artifact", "rtl_problem", "rtl_rel",
            "seconds_artifact", "snake"]
