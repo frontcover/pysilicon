@@ -389,8 +389,8 @@ class SystemRtlStep(_SystemStep):
     """``system_rtl``: everything that turns the system into Verilog after csynth -- an inner DAG of
     the crossbar IP and the system top.  Consumes every csynth'd top's RTL (the cut's modules,
     ``system_top_spec(...).modules``); produces ``<work>/<top>.v`` and ``<work>/rtl.json``, the
-    manifest of every Verilog file the top needs (the IP's simulation files, the framework leaves, each
-    csynth'd module's files, the top) and the IP's include directories -- what ``system_xsi`` compiles.
+    manifest of every Verilog file the top needs (the IP's simulation files, the framework leaves its
+    instances use -- ``SystemTopSpec.leaf_sources`` -- each csynth'd module's files, the top) and the IP's include directories -- what ``system_xsi`` compiles.
     ``--through system_rtl`` builds all of a system's RTL without simulating it.  The crossbar IP cache
     is ``ip/`` beside the workspace."""
 
@@ -437,8 +437,6 @@ class SystemRtlStep(_SystemStep):
     def run(self, config: BuildConfig, **_: Any) -> dict[str, Any]:
         import json
 
-        from waveflow.build.mm_adaptor_gen import leaf_sources
-
         inner = BuildConfig(root_dir=config.root_dir, vitis_version=config.vitis_version,
                             params=dict(config.params))
         dag = self.inner_dag()
@@ -453,7 +451,8 @@ class SystemRtlStep(_SystemStep):
         manifest.write_text(json.dumps({
             "top": self.spec.top,
             # The top last, by its bare name: the workspace compiles it from beside the .f.
-            "rtl_files": [Path(f).as_posix() for f in [*ip.sim_files, *leaf_sources(), *rtl]]
+            "rtl_files": [Path(f).as_posix()
+                          for f in [*ip.sim_files, *self.spec.leaf_sources(), *rtl]]
                          + [f"{self.spec.top}.v"],
             "include_dirs": [Path(d).as_posix() for d in ip.include_dirs],
         }, indent=1) + "\n", encoding="utf-8")

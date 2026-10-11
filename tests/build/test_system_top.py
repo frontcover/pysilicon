@@ -165,3 +165,84 @@ def test_a_probe_that_names_nothing_in_the_top_is_refused():
         spec.probe_expr(beat(sysm.chain.m_mem))                        # a master needs a channel
     with pytest.raises(LoweringError, match="not a stream endpoint"):
         spec.probe_expr(beat(sysm.host.irq_qcmd))                      # not on any net
+
+
+# ---------------------------------------------------------------------------------------------
+# The instance inventory (plans/system_resources.md Stage 1): what the top holds, as data.
+# ---------------------------------------------------------------------------------------------
+
+_INST = re.compile(r"^  (\w+) (?:#\((.*)\) )?(u_\w+) \($", re.M)
+
+
+def _rendered_instances(v: str) -> dict[str, tuple[str, dict]]:
+    """``inst -> (module, params)`` read off the rendered Verilog -- here and only here."""
+    out = {}
+    for module, params, inst in _INST.findall(v):
+        assert inst not in out, f"instance {inst} rendered twice"
+        out[inst] = (module, {k: int(x) for k, x in re.findall(r"\.(\w+)\((\d+)\)", params or "")})
+    return out
+
+
+@pytest.mark.parametrize("which", ["markov", "per_view", "one_front"])
+def test_the_inventory_is_what_the_top_instantiates(which):
+    _sysm, spec = _markov() if which == "markov" else _fir(which)
+    inv = spec.instances()
+    got = {i.inst: (i.module, {} if i.kind != "leaf" else i.params) for i in inv}
+    assert len(got) == len(inv), "instance names must be unique"
+    assert got == _rendered_instances(render_system_top(spec))
+    for i in inv:
+        assert i.owner is not None, i.inst
+        assert i.identity is not None and i.identity.key, i.inst
+
+
+def test_markov_inventory_owners_are_pysim_objects():
+    """Fifteen instances, each accounted to the module or interface it realizes: the routed channel
+    owns its two writers and the FIFO between the generator and the forward writer."""
+    sysm, spec = _markov()
+    by = {i.inst: i for i in spec.instances()}
+    assert len(by) == 15
+    kinds = [i.kind for i in by.values()]
+    assert (kinds.count("kernel"), kinds.count("leaf"), kinds.count("ip")) == (4, 10, 1)
+    assert by["u_gen"].owner is sysm.gen and by["u_chain"].owner is sysm.chain
+    for inst in ("u_u_fwd_wr", "u_u_crd_wr", "u_u_fwd_ff"):
+        assert by[inst].owner is sysm.u_link, inst
+    assert by["u_u_fwd_wr"].identity.cls_name == "MmStreamWriter"
+    assert by["u_xbar"].owner is sysm.xbar
+    assert by["u_xbar"].identity == spec.xbar.identity()
+    for inst in ("u_mem_front", "u_mem", "u_mem_mem"):
+        assert by[inst].owner is sysm.mem, inst
+    adaptor = by["u_chain_mm_front"].owner
+    assert type(adaptor).__name__ == "MemSlaveAdaptor" and adaptor.name == "chain_mm"
+    assert by["u_chain_qu"].owner in list(adaptor.views)                # a leaf: its view
+    # One configuration, one key: the two adaptors' fronts are the same leaf configuration.
+    assert by["u_gen_mm_front"].identity == by["u_chain_mm_front"].identity
+    assert by["u_gen_mm_front"].identity != by["u_mem_front"].identity        # LAW 13 vs 12
+
+
+@pytest.mark.parametrize("which", ["markov", "per_view"])
+def test_leaf_sources_are_only_the_used_ones(which):
+    from waveflow.build.mm_adaptor_gen import leaf_sources
+
+    _sysm, spec = _markov() if which == "markov" else _fir(which)
+    used = {p.name for p in spec.leaf_sources()}
+    leaves = {i.module for i in spec.instances() if i.kind == "leaf"}
+    # A queue leaf instantiates mm_sync_fifo: its source comes with it.
+    deps = {"mm_sync_fifo"} if leaves & {"mm_queue_in", "mm_queue_out"} else set()
+    assert used == {f"{m}.v" for m in leaves | deps}
+    assert used < {p.name for p in leaf_sources()}
+    if which == "markov":
+        assert "mm_regbank.v" not in used
+
+
+def test_a_leaf_identity_moves_with_its_source_not_its_line_endings(tmp_path):
+    from waveflow.calib.module_key import identify_rtl
+
+    src = tmp_path / "leaf.v"
+    src.write_bytes(b"module leaf;\nendmodule\n")
+    a = identify_rtl("leaf", {"W": 8}, [src])
+    assert a.key.startswith("leaf-") and a.params == {"W": 8}
+    assert identify_rtl("leaf", {"W": 16}, [src]) != a
+    src.write_bytes(b"module leaf;\r\nendmodule\r\n")                  # a CRLF checkout
+    assert identify_rtl("leaf", {"W": 8}, [src]) == a
+    src.write_bytes(b"module leaf; wire x;\nendmodule\n")              # an edit
+    assert identify_rtl("leaf", {"W": 8}, [src]).key != a.key

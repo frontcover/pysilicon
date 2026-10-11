@@ -1,6 +1,7 @@
 # Plan: resources for a whole system -- kernels, RTL leaves, vendor IP and the top
 
-**Status:** drafted 2026-10-11.  Nothing built.  Follows `plans/interconnect_platform_model.md`
+**Status:** drafted 2026-10-11.  Stage 1 (the instance inventory) built on branch
+`system-resources`; Stages 2-7 not started.  Follows `plans/interconnect_platform_model.md`
 (stages 1-3, merged in PR #249: the crossbar measured out of context, as module-store records) and
 `plans/system_dag.md` (a system's whole flow on one `BuildDag`).  Worked case: **markov**; the same
 steps serve **mm_fir**, the other design built by `add_system_steps`.
