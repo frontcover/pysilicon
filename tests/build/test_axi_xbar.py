@@ -196,3 +196,17 @@ def test_synth_records_carry_the_closure_verdict():
     assert imp.payload["lut"] == 612 and imp.payload["met"] is False
     assert imp.provenance.signature == cfg.identity().signature
     assert imp.provenance.period_ns == 4.0
+
+
+def test_sasd_has_no_mi_side_ids():
+    # Measured on the generated wrapper: SASD lacks exactly m_axi_{aw,b,ar,r}id.
+    from waveflow.build.axi_xbar import mi_signals, render_xbar_bfm_top
+
+    names = {s[0] for s in mi_signals(_cfg(mode="SASD"))}
+    assert not names & {"AWID", "BID", "ARID", "RID"} and "AWREGION" in names
+    assert "AWID" in {s[0] for s in mi_signals(_cfg())}
+    v = render_xbar_instance(_cfg(mode="SASD"), "u", ["a", "b"], ["x", "y"])
+    assert ".m_axi_awid(" not in v and ".s_axi_awid({b_AWID, a_AWID})" in v
+    top = render_xbar_bfm_top(_cfg(mode="SASD"), "t")
+    assert "_bid_q" not in top and "mx0_axi_BRESP = 2'b00" in top
+    assert "mx0_axi_bid_q <= mx0_axi_AWID" in render_xbar_bfm_top(_cfg(), "t")
