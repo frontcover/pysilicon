@@ -75,6 +75,19 @@ def test_a_host_activated_top_with_one_row_claims_it():
     assert r.integration["lut"] == 0
 
 
+def test_a_stream_top_synthesized_alone_attributes():
+    """poly: a host-activated top elaborated alone has unbound stream ports -- they face outside the
+    design, so they are its boundary, and the walk must not refuse them."""
+    from waveflow.build.elaborate import elaborate
+    from examples.stream_inband.poly import PolyAccel
+
+    top = elaborate(PolyAccel, {"in_bw": 32, "out_bw": 32}, name="poly")
+    rows = {"poly": _row(900, 700), "poly_Pipeline_BODY": _row(300, 200)}
+    r = attribute_resources(top, FakeParser(_row(900, 700), rows), top_name="poly")
+    (m,) = r.modules
+    assert m.rtl_module == "poly" and set(m.subblocks) == {"poly_Pipeline_BODY"}
+
+
 def test_a_composite_with_a_routed_credit_endpoint_walks():
     """chain_core's ``s_u`` is bound to an MmCreditStreamIF (no depth); its halves are the boundary."""
     sysm = _markov()

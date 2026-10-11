@@ -188,6 +188,10 @@ def boundary_endpoint_ids(top: Any) -> frozenset:
             ids.add(id(entry[1]))
         except (TypeError, IndexError):
             continue
+    # A top with no children (a host-activated kernel synthesized alone) declares no boundary: every
+    # port it has faces outside the design, so every one is on it.
+    if not getattr(top, "sub_comps", None):
+        ids.update(id(ep) for ep in (getattr(top, "endpoints", {}) or {}).values())
     # A two-half endpoint (a credit stream's ``fwd_ep`` / ``crd_ep``) whose halves are on the boundary
     # is on it too: the boundary lists the halves, and the wrapper -- bound to a routed channel that
     # sets no depth -- would otherwise read as unbound.
