@@ -109,5 +109,34 @@ spec can be asked before it is rendered -- `spec.si`, `spec.mi`, `spec.nets`, `s
 `spec.modules`.
 
 **What it leaves.** `xsi_work/markov/markov_top.v`, and `rtl.json`: every Verilog file the top compiles
--- the crossbar IP's simulation files, the framework's leaves, each csynth'd module's files, the top --
-and the IP's include directories. That list is all [XSI testbench](xsi.md) needs of this page.
+-- the crossbar IP's simulation files, the framework leaves its instances use, each csynth'd module's
+files, the top -- and the IP's include directories. That list is all [XSI testbench](xsi.md) needs of
+this page.
+
+## Resources: what the system costs {#resources}
+
+`spec.instances()` lists the fifteen instances `markov_top.v` holds -- four kernels, ten hand-written
+leaves, the crossbar -- each with the pysim object it realizes. Four more steps price them
+([Systems](../../guide/resource/systems.md)):
+
+```bash
+python markov_build.py --through resource_report --platform <name>            # seconds
+python markov_build.py --through system_synth --platform <name>               # ~11 min of Vivado
+```
+
+`kernel_resources` files each top's csynth attribution; `resource_report` prints the estimate, a row per
+pysim object. After `system_synth` (xc7z020, 10 ns) the measured total sits beside it:
+
+| row | LUT | FF | BRAM18 |
+|---|---:|---:|---:|
+| `mem` (`MemoryMod`: the BRAM window and its memory) | 12,435 | 32,982 | 0 |
+| `chain` (`MarkovChain`) | 2,034 | 3,115 | 0 |
+| `u` (`MmCreditStreamIF`: two writers and a FIFO) | 1,362 | 1,658 | 2 |
+| `gen` (`MarkovGen`) | 1,192 | 1,298 | 0 |
+| `xbar` (the crossbar) | 848 | 680 | 0 |
+| `chain_mm`, `gen_mm` (the adaptors) | 722 | 395 | 0 |
+| system integration | 0 | 2 | 0 |
+| **total** | **18,593** | **40,130** | **2** |
+
+The on-chip memory is two thirds of the LUTs: `bram_t2p` infers no block RAM and its 32 Kbit become
+flip-flops. The kernels are about half what their csynth reports estimated.

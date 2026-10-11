@@ -28,13 +28,17 @@ flowchart LR
     KM["kernel modules"]
     RM["RTL modules"]
     BM["BFM modules"]
+    IF["interfaces<br/>(crossbar, adaptors, FIFOs)"]
   end
 
   KM -->|"composite_top_spec<br/>+ render_top"| HLS["Vitis kernel<br/>(HLS C++)"]
   HLS -->|"csynth"| KV["Vitis kernel<br/>(Verilog)"]
   RM -->|"rtl_module()<br/>(the .v, as is)"| HV["hand-written<br/>Verilog"]
+  IF -->|"system_top_spec"| HV
+  IF -->|"generate_axi_xbar"| IP["vendor IP<br/>(axi_crossbar)"]
   KV --> RT["RTL top<br/>(Verilog)"]
   HV --> RT
+  IP --> RT
   BM -->|"tb_top_spec<br/>+ render_tb_harness"| HARN["harness<br/>(C++ BFMs + cycle loop)"]
 
   RT --> XSI["XSI simulation<br/>(xsim, cycle by cycle)"]
@@ -81,7 +85,11 @@ AMD's crossbar and an on-chip memory — gets its top from
 (`system_top_spec(xbar, [kernels..., memory])`) and every crossbar slot, adaptor, stream net, credit
 link writer and interrupt output follows from the graph ([XSI system simulation](../build/xsi_system.md)). [mm_fir](../../examples/mm_fir/synth.md) and
 [markov](../../examples/markov/synth.md) are the worked cases; their cycle counts (618 / 611 and
-1870) were unchanged when their hand-rendered tops were replaced by it.
+1870) were unchanged when their hand-rendered tops were replaced by it.  Most of a system's RTL is
+brought by **interfaces**, not modules -- the crossbar (vendor IP), each adaptor's hand-written
+leaves, a deep link's FIFO -- so its resources come from three places: each kernel's csynth report,
+the out-of-context library of leaf and IP configurations, and a synthesis of the whole top; see
+[Systems](../resource/systems.md).
 
 **Generate the harness** (target `sequential_xsi_tb`). `tb_top_spec` walks the XSI simulation top,
 checks that every BFM module has a C++ BFM and every port of the RTL top is covered, and
