@@ -92,12 +92,13 @@ def inspect_synth(top: Any, report_dir: str | Path, *, top_name: str, config: Bu
     if owner:
         blob["owner"] = owner
     platform = getattr(config, "platform_info", None)
-    blob["filed_into"] = str(platform.dir) if platform is not None else None
+    blob["filed_into"] = (str(getattr(platform, "write_dir", platform.dir))
+                          if platform is not None else None)
     out.write_text(json.dumps(blob, indent=2), encoding="utf-8")
 
     if platform is not None:
         from waveflow.calib.module_key import walk_modules
-        from waveflow.calib.record_store import ModuleStore
+        from waveflow.calib.record_store import platform_store
         from waveflow.calib.resource_model import InterfaceResourceModel
 
         walked = walk_modules(top)
@@ -109,7 +110,7 @@ def inspect_synth(top: Any, report_dir: str | Path, *, top_name: str, config: Bu
         top_ident = next((i for _p, c, i in walked if c is top), None)
         boundary = InterfaceResourceModel().get_params(top)
         store_report(
-            report, ModuleStore(platform.dir), identities,
+            report, platform_store(platform), identities,
             source="hls_estimate", part=platform.part or "",
             period_ns=platform.synth_period_ns or 0.0,
             tool=f"vitis_hls {config.vitis_version}" if config.vitis_version else "vitis_hls",

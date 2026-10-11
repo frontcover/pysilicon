@@ -245,7 +245,7 @@ class VecMult(FreeRunMod):
         and both fail silently.
         """
         from waveflow.calib.device_rules import require_same_device
-        from waveflow.calib.record_store import ModuleStore
+        from waveflow.calib.record_store import ModuleStore, platform_store
         from waveflow.calib.vitis_model import VitisResourceModel
 
         from examples.vecmult.vecmult_corpus import COMMITTED_CALIB, PART
@@ -254,7 +254,8 @@ class VecMult(FreeRunMod):
         part = getattr(platform, "part", None) or PART
         require_same_device(part, PART, what="VecMult's resource model")
 
-        store = ModuleStore(getattr(platform, "dir", None) or COMMITTED_CALIB)
+        # A platform's layered store: what a build filed (its work tier) first, then the library.
+        store = platform_store(platform) if platform is not None else ModuleStore(COMMITTED_CALIB)
         return VitisResourceModel(name="vec_mult", part=part, platform=platform,
                                   cls_name="VecMult", comp_class=cls, store=store,
                                   shell=vec_mult_shell(store)).load_or_fit()
