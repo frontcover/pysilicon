@@ -1,6 +1,7 @@
 # Plan: resources for a whole system -- kernels, RTL leaves, vendor IP and the top
 
-**Status:** drafted 2026-10-11.  Nothing built.  Follows `plans/interconnect_platform_model.md`
+**Status:** drafted 2026-10-11; Stages 1-7 built on branch `system-resources` the same day -- see
+[Results](#results-2026-10-11).  Follows `plans/interconnect_platform_model.md`
 (stages 1-3, merged in PR #249: the crossbar measured out of context, as module-store records) and
 `plans/system_dag.md` (a system's whole flow on one `BuildDag`).  Worked case: **markov**; the same
 steps serve **mm_fir**, the other design built by `add_system_steps`.
@@ -266,6 +267,66 @@ decomposition one level up); correct composite.md's "you get this on every build
 DAG has the step); the missing branch in `docs/guide/flows/concurrent_flowsteps.md`'s diagram
 (interfaces -> vendor IP -> RTL top) and a sentence on where RTL-side resources come from; markov's
 pages gain the report.
+
+## Results (2026-10-11)
+
+Built as planned, with these decisions and findings:
+
+- **Stage 1.**  Names and parameter lists come from the spec objects both the renderer and
+  `instances()` read (`view.inst`, `leaf_params`, `front_inst`, `StreamNet.fifo_inst`, `XBAR_INST`);
+  rendered tops byte-identical.  The crossbar instance's `module` is the IP's generated name
+  (`xbar_markov_4x3`), what Vivado reports.  A bus writer's owner is found by walking kernel endpoints
+  for the `MmCreditStreamIF` whose bus masters include it -- a back-pointer would have moved keys.
+- **Stage 2.**  A top with no kernel task and no children claims its one function row (the writers:
+  680 of 1531 LUT; the `m_axi` adapter, 851, stays integration) or else the top row (`simp_fun`).
+  Two walk fixes, neither moving a key: a credit endpoint whose halves are on the boundary is on it
+  (`markov_chain`), and a childless top's ports are all boundary (`PolyAccel` alone -- caught by
+  `test_poly_demo -m vitis`).
+- **Stage 3.**  `Platform.dir` stays the *read* home (a published fitted model's artifact loads from
+  it); `write_dir` is the primary root's copy, created with the manifest on the first write.
+  `LayeredModuleStore` answers per `(key, target)` from the first tier holding a record.
+- **Stage 4.**  Per-instance records file under a new target, `instance`, not `resource`: a
+  composite kernel's whole instance is not its own cost, and `resource` is where a per-module lookup
+  reads.  They carry the system's identity, and the estimate matches in-context records on it (not on
+  the top's name: a stale run of the same top describes another design).  The crossbar IP is
+  regenerated for the synthesis part (the simulation IP is the RFSoC's, which this Vivado cannot
+  synthesize).
+  - **First run (xc7z020, 10 ns, 653 s):** total 18593 LUT / 40130 FF / 2 BRAM18.  **`bram_t2p`
+    inferred no BRAM** (512 x 64 -> 8769 LUT / 32832 FF; its front +3625 LUT of read mux): both ports
+    were written in one `always` block, which Vivado's true-dual-port template does not match.
+  - **`bram_t2p` recoded** with one `always` block per port (read-first, `ram_style = "block"`, the
+    collision check under `translate_off`).  All 168 XSI gates unchanged.  OOC 512 x 64: 4 BRAM18 /
+    2 LUT (was 83194 LUT / 32896 FF; 58 s, was 1249 s).
+  - **Markov now (116 s):** total **6287 LUT / 7187 FF / 4 BRAM18**; worst slack after synthesis
+    -0.70 ns at 10 ns.
+  - **Attribution granularity under `rebuilt` (the open question below) -- answered.**  With block
+    RAM, Vivado dissolved `u_mem_mem` and `u_mem` into the top: no rows, and the RAMB36 counted in no
+    child.  `KEEP_HIERARCHY` on every instance keeps the rows but costs +25% LUT / +30% FF (markov
+    7829 / 9314) -- a design nobody would ship -- so it is an option, off by default.  Instead an
+    instance with no row is priced by the primitives under its name prefix (`wf_prims`: REF_NAME
+    census, LUTRAM / BRAM weighted as `report_utilization` counts them); flattening keeps cell names.
+    The census and the report's site-level LUT count differ slightly: markov's integration reads
+    -36 LUT.
+  - **Gap, hls_estimate vs in-context synthesis (LUT):** markov_gen 2585 / 1193, markov_chain
+    4423 / 2032, queue writer 1531 / 811, credit writer 1097 / 508 -- csynth overestimates LUT ~2x;
+    FF within ~30%.
+- **Stage 5.**  The kernel row prefers this system's in-context record (the plan's example table
+  shows `chain` as `vivado_synth (in markov_top)`), then a class model, then the `hls_estimate`
+  records.  Views roll up into their adaptor's row.  CLI: `python -m waveflow.build.system_estimate
+  <module:callable> --platform NAME [--composed] [--json]`.
+- **Stage 6.**  Not a `SweepRunner`: the leaves are a heterogeneous list of configurations, not a
+  grid.  `measure_instances` gives what the runner would -- failure isolation (a failed
+  configuration is a row), and per-identity caching (a re-run synthesizes nothing).
+  - **Gap, composed prediction vs measured total:** LUT +89.9% (11938 / 6287), FF +12.5%, BRAM
+    +50% (6 / 4).  With in-context records the estimate reproduces the total exactly (the gate).
+  - LUT: the kernels' hls_estimates, 5092 of the 5651-LUT excess; the crossbar OOC 1292 vs 849.
+    BRAM: out of context `bram_t2p` has both ports live (two RAMB36); in markov port B is tied idle
+    and one RAMB36 serves.  (Before the recode the composed gap was +412% LUT, nearly all the
+    flip-flop memory's tied-off port: 83194 LUT OOC vs 8769 in context.)
+
+**New open questions (from the results):** key a leaf on its tie-offs (an idle port is a
+different configuration -- `bram_t2p` with port B idle), or price a tied-off instance in context
+only; and calibrate the hls_estimate -> vivado_synth LUT ratio, which dominates the composed gap.
 
 ## Not in scope
 

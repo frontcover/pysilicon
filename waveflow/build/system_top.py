@@ -42,10 +42,17 @@ BFM beside the top, and every endpoint bound to it becomes a top port.
 * a memory's kernel port with no kernel on it is held idle.
 
 Stream nets are the bus width wide; a narrower kernel port takes the low bits.
+
+**The instance inventory.**  :meth:`SystemTopSpec.instances` lists every instance the top holds --
+kernel, hand-written leaf, vendor IP -- with its parameters, sources, identity and the pysim object it
+realizes (``plans/system_resources.md`` Stage 1).  The renderers read each instance's name and
+parameter list from the same spec objects the inventory reads, so the two cannot disagree; the
+compile list (:meth:`SystemTopSpec.leaf_sources`) is the inventory's.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from pathlib import Path
 from typing import TYPE_CHECKING
 
 from waveflow.build.axi_xbar import (
@@ -62,14 +69,23 @@ from waveflow.build.mm_adaptor_gen import (
     CreditInView,
     QueueView,
     RegBankView,
+    adaptor_law,
+    front_inst,
+    front_params,
+    leaf_module_sources,
     mi_wire_signals,
     render_adaptor_slot,
     render_view_slot,
+    verilog_params,
 )
 from waveflow.hw.interface import DEFAULT_STREAM_DEPTH
 
 if TYPE_CHECKING:
     from waveflow.build.composite_gen import TbSpec
+    from waveflow.calib.module_key import ModuleIdentity
+
+#: The crossbar's instance name in a system top.
+XBAR_INST = "u_xbar"
 
 #: A Vitis ``m_axi`` bundle's pins, ``(signal, is_input)``: both channels, always, whatever the
 #: pointer's direction -- Vitis 2025.1 emits the full set (checked against the csynth'd modules by
@@ -98,13 +114,17 @@ class KernelRtl:
     ``ports`` are its boundary :class:`~waveflow.build.composite_gen.ExtPort`\\ s -- the same spec its
     csynth top was rendered from; ``scalars`` its ``ap_none`` inputs as ``(name, width, value)``
     (a routed writer's ``target``); ``endpoints`` the system instance's endpoint per port name, which
-    is how a pin finds its net."""
+    is how a pin finds its net.  ``hw`` is the pysim module the instance realizes (what its identity
+    is taken from) and ``owner`` the pysim object it is accounted to: the kernel itself, or for a
+    routed channel's bus writer the channel (``MmCreditStreamIF``)."""
 
     module: str
     inst: str
     ports: tuple[ExtPort, ...]
     scalars: tuple[tuple[str, int, int], ...] = ()
     endpoints: tuple[tuple[str, object], ...] = ()
+    hw: object = field(default=None, compare=False, repr=False)
+    owner: object = field(default=None, compare=False, repr=False)
 
 
 def kernel_pins(k: KernelRtl) -> list[tuple[str, str]]:
@@ -144,19 +164,53 @@ class StreamNet:
     consumer_tlast: bool = True        # does the consumer read TLAST?
     producer_keep: bool = False        # ...and TKEEP / TSTRB (only a kernel with side channels)?
     consumer_keep: bool = False
+    #: The pysim object the FIFO is accounted to: the ``StreamIF``, or the routed channel whose writer
+    #: it feeds.
+    owner: object = field(default=None, compare=False, repr=False)
 
     @property
     def consumer_net(self) -> str:
         return f"{self.name}_q" if self.fifo_depth else self.name
 
+    @property
+    def fifo_inst(self) -> str:
+        return f"u_{self.name}_ff"
+
+    def fifo_params(self, dw: int) -> dict[str, int]:
+        """``mm_sync_fifo``'s parameters: TLAST rides beside TDATA."""
+        return {"W": dw + 1, "DEPTH": int(self.fifo_depth)}
+
 
 @dataclass(frozen=True)
 class MiSlot:
-    """One crossbar MI slot: a view, an adaptor's views, an on-chip memory, or a stub (``views=()``)."""
+    """One crossbar MI slot: a view, an adaptor's views, an on-chip memory, or a stub (``views=()``).
+    ``owner`` is the pysim object behind the slot's front: the view, the adaptor, or the memory."""
 
     kind: str                          # "view" | "adaptor" | "memory" | "stub"
     name: str = ""
     views: tuple = ()
+    owner: object = field(default=None, compare=False, repr=False)
+
+
+@dataclass(frozen=True)
+class RtlInstance:
+    """One instance in a system top (:meth:`SystemTopSpec.instances`).
+
+    ``kind`` is ``"kernel"`` (a csynth'd module; its sources are its csynth output, resolved by the
+    build, so ``sources`` is empty), ``"leaf"`` (hand-written, in ``waveflow/build/rtl/``) or ``"ip"``
+    (vendor IP; its files come from the IP's generation).  ``identity`` is what measurements of it are
+    filed under: a kernel's structure key, a leaf's module + parameters + source digest
+    (:func:`~waveflow.calib.module_key.identify_rtl`), the crossbar's configuration.  ``owner`` is the
+    pysim object -- module or interface -- the instance realizes, which a system's resource report
+    groups by."""
+
+    inst: str
+    module: str
+    kind: str                          # "kernel" | "leaf" | "ip"
+    params: dict = field(default_factory=dict)
+    sources: tuple[Path, ...] = ()
+    identity: "ModuleIdentity | None" = None
+    owner: object = field(default=None, compare=False, repr=False)
 
 
 @dataclass(frozen=True)
@@ -183,6 +237,51 @@ class SystemTopSpec:
     #: of a net.  Identities of the graph the spec was walked from: resolve probes against that graph.
     ep_nets: tuple[tuple[int, str], ...] = ()
     ep_si: tuple[tuple[int, str], ...] = ()
+    #: The pysim crossbar the top was walked from (the owner of the crossbar instance).
+    xbar_owner: object = field(default=None, compare=False, repr=False)
+
+    def instances(self) -> tuple[RtlInstance, ...]:
+        """Every instance the top holds, in the order :func:`render_system_top` emits them: the
+        kernel-to-kernel FIFOs, the crossbar, each MI slot's front and leaves, the kernels.  Names and
+        parameters are read from the same spec objects the renderer reads."""
+        from waveflow.calib.module_key import (
+            boundary_endpoint_ids,
+            identify_instance,
+            identify_rtl,
+        )
+
+        cfg = self.xbar
+        dw, aw, idw = cfg.data_width, cfg.addr_width, cfg.id_width
+
+        def leaf(inst: str, module: str, params: dict, owner) -> RtlInstance:
+            src = leaf_module_sources(module)
+            return RtlInstance(inst, module, "leaf", dict(params), src,
+                               identify_rtl(module, params, src), owner)
+
+        out = [leaf(n.fifo_inst, "mm_sync_fifo", n.fifo_params(dw), n.owner)
+               for n in self.nets if n.fifo_depth]
+        out.append(RtlInstance(XBAR_INST, cfg.name, "ip", cfg.hw_params(), (), cfg.identity(),
+                               self.xbar_owner))
+        for slot in self.mi:
+            if slot.kind == "stub":
+                continue
+            law = adaptor_law(len(slot.views)) if slot.kind == "adaptor" else slot.views[0].law
+            out.append(leaf(front_inst(slot.name), "axi_slave_front",
+                            front_params(dw, aw, idw, law), slot.owner))
+            for v in slot.views:
+                if isinstance(v, BramView):
+                    out.append(leaf(v.mem_inst, v.mem_module, v.mem_params(dw), v.owner))
+                out.append(leaf(v.inst, v.module, v.leaf_params(dw), v.owner))
+        for k in self.kernels:
+            ident = (identify_instance(k.hw, exempt=boundary_endpoint_ids(k.hw))
+                     if k.hw is not None else None)
+            out.append(RtlInstance(k.inst, k.module, "kernel", {}, (), ident, k.owner))
+        return tuple(out)
+
+    def leaf_sources(self) -> tuple[Path, ...]:
+        """The hand-written sources the top's instances use, each once -- its xvlog file list."""
+        return tuple(dict.fromkeys(p for i in self.instances() if i.kind == "leaf"
+                                   for p in i.sources))
 
     def probe_expr(self, probe: "Probe | str") -> str:
         """The one-bit Verilog expression for *probe* over this top's nets (a string passes through)."""
@@ -206,26 +305,44 @@ def default_id_width(n_si: int) -> int:
     return max(1, (int(n_si) - 1).bit_length())
 
 
-def _rtl_of(mod, dw: int) -> KernelRtl:
+def _channel_of(writer, mods):
+    """The routed channel (``MmCreditStreamIF``) that built bus *writer*: the interface on one of
+    *mods*' endpoints whose bus masters include the writer's.  ``None`` if none does."""
+    from waveflow.hw.mm_credit import MmCreditStreamIF
+
+    stack = list(mods)
+    while stack:
+        m = stack.pop()
+        for ep in (getattr(m, "endpoints", {}) or {}).values():
+            iface = getattr(ep, "interface", None)
+            if isinstance(iface, MmCreditStreamIF) and any(
+                    b is writer.m_mem for b in iface.bus_masters()):
+                return iface
+        stack += list((getattr(m, "sub_comps", {}) or {}).values())
+    return None
+
+
+def _rtl_of(mod, dw: int, owner=None) -> KernelRtl:
     """*mod*'s module name and ports.  A kernel's come from ``composite_top_spec`` on a fresh
     instance -- exactly as its csynth top was built (``<example>_build.gen_top``) -- and a routed
-    writer's from :func:`~waveflow.build.mm_writer_gen.writer_rtl`."""
+    writer's from :func:`~waveflow.build.mm_writer_gen.writer_rtl`.  *owner* defaults to *mod*."""
     from waveflow.build.composite_gen import _unpack_boundary, composite_top_spec
     from waveflow.hw.mm_credit import MmStreamWriter
     from waveflow.simulation.simulation import Simulation
 
+    owner = mod if owner is None else owner
     if isinstance(mod, MmStreamWriter):
         from waveflow.build.mm_writer_gen import writer_rtl
         module, ports, scalars = writer_rtl(mod)
         eps = (("s_in", mod.s_in), ("m_mem", mod.m_mem))
-        return KernelRtl(module, f"u_{mod.name}", ports, scalars, eps)
+        return KernelRtl(module, f"u_{mod.name}", ports, scalars, eps, hw=mod, owner=owner)
     name = getattr(type(mod), "cpp_kernel_name", None)
     if not name:
         raise LoweringError(f"{type(mod).__name__} '{mod.name}' is inside the cut but names no "
                             f"csynth'd module (cpp_kernel_name)")
     spec = composite_top_spec(type(mod)(name=name, sim=Simulation()), width=dw)
     eps = tuple(_unpack_boundary(e) for e in mod.boundary)
-    return KernelRtl(spec.top_name, f"u_{mod.name}", tuple(spec.ports), (), eps)
+    return KernelRtl(spec.top_name, f"u_{mod.name}", tuple(spec.ports), (), eps, hw=mod, owner=owner)
 
 
 def _view_of(v, net_of: dict, law_default: int):
@@ -237,15 +354,17 @@ def _view_of(v, net_of: dict, law_default: int):
 
     law = int(getattr(v, "window", 1 << law_default)).bit_length() - 1
     if isinstance(v, MemSlaveWStream):
-        return QueueView(v.name, "in", axis=net_of[id(v.m_out)], depth=int(v.depth), law=law)
+        return QueueView(v.name, "in", axis=net_of[id(v.m_out)], depth=int(v.depth), law=law,
+                         owner=v)
     if isinstance(v, MemSlaveRStream):
-        return QueueView(v.name, "out", axis=net_of[id(v.s_in)], depth=int(v.depth), law=law)
+        return QueueView(v.name, "out", axis=net_of[id(v.s_in)], depth=int(v.depth), law=law,
+                         owner=v)
     if isinstance(v, MemSlaveRegBank):
         return RegBankView(v.name, ncfg=int(v.ncfg), nstat=int(v.nstat),
                            cfg_axis=net_of[id(v.m_cfg)], status_axis=net_of[id(v.s_status)],
-                           law=law)
+                           law=law, owner=v)
     if isinstance(v, MemSlaveCreditIn):
-        return CreditInView(v.name, axis=net_of[id(v.m_out)], law=law)
+        return CreditInView(v.name, axis=net_of[id(v.m_out)], law=law, owner=v)
     if isinstance(v, MemSlaveBramWindow):
         raise LoweringError(f"view '{v.name}': a BRAM window shared with a kernel is not wired by "
                             f"system_top yet")
@@ -288,7 +407,9 @@ def system_top_spec(xbar, inside, *, top: str = "system_top", xbar_name: str | N
         if id(mod) in seen:
             continue
         seen.add(id(mod))
-        k = _rtl_of(mod, dw)
+        # A bus writer is accounted to the routed channel that built it.
+        chan = _channel_of(mod, kernels_mods) if isinstance(mod, MmStreamWriter) else None
+        k = _rtl_of(mod, dw, owner=chan)
         rtl.append(k)
         for _n, ep in k.endpoints:
             owner_rtl[id(ep)] = k
@@ -327,12 +448,16 @@ def system_top_spec(xbar, inside, *, top: str = "system_top", xbar_name: str | N
             # view's FIFO, so it is a plain net.
             depth = int(iface.depth or DEFAULT_STREAM_DEPTH)
             fifo = depth if (prod and cons and depth > DEFAULT_STREAM_DEPTH) else 0
+            # A FIFO feeding (or fed by) a bus writer belongs to the writer's channel.
+            ends = [e[0] for e in (prod, cons) if e]
+            chan = next((e.owner for e in ends if isinstance(e.hw, MmStreamWriter)), None)
             net = StreamNet(
                 iface.name, fifo_depth=fifo,
                 producer_tlast=(prod[1].axi4s if prod else True),       # every leaf drives TLAST
                 consumer_tlast=(cons[1].axi4s if cons else True),       # ...and reads it
                 producer_keep=(prod[1].axi4s if prod else False),       # no leaf has TKEEP
-                consumer_keep=(cons[1].axi4s if cons else False))
+                consumer_keep=(cons[1].axi4s if cons else False),
+                owner=chan if chan is not None else iface)
             nets.append(net)
             net_of[id(m_ep)] = net.name
             net_of[id(s_ep)] = net.consumer_net
@@ -376,7 +501,8 @@ def system_top_spec(xbar, inside, *, top: str = "system_top", xbar_name: str | N
                 raise LoweringError(f"memory '{mod.name}': {nwords} words is not a power of two")
             law = int(ep.addr_range.size).bit_length() - 1
             kport = f"{mod.name}_b"
-            mi.append(MiSlot("memory", mod.name, (BramView(mod.name, kport=kport, baw=baw, law=law),)))
+            mi.append(MiSlot("memory", mod.name,
+                             (BramView(mod.name, kport=kport, baw=baw, law=law, owner=mod),), mod))
             idle_mem.append(kport)
             continue
         if dev is None or id(dev.kernel) not in ids:
@@ -385,7 +511,7 @@ def system_top_spec(xbar, inside, *, top: str = "system_top", xbar_name: str | N
         views = [mod] if dev.adaptor is None else list(dev.adaptor.views)
         rviews = tuple(_view_of(v, net_of, 12) for v in views)
         mi.append(MiSlot("adaptor" if dev.adaptor is not None else "view",
-                         mod.name, rviews))
+                         mod.name, rviews, mod))
         for v in views:
             line = getattr(getattr(v, "m_irq", None), "interface", None)
             sink = line.endpoints.get("sink") if line is not None else None
@@ -395,7 +521,7 @@ def system_top_spec(xbar, inside, *, top: str = "system_top", xbar_name: str | N
     return SystemTopSpec(top=top, xbar=cfg, si=tuple(si), mi=tuple(mi), nets=tuple(nets),
                          kernels=tuple(rtl), irqs=tuple(irqs), maxi_si=tuple(maxi_si),
                          axis_nets=tuple(axis_nets), idle_memory_ports=tuple(idle_mem),
-                         ep_nets=tuple(net_of.items()), ep_si=tuple(ep_si))
+                         ep_nets=tuple(net_of.items()), ep_si=tuple(ep_si), xbar_owner=xbar)
 
 
 # ---------------------------------------------------------------------------
@@ -474,7 +600,7 @@ def _fifo(net: StreamNet, dw: int) -> list[str]:
     return [
         f"  // {n}: a {d}-word FIFO between two kernels (the link's declared depth)",
         f"  wire [{dw}:0] {f}_dout; wire {f}_full, {f}_empty; wire [$clog2({d}):0] {f}_count;",
-        f"  mm_sync_fifo #(.W({dw + 1}), .DEPTH({d})) u_{f} (",
+        f"  mm_sync_fifo {verilog_params(net.fifo_params(dw))} {net.fifo_inst} (",
         "    .clk(ap_clk), .rst_n(ap_rst_n),",
         f"    .push({n}_TVALID && !{f}_full), .din({{{n}_TLAST, {n}_TDATA}}),",
         f"    .pop({q}_TVALID && {q}_TREADY), .dout({f}_dout),",
@@ -565,7 +691,7 @@ def render_system_top(spec: SystemTopSpec, probes: dict | None = None) -> str:
         if net.consumer_keep and not net.producer_keep:
             body += [f"  assign {net.name}_TKEEP = {{{dw // 8}{{1'b1}}}};",
                      f"  assign {net.name}_TSTRB = {{{dw // 8}{{1'b1}}}};"]
-    body.append(render_xbar_instance(cfg, "u_xbar", [p for p, _o in spec.si], mi))
+    body.append(render_xbar_instance(cfg, XBAR_INST, [p for p, _o in spec.si], mi))
     for slot, p in zip(spec.mi, mi):
         if slot.kind == "stub":
             body.append(f"  // MI slot {p}: padded in by the crossbar config, never addressed")
@@ -731,6 +857,7 @@ def render_system_tb(spec: SystemTopSpec, tb, n_max: int = 1_000_000) -> tuple[s
     return main, files
 
 
-__all__ = ["KernelRtl", "MiSlot", "Probe", "StreamNet", "SystemTopSpec", "VITIS_MAXI_PINS", "beat",
+__all__ = ["KernelRtl", "MiSlot", "Probe", "RtlInstance", "StreamNet", "SystemTopSpec",
+           "VITIS_MAXI_PINS", "XBAR_INST", "beat",
            "default_id_width", "field_position", "kernel_pins", "last", "render_system_ports_h",
            "render_system_tb", "render_system_top", "stall", "system_tb_spec", "system_top_spec"]

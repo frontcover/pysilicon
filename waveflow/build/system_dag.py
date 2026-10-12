@@ -3,10 +3,20 @@
 
 The outer DAG an example builds::
 
-    codegen ──> csynth ──> system_rtl ──┐
-                                        ├──> system_xsi ──┐
-    scenario ──┬────────────────────────┘                 ├──> compare
-               └──> pysim ────────────────────────────────┘
+    codegen ──> csynth ──┬──> system_rtl ──┬──────────────────┐
+                         │                 │                  ├──> system_xsi ──┐
+    scenario ──┬─────────┼─────────────────┼──────────────────┘                 ├──> compare
+               └──> pysim┼─────────────────┼────────────────────────────────────┘
+                         │                 ├──> leaf_resources ──┐
+                         └──> kernel_resources ──────────────────┴──> resource_report
+                                           └──> system_synth   (opt-in; resource_report reads it)
+
+The resource half (``plans/system_resources.md``): ``kernel_resources`` (:class:`KernelResourcesStep`)
+attributes each kernel's csynth report and files the records; ``leaf_resources``
+(:class:`LeafResourcesStep`) looks every leaf / IP configuration up, synthesizing the missing ones out
+of context when asked; ``system_synth`` (:class:`SystemSynthStep`) synthesizes the whole top in
+Vivado -- minutes, so opt-in; ``resource_report`` (:class:`ResourceReportStep`) is the estimate, row
+by row, with the measured total beside it once ``system_synth`` has run.
 
 ``codegen`` is the example's (its headers, kernel tops, writer tops and ``.tcl``); everything after it
 is framework, and this module holds it.
@@ -50,6 +60,30 @@ def rtl_rel(top: str) -> Path:
 def rtl_artifact(top: str) -> str:
     """The artifact name of *top*'s RTL in a system DAG."""
     return f"rtl_{top}"
+
+
+def report_rel(top: str) -> Path:
+    """*top*'s Vitis solution directory (its csynth report), relative to the example root."""
+    return Path(f"{top}_proj") / "solution1"
+
+
+def report_artifact(top: str) -> str:
+    """The artifact name of *top*'s csynth report (its solution directory)."""
+    return f"report_{top}"
+
+
+def seconds_rel(top: str) -> Path:
+    """Where :class:`CsynthStep` records how long *top*'s csynth took."""
+    return report_rel(top) / "waveflow_csynth.json"
+
+
+def seconds_artifact(top: str) -> str:
+    return f"synth_seconds_{top}"
+
+
+def _csynth_products(top: str) -> dict:
+    return {rtl_artifact(top): rtl_rel(top), report_artifact(top): report_rel(top),
+            seconds_artifact(top): seconds_rel(top)}
 
 
 def rtl_problem(root, top: str) -> str | None:
@@ -96,7 +130,7 @@ class CsynthStep(BuildStep):
 
     @property
     def produces(self) -> dict:  # type: ignore[override]
-        return {rtl_artifact(self.top): rtl_rel(self.top)}
+        return _csynth_products(self.top)
 
     def is_fresh(self, config: BuildConfig, paths: dict[str, Path]) -> bool:
         return rtl_problem(config.root_dir, self.top) is None
@@ -107,9 +141,12 @@ class CsynthStep(BuildStep):
         return tcl_path(root, self.top) if self.tcl is None else Path(root) / self.tcl
 
     def run(self, config: BuildConfig, synth: str = "build", **_: Any) -> dict[str, Any]:
+        import json
+        import time
+
         _check_synth(synth)
         root = Path(config.root_dir)
-        out = {rtl_artifact(self.top): root / rtl_rel(self.top)}
+        out = {k: root / v for k, v in _csynth_products(self.top).items()}
         problem = rtl_problem(root, self.top)
         if synth == "check":
             if problem is not None:
@@ -122,6 +159,7 @@ class CsynthStep(BuildStep):
 
         import subprocess
 
+        t0 = time.perf_counter()
         try:
             r = run_vitis_hls(self.tcl_file(root), work_dir=root)
         except subprocess.CalledProcessError as exc:     # the tcl exits 1 on a csynth error
@@ -134,6 +172,11 @@ class CsynthStep(BuildStep):
 
         check_maxi_lowered(root, self.top)
         write_stamp(root, self.top)
+        # How long the synthesis took: the cost a record of it carries (``cost_seconds``).
+        secs = root / seconds_rel(self.top)
+        secs.parent.mkdir(parents=True, exist_ok=True)
+        secs.write_text(json.dumps({"synth_seconds": round(time.perf_counter() - t0, 3)}) + "\n",
+                        encoding="utf-8")
         return out
 
 
@@ -167,7 +210,7 @@ class CsynthTopsStep(BuildStep):
 
     @property
     def produces(self) -> dict:  # type: ignore[override]
-        return {rtl_artifact(t): rtl_rel(t) for t in self.tops}
+        return {k: v for t in self.tops for k, v in _csynth_products(t).items()}
 
     def is_fresh(self, config: BuildConfig, paths: dict[str, Path]) -> bool:
         return all(rtl_problem(config.root_dir, t) is None for t in self.tops)
@@ -193,7 +236,7 @@ class CsynthTopsStep(BuildStep):
         bad = [r.message for r in results.values() if not r.success]
         if bad:
             raise RuntimeError("; ".join(bad))
-        return {rtl_artifact(t): root / rtl_rel(t) for t in self.tops}
+        return {k: root / v for t in self.tops for k, v in _csynth_products(t).items()}
 
 
 
@@ -389,8 +432,8 @@ class SystemRtlStep(_SystemStep):
     """``system_rtl``: everything that turns the system into Verilog after csynth -- an inner DAG of
     the crossbar IP and the system top.  Consumes every csynth'd top's RTL (the cut's modules,
     ``system_top_spec(...).modules``); produces ``<work>/<top>.v`` and ``<work>/rtl.json``, the
-    manifest of every Verilog file the top needs (the IP's simulation files, the framework leaves, each
-    csynth'd module's files, the top) and the IP's include directories -- what ``system_xsi`` compiles.
+    manifest of every Verilog file the top needs (the IP's simulation files, the framework leaves its
+    instances use -- ``SystemTopSpec.leaf_sources`` -- each csynth'd module's files, the top) and the IP's include directories -- what ``system_xsi`` compiles.
     ``--through system_rtl`` builds all of a system's RTL without simulating it.  The crossbar IP cache
     is ``ip/`` beside the workspace."""
 
@@ -437,8 +480,6 @@ class SystemRtlStep(_SystemStep):
     def run(self, config: BuildConfig, **_: Any) -> dict[str, Any]:
         import json
 
-        from waveflow.build.mm_adaptor_gen import leaf_sources
-
         inner = BuildConfig(root_dir=config.root_dir, vitis_version=config.vitis_version,
                             params=dict(config.params))
         dag = self.inner_dag()
@@ -453,7 +494,8 @@ class SystemRtlStep(_SystemStep):
         manifest.write_text(json.dumps({
             "top": self.spec.top,
             # The top last, by its bare name: the workspace compiles it from beside the .f.
-            "rtl_files": [Path(f).as_posix() for f in [*ip.sim_files, *leaf_sources(), *rtl]]
+            "rtl_files": [Path(f).as_posix()
+                          for f in [*ip.sim_files, *self.spec.leaf_sources(), *rtl]]
                          + [f"{self.spec.top}.v"],
             "include_dirs": [Path(d).as_posix() for d in ip.include_dirs],
         }, indent=1) + "\n", encoding="utf-8")
@@ -560,13 +602,249 @@ class SystemXsiStep(_SystemStep):
                 self.a("report"): self.work_dir(config) / "report.json"}
 
 
+def owner_label(obj) -> str:
+    """``"u (MmCreditStreamIF)"``: how a report names the pysim object an instance is accounted to."""
+    return f"{getattr(obj, 'name', '?')} ({type(obj).__name__})" if obj is not None else ""
+
+
+@dataclass(kw_only=True)
+class KernelResourcesStep(_SystemStep):
+    """``kernel_resources``: every Vitis kernel of the system, its csynth report attributed to its
+    modules (:func:`~waveflow.build.resource_steps.inspect_synth`) and filed as ``hls_estimate``
+    records into the build's platform -- each record carrying the pysim object it is accounted to
+    (``owner``: the kernel, or the routed channel that brought a bus writer).  Seconds: it reads
+    reports csynth already wrote.  Per top, the attribution goes to
+    ``<work>/kernel_resources/<top>.json``; the index, ``<work>/kernel_resources.json``, maps each
+    kernel instance to its top, owner and module records."""
+
+    description = "Each kernel's csynth report attributed to its modules; hls_estimate records filed."
+    step_name: ClassVar[str] = "kernel_resources"
+
+    rtl: "SystemRtlStep"
+
+    @property
+    def consumes(self) -> list:  # type: ignore[override]
+        return [a for t in self.rtl.tops for a in (report_artifact(t), seconds_artifact(t))]
+
+    @property
+    def produces(self) -> dict:  # type: ignore[override]
+        return {self.a("kernel_resources"): self.work / "kernel_resources.json"}
+
+    def run(self, config: BuildConfig, **inputs: Any) -> dict[str, Any]:
+        import json
+
+        from waveflow.build.resource_steps import inspect_synth, synth_seconds_of
+
+        work = self.work_dir(config)
+        index: dict[str, dict] = {}
+        done: dict[str, dict] = {}
+        plat = getattr(config, "platform_info", None)
+        filed_into = str(getattr(plat, "write_dir", plat.dir)) if plat is not None else None
+        for k in self.rtl.spec.kernels:
+            if k.module not in done:              # one csynth per module: attribute it once
+                out = work / "kernel_resources" / f"{k.module}.json"
+                xml = Path(inputs[report_artifact(k.module)]) / "syn" / "report" / "csynth.xml"
+                prev = json.loads(out.read_text(encoding="utf-8")) if out.is_file() else None
+                # Records are filed once per csynth, not once per build: an attribution newer than
+                # its report, already filed into this platform, is reused as is.
+                if (prev is not None and prev.get("filed_into") == filed_into and xml.is_file()
+                        and out.stat().st_mtime >= xml.stat().st_mtime):
+                    done[k.module] = prev
+                else:
+                    done[k.module] = inspect_synth(
+                        k.hw, inputs[report_artifact(k.module)], top_name=k.module, config=config,
+                        out=out,
+                        synth_seconds=synth_seconds_of(inputs.get(seconds_artifact(k.module))),
+                        owner=owner_label(k.owner))
+            blob = done[k.module]
+            index[k.inst] = {"top": k.module, "owner": owner_label(k.owner),
+                             "modules": [m["key"] for m in blob["modules"]],
+                             "top_total": blob["top"], "integration": blob["integration"],
+                             "filed_into": blob["filed_into"]}
+        out = work / "kernel_resources.json"
+        out.write_text(json.dumps(index, indent=2) + "\n", encoding="utf-8")
+        return {self.a("kernel_resources"): out}
+
+
+@dataclass(kw_only=True)
+class SystemSynthStep(_SystemStep):
+    """``system_synth``: the system top through Vivado, out of context -- every instance of the
+    inventory attributed from ``report_utilization -hierarchical``, the integration term and the
+    total (:func:`~waveflow.build.system_synth.synth_system`).  Minutes, so **opt-in**: no default
+    target depends on it (``--through system_synth``).  Cached by the system's identity, so a re-run
+    with nothing changed starts no Vivado.  Synthesized for the part and clock the kernels were
+    csynth'd for (:func:`~waveflow.build.composite_gen.tcl_target`: the build's platform, else the
+    default); the crossbar IP is generated for that part beside the simulation one.  With a platform
+    selected the records are filed into it.  *impl* also places and routes (closure in the records).
+
+    Produces ``<work>/system_synth.json`` (the :class:`~waveflow.build.system_synth.SystemSynth`)."""
+
+    description = "The system top synthesized in Vivado; every instance attributed (opt-in, minutes)."
+    step_name: ClassVar[str] = "system_synth"
+
+    rtl: "SystemRtlStep"
+    impl: bool = False
+    #: ``KEEP_HIERARCHY`` on every inventory instance (synthesis copy of the top only).  Off by
+    #: default: it cost markov +25% LUT / +30% FF -- numbers for a design nobody would ship.  An
+    #: instance the default flow dissolves is priced by its cells' names instead.
+    keep_hierarchy: bool = False
+
+    @property
+    def consumes(self) -> list:  # type: ignore[override]
+        return [self.a("rtl")]
+
+    @property
+    def produces(self) -> dict:  # type: ignore[override]
+        return {self.a("system_synth"): self.work / "system_synth.json"}
+
+    def kernel_dirs(self, config: BuildConfig) -> dict[str, Path]:
+        root = Path(config.root_dir)
+        return {m: root / rtl_rel(m) for m in self.rtl.spec.modules}
+
+    def run(self, config: BuildConfig, **_: Any) -> dict[str, Any]:
+        import dataclasses
+        import json
+
+        from waveflow.build.axi_xbar import generate_axi_xbar
+        from waveflow.build.composite_gen import tcl_target
+        from waveflow.build.system_synth import synth_system, system_synth_records
+
+        spec, work = self.rtl.spec, self.work_dir(config)
+        part, period = tcl_target(config)
+        ip = generate_axi_xbar(dataclasses.replace(spec.xbar, part=part), self.rtl.ip_dir(config))
+        top_v = work / f"{spec.top}.v"
+        kdirs = self.kernel_dirs(config)
+        res = synth_system(spec, top_v=top_v, kernel_dirs=kdirs, ip=ip,
+                           out_dir=work.parent / "system_synth", part=part, period_ns=period,
+                           impl=self.impl, keep_hierarchy=self.keep_hierarchy)
+        blob = res.to_json()
+        plat = getattr(config, "platform_info", None)
+        blob["filed_into"] = None
+        if plat is not None:
+            from waveflow.build.system_synth import INSTANCE_TARGET, system_identity
+            from waveflow.calib.record_store import platform_store
+
+            store = platform_store(plat)
+            top_text = top_v.read_text(encoding="utf-8")
+            ident, _run = system_identity(spec, top_text, kdirs, part=part, period_ns=period,
+                                          impl=self.impl)
+            # A cached run's records are already filed: file once per synthesis, not per build.
+            filed = any(r.payload.get("kind") == "system" and r.provenance.part == part
+                        and r.payload.get("keep_hierarchy", False) == self.keep_hierarchy
+                        for r in store.read(ident.key, INSTANCE_TARGET))
+            if not filed:
+                for rec, i_ident in system_synth_records(spec, res, top_text, kdirs,
+                                                         owner_label=owner_label):
+                    store.append(rec, identity=i_ident)
+            blob["filed_into"] = str(getattr(plat, "write_dir", plat.dir))
+        out = work / "system_synth.json"
+        out.write_text(json.dumps(blob, indent=2) + "\n", encoding="utf-8")
+        i = res.integration
+        print(f"  {spec.top}: {len(res.instances)} instances + integration {i} = total {res.total}")
+        return {self.a("system_synth"): out}
+
+
+@dataclass(kw_only=True)
+class LeafResourcesStep(_SystemStep):
+    """``leaf_resources``: every hand-written leaf and IP configuration of the system, looked up in the
+    platform's store by identity; with the param ``measure_leaves`` true, each missing configuration
+    synthesized out of context once and filed (:func:`~waveflow.build.rtl_ooc.measure_instances`).
+    By default a miss is only reported -- the estimate shows it ``UNCALIBRATED`` -- so the step is
+    seconds unless asked to spend.  Produces ``<work>/leaf_resources.json``: per instance, its key and
+    ``stored`` / ``measured`` / ``missing`` / ``failed``."""
+
+    description = "Each leaf / IP configuration: in the store, or (measure_leaves) synthesized OOC once."
+    step_name: ClassVar[str] = "leaf_resources"
+    params: ClassVar[dict] = {"measure_leaves": False}
+
+    rtl: "SystemRtlStep"
+
+    @property
+    def consumes(self) -> list:  # type: ignore[override]
+        return [self.a("rtl")]
+
+    @property
+    def produces(self) -> dict:  # type: ignore[override]
+        return {self.a("leaf_resources"): self.work / "leaf_resources.json"}
+
+    def run(self, config: BuildConfig, measure_leaves: bool = False, **_: Any) -> dict[str, Any]:
+        import json
+
+        from waveflow.build.composite_gen import tcl_target
+        from waveflow.build.rtl_ooc import measure_instances
+
+        plat = getattr(config, "platform_info", None)
+        if measure_leaves and plat is None:
+            raise RuntimeError("leaf_resources: measure_leaves needs a platform to file into "
+                               "(--platform)")
+        from waveflow.calib.record_store import platform_store
+
+        part, period = tcl_target(config)
+        work = self.work_dir(config)
+        status = measure_instances(self.rtl.spec, platform_store(plat) if plat else None,
+                                   part=part, period_ns=period, out_dir=work.parent / "rtl_ooc",
+                                   ip_dir=self.rtl.ip_dir(config), measure=bool(measure_leaves))
+        out = work / "leaf_resources.json"
+        out.write_text(json.dumps(status, indent=2) + "\n", encoding="utf-8")
+        counts: dict[str, int] = {}
+        for e in status.values():
+            counts[e["status"]] = counts.get(e["status"], 0) + 1
+        print(f"  {self.rtl.spec.top}: leaf / IP instances {counts}")
+        failed = {k: e["error"] for k, e in status.items() if e["status"] == "failed"}
+        if failed:
+            raise RuntimeError(f"out-of-context synthesis failed for {sorted(failed)}: "
+                               f"{next(iter(failed.values()))[-1500:]}")
+        return {self.a("leaf_resources"): out}
+
+
+@dataclass(kw_only=True)
+class ResourceReportStep(_SystemStep):
+    """``resource_report``: the system's estimate (:func:`~waveflow.build.system_estimate.estimate_system`)
+    -- a row per pysim object, each with its counters, confidence and where its number came from, the
+    system integration row, and, when ``system_synth`` has filed a measured total, that total beside
+    the prediction with the gap.  Reads the build's platform; consumes ``kernel_resources`` and
+    ``leaf_resources`` so their records are in the store first.  ``system_synth`` is not consumed (it
+    is opt-in): run it first and the report finds its records.  Produces ``<work>/resource_report.json``
+    and the table as ``resource_report.txt``."""
+
+    description = "The system estimate: a row per pysim object, the measured total beside it."
+    step_name: ClassVar[str] = "resource_report"
+
+    rtl: "SystemRtlStep"
+
+    @property
+    def consumes(self) -> list:  # type: ignore[override]
+        return [self.a("kernel_resources"), self.a("leaf_resources")]
+
+    @property
+    def produces(self) -> dict:  # type: ignore[override]
+        return {self.a("resource_report"): self.work / "resource_report.json"}
+
+    def run(self, config: BuildConfig, **_: Any) -> dict[str, Any]:
+        import json
+
+        from waveflow.build.system_estimate import estimate_system
+
+        plat = getattr(config, "platform_info", None)
+        est = estimate_system(self.sysm, plat, spec=self.rtl.spec, root=config.root_dir)
+        work = self.work_dir(config)
+        out = work / "resource_report.json"
+        out.write_text(json.dumps(est.to_json(), indent=2) + "\n", encoding="utf-8")
+        table = est.format_table()
+        (work / "resource_report.txt").write_text(table + "\n", encoding="utf-8")
+        print(table if plat is not None else
+              table + "\n  (no platform selected: nothing to look up -- pass --platform)")
+        return {self.a("resource_report"): out}
+
+
 def add_system_steps(dag: BuildDag, sysm, *, work_dir, top: str | None = None,
                      xbar_name: str | None = None, inside=None, probes: dict | None = None,
                      prefix: str = "", workspace: str | None = None,
                      sources: tuple[str, ...] = ("include", "gen"),
                      tcls: dict[str, Path] | None = None, timeout: int = 3600) -> SystemXsiStep:
     """Add the framework steps of a system's flow to *dag*: ``csynth`` (one inner step per HLS top in
-    the cut), ``system_rtl``, ``scenario``, ``pysim``, ``system_xsi`` and ``compare``.  Returns the
+    the cut), ``system_rtl``, ``kernel_resources``, ``system_synth``, ``leaf_resources``,
+    ``resource_report``, ``scenario``, ``pysim``, ``system_xsi`` and ``compare``.  Returns the
     ``system_xsi`` step (its ``rtl`` is the ``system_rtl`` step).
 
     *sysm* is the pysim system object, not yet run.  csynth consumes the artifacts *sources* -- the
@@ -597,6 +875,10 @@ def add_system_steps(dag: BuildDag, sysm, *, work_dir, top: str | None = None,
         name = "csynth" if "csynth" not in dag.step_names() else prefix + "csynth"
         dag.add(CsynthTopsStep(name=name, tops=new, tcls=dict(tcls or {}), sources=tuple(sources)))
     dag.add(rtl)
+    dag.add(KernelResourcesStep(sysm=sysm, work=work, prefix=prefix, rtl=rtl))
+    dag.add(SystemSynthStep(sysm=sysm, work=work, prefix=prefix, rtl=rtl))
+    dag.add(LeafResourcesStep(sysm=sysm, work=work, prefix=prefix, rtl=rtl))
+    dag.add(ResourceReportStep(sysm=sysm, work=work, prefix=prefix, rtl=rtl))
     dag.add(ScenarioStep(sysm=sysm, work=work, prefix=prefix))
     dag.add(PysimStep(sysm=sysm, work=work, prefix=prefix))
     xsi = SystemXsiStep(sysm=sysm, work=work, prefix=prefix, rtl=rtl, timeout=timeout)
@@ -605,5 +887,8 @@ def add_system_steps(dag: BuildDag, sysm, *, work_dir, top: str | None = None,
     return xsi
 
 
-__all__ = ["CompareStep", "CsynthStep", "CsynthTopsStep", "PysimStep", "SYNTH_MODES", "ScenarioStep",
-           "SystemRtlStep", "SystemXsiStep", "add_system_steps", "rtl_artifact", "rtl_problem", "rtl_rel", "snake"]
+__all__ = ["CompareStep", "CsynthStep", "CsynthTopsStep", "KernelResourcesStep", "LeafResourcesStep",
+           "PysimStep", "ResourceReportStep", "SystemSynthStep",
+           "SYNTH_MODES", "ScenarioStep", "SystemRtlStep", "SystemXsiStep", "add_system_steps",
+           "owner_label", "report_artifact", "report_rel", "rtl_artifact", "rtl_problem", "rtl_rel",
+           "seconds_artifact", "snake"]

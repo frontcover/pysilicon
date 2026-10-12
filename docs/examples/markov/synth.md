@@ -109,5 +109,35 @@ spec can be asked before it is rendered -- `spec.si`, `spec.mi`, `spec.nets`, `s
 `spec.modules`.
 
 **What it leaves.** `xsi_work/markov/markov_top.v`, and `rtl.json`: every Verilog file the top compiles
--- the crossbar IP's simulation files, the framework's leaves, each csynth'd module's files, the top --
-and the IP's include directories. That list is all [XSI testbench](xsi.md) needs of this page.
+-- the crossbar IP's simulation files, the framework leaves its instances use, each csynth'd module's
+files, the top -- and the IP's include directories. That list is all [XSI testbench](xsi.md) needs of
+this page.
+
+## Resources: what the system costs {#resources}
+
+`spec.instances()` lists the fifteen instances `markov_top.v` holds -- four kernels, ten hand-written
+leaves, the crossbar -- each with the pysim object it realizes. Four more steps price them
+([Systems](../../guide/resource/systems.md)):
+
+```bash
+python markov_build.py --through resource_report --platform <name>            # seconds
+python markov_build.py --through system_synth --platform <name>               # ~2 min of Vivado
+```
+
+`kernel_resources` files each top's csynth attribution; `resource_report` prints the estimate, a row per
+pysim object. After `system_synth` (xc7z020, 10 ns) the measured total sits beside it:
+
+| row | LUT | FF | BRAM18 |
+|---|---:|---:|---:|
+| `chain` (`MarkovChain`) | 2,032 | 3,115 | 0 |
+| `u` (`MmCreditStreamIF`: two writers and a FIFO) | 1,377 | 1,658 | 2 |
+| `gen` (`MarkovGen`) | 1,193 | 1,298 | 0 |
+| `xbar` (the crossbar) | 849 | 680 | 0 |
+| `chain_mm`, `gen_mm` (the adaptors) | 732 | 395 | 0 |
+| `mem` (`MemoryMod`: the BRAM window and its memory) | 140 | 39 | 2 |
+| system integration | −36 | 2 | 0 |
+| **total** | **6,287** | **7,187** | **4** |
+
+The kernels are the cost, and each is about half what its csynth report estimated. The memory is one
+RAMB36 -- since `bram_t2p` was recoded with one `always` block per port: the first synthesis found it
+built from flip-flops, 8,769 LUT and 32,832 FF of a 18,593 / 40,130 total.
