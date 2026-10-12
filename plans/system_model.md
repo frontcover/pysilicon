@@ -277,6 +277,26 @@ testbench-side vendor IPs as block-design cells, not only the DUT's devices.
    `bfm_model()`.
 4. **mem_copy, then an RF example, as `HwSystem`s** (the gates below).
 5. **The docs, once there is one mechanism.**
+
+**Found while scoping (2026-10-12): the two mechanisms differ in *verification* too.**  A kernel-scale
+testbench (`MemCopyTB` + `MemCopySim`) has its scenario written by an example-level function, checks
+its outputs against a **golden** in Python, and runs to a fixed cycle bound.  The system flow has the
+host write the scenario, compares each host endpoint's trace **RTL against pysim**, and runs until the
+host's `done()`.  Decided with the user: **every testbench participant gets the host's contract**:
+- it may write its inputs into the scenario (the stream driver its bursts, the memory its arena);
+- it may record what it observed (the sink its stream, the memory its final arena), and `compare`
+  checks every recorder RTL against pysim;
+- it may declare when the run is done.
+
+Golden checks stay as an optional per-example step: "the destination equals the source" says more than
+"RTL matches pysim".  So S3 splits in four:
+- **S3a: the DUT side.**  Items 1 and 3 above, the DUT half: the walk without a bus, and top ports of
+  their own kind for DUT ports not on a bus.  Gate: markov and mm_fir byte-identical; mem_copy's
+  system top renders and elaborates.
+- **S3b: the testbench contract.**  Scenario, recording and done generalized from `SwHost` to the
+  stream driver, sink and memory model; `system_tb_spec` binds any participant (item 2).
+- **S3c: mem_copy as an `HwSystem`.**  Trace comparison *and* its golden check, 2908 cycles.
+- **S3d: an RF example** with the RFDC in the testbench; then the docs (item 5).
    - `flows/concurrent_layers.md` rewritten around `HwSystem` at both scales, in DUT / testbench
      vocabulary.  "RTL top" becomes "the DUT's Verilog", and the "XSI simulation top" is retired.
    - A kernel-scale figure there: mem_copy as a system with no crossbar, in `system_cut.tex`'s

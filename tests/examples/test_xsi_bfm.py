@@ -229,3 +229,20 @@ def test_render_rtl_f_refuses_when_there_is_no_rtl(tmp_path):
     stale-dll path then turns that into a green run.  (No xsi marker: pure logic, no toolchain.)"""
     with pytest.raises(FileNotFoundError, match="run csynth"):
         render_rtl_f("nope", tmp_path, stamp_sources=False)
+
+
+@pytest.mark.xsi
+def test_mem_copy_system_top_elaborates_with_no_crossbar(tmp_path):
+    """``plans/system_model.md`` S3a: mem_copy as an ``HwSystem`` whose DUT is the kernel alone.  Its
+    system top has no crossbar -- the streams and both m_axi bundles are top ports facing the
+    testbench's models -- and it compiles and elaborates against the real csynth Verilog."""
+    from examples.mem_copy.mem_copy_sim import MemCopySystem
+    from waveflow.build.system_top import SystemTopSpec
+    from waveflow.build.system_xsi import elaborate_top
+
+    root = ROOT_OF["mem_copy"]
+    proj = root / "mem_copy_proj" / "solution1" / "syn" / "verilog"
+    _require(proj.is_dir(), f"no csynth RTL at {proj} — run mem_copy.tcl first")
+    spec = SystemTopSpec.from_system(MemCopySystem())
+    work = elaborate_top(spec, root=root, work_dir=tmp_path)
+    assert (work / "xsim.dir" / f"{spec.top}_elab").is_dir()

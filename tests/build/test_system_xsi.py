@@ -26,10 +26,12 @@ def test_discover_finds_the_crossbar_the_host_and_the_cut():
     assert xbar is f.xbar and host is f.host and inside == [f.fir]
 
 
-def test_discover_needs_a_bus_system():
+def test_a_system_needs_no_bus():
+    """system_model S3: the direct-wired markov has no crossbar in its DUT -- so no bus and no host
+    on one; its cut is still its own declaration."""
     from examples.markov.markov import MarkovSystem, default_jobs
-    with pytest.raises(LoweringError, match="one crossbar"):
-        discover(MarkovSystem(jobs=default_jobs(1, 16), link="direct"))
+    s = MarkovSystem(jobs=default_jobs(1, 16), link="direct")
+    assert discover(s) == (None, None, [s.gen, s.chain, s.mem])
 
 
 def test_compare_traces_names_what_differs(tmp_path):
@@ -113,7 +115,6 @@ def test_the_bus_and_the_host_are_found_by_role():
     assert xbar is s.xbar and host is s.host
     src = inspect.getsource(discover)
     assert "AXIMMCrossBarIF" not in src and "SwHost" not in src
-    # Take the crossbar out of the DUT: the system no longer has a bus to build a top around.
+    # Take the crossbar out of the DUT: it is then testbench, and the DUT has no bus of its own.
     del s.dut().interfaces[s.xbar.name]
-    with pytest.raises(LoweringError, match="one crossbar"):
-        discover(s)
+    assert discover(s)[:2] == (None, None)

@@ -63,11 +63,12 @@ def discover(sysm):
     Each is found by **role**, not by type (``plans/system_model.md`` D1):
 
     * the **bus** is the DUT's link that realizes as bus IP -- the interface of the DUT tree that
-      declares an ``rtl_config`` (S2), today the crossbar;
+      declares an ``rtl_config`` (S2), today the crossbar -- or ``None``: a system needs no bus;
     * the **host** is the participant with a bus master on that bus whose owner is **outside** the
-      DUT tree -- the testbench side of the cut.  Its realization is its own ``bfm_model()``.
+      DUT tree -- the testbench side of the cut -- or ``None``.  Its realization is its own
+      ``bfm_model()``.
 
-    A system top needs exactly one of each, today."""
+    At most one of each, today (``plans/system_model.md`` S3)."""
     from waveflow.hw.hw_system import HwSystem
 
     if not isinstance(sysm, HwSystem):
@@ -76,10 +77,12 @@ def discover(sysm):
                             f"self.sim and implements dut() (the default cut) and run()")
     root = sysm.dut()
     buses = [i for i in root.interfaces.values() if callable(getattr(i, "rtl_config", None))]
-    if len(buses) != 1:
-        raise LoweringError(f"{type(sysm).__name__}: a bus system's DUT links its devices through one "
+    if len(buses) > 1:
+        raise LoweringError(f"{type(sysm).__name__}: a system top links its devices through at most one "
                             f"crossbar (an interface realized as bus IP, rtl_config); its DUT "
                             f"'{root.name}' has {len(buses)}")
+    if not buses:                       # no bus: the testbench reaches the DUT through its own ports
+        return None, None, sysm.cut()
     bus = buses[0]
 
     def in_dut(mod) -> bool:
@@ -95,11 +98,11 @@ def discover(sysm):
         if name.startswith("master_") and owner is not None and not in_dut(owner) \
                 and all(owner is not h for h in hosts):
             hosts.append(owner)
-    if len(hosts) != 1:
-        raise LoweringError(f"{type(sysm).__name__}: a system top is driven by one testbench bus "
-                            f"master (a host outside the DUT on '{bus.name}'); found "
+    if len(hosts) > 1:
+        raise LoweringError(f"{type(sysm).__name__}: a system top is driven by at most one testbench "
+                            f"bus master (a host outside the DUT on '{bus.name}'); found "
                             f"{[getattr(h, 'name', h) for h in hosts]}")
-    return bus, hosts[0], sysm.cut()
+    return bus, (hosts[0] if hosts else None), sysm.cut()
 
 
 def elaborate_sub_top(spec, name: str, *, root: Path, work_dir: Path) -> Path:
@@ -109,22 +112,45 @@ def elaborate_sub_top(spec, name: str, *, root: Path, work_dir: Path) -> Path:
     a per-device synthesis or IP can be built from it with no system around it
     (``plans/system_model.md`` S5).  Returns the work directory; raises
     :class:`~waveflow.scripts.sv_sim.SvSimError` naming the failing tool."""
-    from waveflow.scripts.sv_sim import _run, sim_tool
 
     sub = next(s for s in spec.subs if s.name == name)
-    work = Path(work_dir) / sub.module
-    work.mkdir(parents=True, exist_ok=True)
-    top_v = work / f"{sub.module}.v"
-    top_v.write_text(spec.render_sub_verilog(name), encoding="utf-8")
     leaves, kernels = spec.sources_of(name)
+    return _elaborate(sub.module, spec.render_sub_verilog(name), leaves, kernels, root=root,
+                      work_dir=work_dir)
+
+
+def elaborate_top(spec, *, root: Path, work_dir: Path) -> Path:
+    """Compile and elaborate a **whole** system top that has no crossbar: its Verilog, every leaf it
+    uses and every kernel's csynth Verilog under *root*.  For a top with no bus there is no vendor IP
+    to generate, so this is all it needs -- what shows a system with no crossbar (mem_copy) is a real
+    design before a harness is wrapped around it (``plans/system_model.md`` S3a).  A top with a
+    crossbar needs its IP's simulation files, which the ``system_rtl`` step generates; refused here."""
+    from waveflow.build.hwcodegen import LoweringError
+
+    if spec.xbar is not None:
+        raise LoweringError(f"{spec.top} has a crossbar: elaborate it through its system_rtl step, "
+                            f"which generates the IP's simulation files")
+    return _elaborate(spec.top, spec.render_verilog(), spec.leaf_sources(), spec.modules, root=root,
+                      work_dir=work_dir)
+
+
+def _elaborate(module: str, text: str, leaves, kernels, *, root: Path, work_dir: Path) -> Path:
+    """xvlog + xelab of *module* (Verilog *text*) with its *leaves* and its *kernels*' csynth
+    Verilog under *root*, in ``<work_dir>/<module>``."""
+    from waveflow.scripts.sv_sim import _run, sim_tool
+
+    work = Path(work_dir) / module
+    work.mkdir(parents=True, exist_ok=True)
+    top_v = work / f"{module}.v"
+    top_v.write_text(text, encoding="utf-8")
     files = [*leaves]
-    for module in kernels:
-        files += sorted(_rtl_dir(Path(root), module).glob("*.v"))
+    for m in kernels:
+        files += sorted(_rtl_dir(Path(root), m).glob("*.v"))
     files.append(top_v)
-    (work / f"{sub.module}.f").write_text("\n".join(Path(f).resolve().as_posix() for f in files)
-                                          + "\n", encoding="utf-8")
-    _run(f'"{sim_tool("xvlog")}" -f {sub.module}.f', work, capture_output=True, echo=False)
-    _run(f'"{sim_tool("xelab")}" work.{sub.module} -s {sub.module}_elab', work,
+    (work / f"{module}.f").write_text("\n".join(Path(f).resolve().as_posix() for f in files)
+                                      + "\n", encoding="utf-8")
+    _run(f'"{sim_tool("xvlog")}" -f {module}.f', work, capture_output=True, echo=False)
+    _run(f'"{sim_tool("xelab")}" work.{module} -s {module}_elab', work,
          capture_output=True, echo=False)
     return work
 

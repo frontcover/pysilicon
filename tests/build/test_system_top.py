@@ -404,3 +404,45 @@ def test_a_sub_top_renders_alone_with_its_own_compile_list():
     assert spec.sources_of("mem") == (spec.sources_of("mem")[0], ())          # no kernel in it
     with pytest.raises(LoweringError, match="no sub-top 'xbar'"):
         spec.render_sub_verilog("xbar")
+
+
+# ---------------------------------------------------------------------------------------------
+# A system with no bus (plans/system_model.md S3a)
+# ---------------------------------------------------------------------------------------------
+
+def test_mem_copy_is_a_system_with_no_crossbar():
+    """The DUT is the kernel alone; its streams and m_axi bundles leave the top as ports of their own
+    kind, each facing a testbench model -- and the crossbar that models contention in pysim stays
+    in the testbench."""
+    from examples.mem_copy.mem_copy_sim import MemCopySystem
+    from waveflow.build.system_top import SystemTopSpec
+
+    sysm = MemCopySystem()
+    spec = SystemTopSpec.from_system(sysm)
+    assert spec.xbar is None and spec.si == () and spec.mi == ()
+    assert spec.ext_streams == (("tb_cmd_if", "in"), ("tb_done_if", "out"))
+    assert spec.maxi_ext == (("u_tb_copier", "m_in", "m0_axi"), ("u_tb_copier", "m_out", "m1_axi"))
+    assert [i.path for i in spec.instances()] == ["u_tb_copier_sub/u_tb_copier"]
+    v = spec.render_verilog()
+    top = re.search(r"^module mem_copy_system \((.*?)\);", v, re.M | re.S).group(1)
+    assert "input  wire tb_cmd_if_TVALID" in top and "output wire tb_done_if_TVALID" in top
+    assert "output wire m0_axi_ARVALID" in top and "output wire m1_axi_AWVALID" in top
+    assert "u_xbar" not in v and "_RID[0]" not in v                    # 1 ID bit: a scalar, no index
+
+
+def test_the_direct_wired_markov_renders_its_kernel_link_as_ports():
+    """With no bus, the credit link between the two kernels runs between their sub-tops; the host's
+    streams and the chain's memory master leave the top.  The memory has to be testbench: an on-chip
+    memory reached directly is refused, not silently dropped."""
+    from examples.markov.markov import MarkovSystem, default_jobs
+    from waveflow.build.system_top import SystemTopSpec
+
+    s = MarkovSystem(jobs=default_jobs(1, 16), link="direct")
+    with pytest.raises(LoweringError, match="inside the cut but on no crossbar"):
+        SystemTopSpec.from_system(s)
+    spec = SystemTopSpec.from_system(s, inside=[s.gen, s.chain], top="markov_direct")
+    assert spec.ext_streams == (("k_cmd", "in"), ("k_resp", "out"))
+    assert spec.maxi_ext == (("u_chain", "m_mem", "m0_axi"),)
+    between = {n.name: (n.prod_group, n.cons_group) for n in spec.nets if not n.ext}
+    assert between == {"u_fwd": ("gen", "chain"), "u_crd": ("chain", "gen")}
+    assert spec.render_verilog().count("\nmodule ") == 3              # two sub-tops and the top
