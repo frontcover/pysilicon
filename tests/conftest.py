@@ -131,7 +131,7 @@ os.environ.setdefault("WAVEFLOW_EVENTS", "off")
 #: recordings match pysim, golden at 2908 (test_mem_copy_system_xsi.py).  176 -> 178 (S3d):
 #: rf_loopback through the system flow, the RFDC in the testbench (test_rf_loopback_system_xsi.py).
 #: 178 -> 179: its loss counters, written by the models as a recording.
-WANT_XSI_GATES = 189
+WANT_XSI_GATES = 191
 
 #: Filled in at collection; module state because a pytest run is one process and the hooks that
 #: write and read it are plain functions.

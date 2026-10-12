@@ -48,11 +48,12 @@ from waveflow.hw.clock import Clock  # noqa: E402
 from waveflow.hw.codegen_targets import SEQUENTIAL_XSI_TB  # noqa: E402
 from waveflow.hw.dataschema import DataSchemaStep  # noqa: E402
 from waveflow.hw.hw_freerun import FreeRunMod  # noqa: E402
+from waveflow.hw.hw_system import DutTop, HwSystem  # noqa: E402
 from waveflow.hw.interface import StreamIF  # noqa: E402
 from waveflow.simulation.simulation import Simulation  # noqa: E402
 from waveflow.simulation.stream_tb import StreamDriver, StreamSink  # noqa: E402
 from waveflow.toolchain import toolchain  # noqa: E402
-from waveflow.utils.burst_io import write_burst_bundle  # noqa: E402
+from waveflow.utils.burst_io import write_burst_bundle, write_run_params  # noqa: E402
 
 from examples.rf_loopback.rf_loopback import RfSampBlockRelay, RfSampPassThrough  # noqa: E402
 
@@ -172,6 +173,53 @@ def check_xsi_outputs(xsi_dir: Path, want_cycles: int, nburst: int = XSI_NBURST,
     assert last == want_cycles, (
         f"rf_pass_through completed at cycle {last}, gate expects {want_cycles}. That is a real "
         f"behaviour change: either a regression or an improvement worth re-recording.")
+
+
+@dataclass
+class RfPassThroughSystem(HwSystem):
+    """The pass-through's DUT gate as a **system** (``plans/system_model.md`` S3e): the same
+    :class:`RfPassThroughTB` graph, the cut stated as a DUT tree -- :class:`RfSampPassThrough` alone,
+    its two streams top ports facing a generic driver and sink.  No RF domain anywhere: the RFDC-side
+    system is :class:`~examples.rf_loopback.rf_loopback.RfLoopbackSystem`.
+
+    The scenario is :func:`write_scenario` plus the run's bound (``vectors/run.json``), with the
+    driver and the sink anchored at the root so pysim records what the RTL records (``vectors/s_out``)."""
+
+    n_cycles: int = XSI_N_CYCLES
+
+    def __post_init__(self) -> None:
+        self.tb = RfPassThroughTB(name="xsi_tb", sim=Simulation(), n_cycles=int(self.n_cycles))
+        self.sim = self.tb.sim
+        self.clk = self.tb.clk
+        #: The width of the top's stream ports: there is no crossbar to take it from.
+        self.data_width = int(self.tb.bitwidth)
+        self.dut_top = DutTop.of("rf_pass_through_dut", self.sim, comps=[self.tb.dut])
+        self._root: Path | None = None
+
+    def dut(self) -> DutTop:
+        """The default DUT: the pass-through alone."""
+        return self.dut_top
+
+    def write_scenario(self, root) -> None:
+        write_scenario(root)
+        write_run_params(Path(root) / "vectors", n_cycles=int(self.n_cycles))
+        self.tb.driver.root = Path(root)
+        self.tb.sink.root = Path(root)
+        self._root = Path(root)
+
+    def run(self) -> np.ndarray:
+        """Run pysim; returns the relayed words, which must be the played ones."""
+        import tempfile
+
+        if self._root is None:
+            with tempfile.TemporaryDirectory() as tmp:
+                self.write_scenario(tmp)
+                self.sim.run_sim()
+        else:
+            self.sim.run_sim()
+        got = np.concatenate([np.asarray(b) for b in self.tb.sink.words]).astype(np.uint64)
+        np.testing.assert_array_equal(got, np.concatenate(input_bursts()))
+        return got
 
 
 # ---------------------------------------------------------------------------
