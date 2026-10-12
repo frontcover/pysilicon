@@ -231,10 +231,55 @@ streams) through `system_rtl` and XSI.
 > sees the refusal.
 >
 > **Not built: the generic walk itself.**  `system_top_spec` still starts from the bus and lays out SI
-> and MI slots as a crossbar does.  The gate, a system with no crossbar, needs a software host that
-> talks over plain streams under XSI.  `SwHost`'s C++ twin today has generated endpoints for bus views
-> and interrupts only; a stream endpoint in the fiber runtime is a design question (blocking
-> semantics, which BFM drives the top's AXIS port) to settle with the user first.
+> and MI slots as a crossbar does.
+
+**S3 revised (2026-10-12, with the user): the crossbar is optional, and the cut may run through any
+port with a BFM.**  The first draft of the gate (a no-crossbar system with a software host on
+streams) asked for the wrong thing.  Three things had been conflated:
+
+| | required? |
+|---|---|
+| a crossbar *inside* the DUT (how devices reach each other) | **no**: one kind of link among several; kernels may be joined by streams |
+| an AXI boundary between the DUT and the testbench | **no**: any port kind with a BFM dual (AXI-Stream, `m_axi`, AXI-MM, interrupts), exactly as the single-kernel flow already allows through `tb_top_spec` |
+| a *software* host reaching the DUT by bus and interrupts | **yes, for now**: that is the shape of the fiber runtime, and it is what the board has (the PS reaches the fabric through AXI and interrupts).  A stream-facing software host is deferred until a design needs one |
+
+So a system's testbench may hold BFM models as well as, or instead of, a software host, and the DUT's
+ports that face them are top ports of their own kind.
+
+**Vendor IP may sit on either side of the cut** (the user's RFDC case):
+- **inside**: the crossbar.  Its realization is generated IP (`rtl_config`, S2), synthesized with the
+  DUT;
+- **outside**: the RFDC.  It cannot be brought into the DUT as vendor IP today, so the DUT stops at its
+  AXI-Stream ports, and the RFDC is a testbench participant: a pysim model, and a C++ BFM under XSI
+  through its `bfm_model()` (`waveflow/hw/rfdc.py`; per port, `RfdcAdcMaster` / `RfdcDacSlave`).
+  That is how the RF examples work today at kernel scale (`RfBlkDelayTB`, a composite `FreeRunMod`
+  testbench).
+
+A testbench participant therefore has up to three realizations: a pysim model, an XSI model (a C++ BFM
+or the host's C++ program), and **on the board**, the real thing beside the DUT.  For the host that is
+PS software; for the RFDC it is the RFDC IP, a cell of the block design wired to the DUT IP's
+AXI-Stream ports.  `ip_packaging_routes.md` Stage 4 (the block-design generator) has to place those
+testbench-side vendor IPs as block-design cells, not only the DUT's devices.
+
+**The revised S3 work:**
+1. **The walk without a bus.**  `system_top_spec` takes the DUT tree; the crossbar, when present, is
+   one link realized through `rtl_config`.  A DUT port not on the bus becomes a top port of its own
+   kind (AXIS, `m_axi`, BRAM), as `composite_top_spec` already derives a single kernel's boundary.
+2. **The harness for any participant.**  `system_tb_spec` binds each participant's ports to whatever
+   top port they face (an SI slot, an interrupt, or now a stream or `m_axi` port), the way
+   `tb_top_spec` binds a single kernel's.  The host stays optional: a system may have none.
+3. **Discovery by role, generalized.**  `discover()` stops requiring exactly one bus and one host:
+   zero or one bus; the testbench is every participant outside the DUT tree, each realized by its
+   `bfm_model()`.
+
+**Gates:**
+- markov and mm_fir unchanged: Verilog and harness byte-identical, the 18 XSI gates;
+- **mem_copy as a `System` with no crossbar**: its `dut()` is the kernel, and its testbench is the
+  stream driver, the sink and the memory BFM.  It passes its existing gate (2908 cycles, bit-exact)
+  through the system flow.  This is also the first step of folding the single-kernel mechanism into
+  `System` (Open);
+- **an RF example as a `System`**, the RFDC in the testbench through its `bfm_model()`, passing its
+  existing gate.  This checks the vendor-IP-outside case.
 
 **S4 -- the TB side through hooks.**  D5.  Gate: the harness is byte-identical; `system_tb_spec` names
 no participant type.
