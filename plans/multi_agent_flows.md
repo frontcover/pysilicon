@@ -5,6 +5,10 @@ start a conversation about an open problem.  Nothing here is decided.  The claim
 labelled: **measured** (from runs in this repo), **observed** (seen once, not tested) or
 **conjecture**.
 
+**Revised 2026-10-12:** added [Encapsulation, for agents](#encapsulation-for-agents) and
+[The device as the unit](#the-device-as-the-unit), after `plans/ip_packaging_routes.md` chose one IP
+per device and `plans/unit_harness.md` made the device the unit of verification and calibration.
+
 ## The question
 
 So far, Waveflow has guided *one* agent through a design: choose a frame, write the
@@ -81,6 +85,66 @@ hand-off needs: the frame's "decided by the spec" list is the contract, and the 
 specification-stage files are the hand-off.  Files are a better interface between agents than
 conversation: durable, reviewable, and read only by the agent that needs them.
 
+## Encapsulation, for agents
+
+*(Conjecture, from discussion.)*  Software modularity may need rethinking for agents.  Parnas's original
+idea was that a module **hides a design decision**: outsiders depend only on its interface, so the inside
+can change freely.  Human teams never fully enforce it -- an engineer can always read the code.  With
+agents it becomes **enforceable**: the outer agent can be denied the inside's context.  So an agentic
+boundary is an interface **plus a rule about which context crosses it**, and the rule can be checked.
+
+If the outside may not read the inside, the boundary must carry everything the outside needs:
+
+| what crosses | in Waveflow |
+| --- | --- |
+| the **interface**: types, ports, protocol | schemas (`DataList`), ports, memory-mapped views, the address layout |
+| a **behavioral contract**: what it computes | its golden model and scenarios |
+| a **performance contract**: how fast, what it costs | its timing model and its resource record |
+| **evidence** the inside meets them | the gates that passed, as records |
+
+Waveflow's unusual asset here is that a block's **Python model is an executable summary of everything
+the outside needs**: function and timing, checked against the RTL by the conformance gates.  An outer
+agent integrating five blocks runs their models in pysim instead of reading their internals --
+information hiding with a runnable stand-in for the hidden part.  The "brief" a reader agent produces
+should be that model, not prose.
+
+**Mechanism, not policy.**  A hand-written division of work ages badly, and agents will learn to
+delegate as human teams do.  But teams that delegate well still cut along stable interfaces -- they
+invented AXI, type systems and protocol specifications rather than doing without contracts.  So the
+split proposed here:
+
+- **Waveflow provides the mechanism:** any subtree of the hierarchy (in practice, a device) can be a
+  boundary, and a boundary, once drawn, has a typed interface, an executable model, a conformance gate
+  and cost data.
+- **The agent (or a person) supplies the policy:** *where* to cut, per design.
+
+Its value should grow as agents delegate better, because a good delegator wants boundaries it can
+verify, not just boundaries it can name.  Testable: agents allowed to split work themselves, with and
+without Waveflow's boundary tools -- do they choose to use them?
+
+**Boundaries leak**, on performance and on toolchain artifacts.  *(Measured.)*  The m_axi pointer-FIFO
+deadlock lived *between* modules, in the generated top: each side's model and gate were fine.
+Contention between blocks is the same -- no per-block contract captures it.  The tighter the
+boundaries, the more an **integration level** matters: the system gate, the trace comparison, and an
+independent verifier writing long, hostile scenarios.
+
+## The device as the unit
+
+*(Decided in the plans below, not here.)*  Two plans have since settled what the unit is:
+
+- `plans/ip_packaging_routes.md` packages one **IP per device**: a kernel, its memory-mapped views, its
+  AXI front, and the bus writers that act for it.  Every link between IPs is standard AXI-MM or an
+  interrupt.  markov is four IPs: two devices, the memory, the crossbar.
+- `plans/unit_harness.md` gives each device a **unit harness**: function, timing and calibration for
+  that device alone, the system's cut drawn around it, generic stand-ins for its neighbours, and its
+  resources read from its route-B record.
+
+So the device is the unit of verification, calibration, packaging and synthesis, keyed by one identity
+-- and the natural unit for a sub-agent to own.  The device's harness is the contract of the table
+above; its ports are the boundary; its records are what crosses back.  The open problem narrows to:
+who draws the cut, how a brief is generated from a harness, what context rules apply, and how an
+integration agent verifies a system whose devices it never saw inside.
+
 ## What splitting costs
 
 - **Hand-offs lose information.**  A brief drops a detail the next agent needs; it guesses or
@@ -147,3 +211,6 @@ conversation: durable, reviewable, and read only by the agent that needs them.
 - `docs/guide/build/timing_events.md` — the costs a scheduler would use.
 - `plans/paper_cg_dse_vision.md` — the per-block decomposition shared with the resource model.
 - `plans/maxi_pointer_fifo.md` — an RTL-only failure, and what found it.
+- `plans/ip_packaging_routes.md` — one IP per device: the unit.
+- `plans/unit_harness.md` — the device's harness: the contract a sub-agent works against (its Part B).
+- `plans/mcp_fir.md` — the agent-facing tools, and its tools-vs-workspace experiment.
