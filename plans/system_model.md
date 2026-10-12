@@ -254,6 +254,16 @@ markov device through `system_rtl` with its neighbours as BFMs (the RTL builds; 
 cut, then `SystemTopSpec` as the result of the walk.  A guide page on writing a system replaces "read
 `discover`".  `flows/index.md`'s two flows are the cut drawn two ways.
 
+> **Built (2026-10-12), except the last sentence:**
+> - `xsi_system.md` opens with "The system: `System`": the contract table (`sim`, `dut()`, `run()`,
+>   `cut()`, `elements()`), the DUT as a tree of devices, markov's class as the example, and DUT and
+>   testbench as roles.  Then `SystemTopSpec`, whose "Constructing it" now takes `System.cut()`.
+> - The page summary and `api:` name `System` / `DutTop` / `MmSlaveDevice`.
+> - The markov example's system page has "Declaring the DUT" (S1).
+>
+> Not done: recasting `flows/index.md`'s two flows as "the cut drawn two ways".  The sequential and
+> concurrent flows differ by the DUT's *kind* (control-driven or free-running), which is not a cut, so
+> the sentence needs your call before it goes into the guide.
 ## Open
 
 - **Calibration keys.**  `HwModule` keeps its RTL registries out of the dataclass fields so that

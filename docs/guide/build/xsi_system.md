@@ -3,8 +3,8 @@ title: XSI System Simulation
 parent: Build System
 nav_order: 6.5
 audience: python
-api: [SystemTopSpec, SystemTopSpec.from_system, SystemTopSpec.render_verilog, system_top_spec, SubTop, RtlInstance, render_system_top, add_system_steps, run_system_xsi]
-summary: "Simulating a whole memory-mapped system at RTL -- several csynth'd kernels behind their adaptors, AMD's crossbar, an on-chip memory, and a host -- from the pysim system object, with nothing restated: add_system_steps(dag, sysm) puts csynth (one step per HLS top, fresh while its source stamp matches; build or check), the crossbar IP and the Verilog top (system_rtl), the scenario, pysim, the RTL run and the trace comparison on a BuildDag, and run_system_xsi(sysm) is the same as one call. It walks the graph to the Verilog top (crossbar slots, adaptors, stream nets, credit-link writers, interrupt outputs, tie-offs), generates the harness around the host's C++ twin (its threads on generated endpoints), runs it, and checks the host against pysim: both run one scenario file, every host endpoint records what crossed it, and the traces must be byte-identical; the cycle count is an exact gate of its own. Worked on mm_fir (618 / 611) and markov (1870)."
+api: [System, DutTop, MmSlaveDevice, SystemTopSpec, SystemTopSpec.from_system, SystemTopSpec.render_verilog, system_top_spec, SubTop, RtlInstance, render_system_top, add_system_steps, run_system_xsi]
+summary: "Simulating a whole memory-mapped system at RTL -- several csynth'd kernels behind their adaptors, AMD's crossbar, an on-chip memory, and a host -- from the pysim system object, with nothing restated. A system is a subclass of System: its sim, run(), and dut(), a DutTop tree of devices (each kernel with its views and the bus writers acting for it) and memories, which is the default cut. SystemTopSpec is the RTL top as data, walked from it; each device is a sub-top that renders and elaborates alone. add_system_steps(dag, sysm) puts csynth (one step per HLS top, fresh while its source stamp matches; build or check), the crossbar IP and the Verilog top (system_rtl), the scenario, pysim, the RTL run and the trace comparison on a BuildDag, and run_system_xsi(sysm) is the same as one call. It walks the graph to the Verilog top (crossbar slots, adaptors, stream nets, credit-link writers, interrupt outputs, tie-offs), generates the harness around the host's C++ twin (its threads on generated endpoints), runs it, and checks the host against pysim: both run one scenario file, every host endpoint records what crossed it, and the traces must be byte-identical; the cycle count is an exact gate of its own. Worked on mm_fir (618 / 611) and markov (1870)."
 ---
 
 # XSI system simulation
@@ -23,11 +23,65 @@ so the RTL simulation is derived from it rather than written:
 | the host's C++ | its threads, in a header beside the example ([Software threads](sw_threads.md)) | (hand-written, once) |
 | the host's endpoints | the wired host: each endpoint's view, address and interrupt | `render_host_endpoints_h` |
 | the harness and `main` | the host's ports, bound to the top's ports | `system_tb_spec`, `render_system_tb` |
-| all of the above, built and run | the system object | **`add_system_steps(dag, sysm, ...)`** ([a build DAG](#running-it)), or `run_system_xsi(sysm, ...)` |
+| all of the above, built and run | the [system object](#the-system) | **`add_system_steps(dag, sysm, ...)`** ([a build DAG](#running-it)), or `run_system_xsi(sysm, ...)` |
 
 The two worked cases are [mm_fir](../../examples/mm_fir/rtlsim.md) (one kernel, a register bank and
 three queues, two adaptor shapes) and [markov](../../examples/markov/rtlsim.md) (two kernels joined by a
 routed credit stream, four bus masters, a shared BRAM).
+
+## The system: `System` {#the-system}
+
+Every system flow takes a **system object**: an instance of a subclass of
+[`System`](../../../waveflow/simulation/system.py) (`waveflow.simulation.system`). The class states
+what every downstream step relies on, so a system that compiles against it is one the flows accept:
+
+| member | what it is | markov's |
+|---|---|---|
+| `sim` | the `Simulation` holding every module and interface of the graph. The subclass builds the graph, typically in `__post_init__` | one `Simulation`, with the kernels, memory, host, crossbar and links on it |
+| `dut()` | the **default DUT**: a `DutTop`, the root of the tree of what is synthesized | `markov_dut`: `gen_dev`, `chain_dev`, `mem`, with `xbar` and `u_link` as its links |
+| `run()` | simulate the whole graph in pysim and return what the system reports | runs until the host is done; the host's results |
+| `cut()` | the DUT as a list, each device's kernel then each memory: what `inside=` takes | `[gen, chain, mem]` |
+| `elements()` | every module and interface of the graph | |
+
+`dut()` and `run()` are abstract, so a subclass missing either cannot be instantiated, and a flow
+given an object that is not a `System` refuses it by naming this contract.
+
+**The DUT is a tree.** `build_mm_device` returns each kernel's **device**, a composite module
+(`MmSlaveDevice`) holding the kernel, its views and its adaptor. Binding a routed credit stream adds
+each of its bus writers to the device of the kernel it acts for. `DutTop` holds the devices and the
+on-chip memories, and the interfaces between them:
+
+```python
+from waveflow.simulation.system import DutTop, System
+
+@dataclass
+class MarkovSystem(System):
+    jobs: list
+
+    def __post_init__(self):
+        self.sim = Simulation()
+        ...                                      # kernels, memory, host; devices; crossbar; links
+        self.dut_top = DutTop.of("markov_dut", self.sim,
+                                 comps=[self.gen_dev, self.chain_dev, self.mem],
+                                 ifs=[self.xbar, self.u_link])
+
+    def dut(self) -> DutTop:
+        return self.dut_top
+
+    def run(self):
+        self.sim.run_sim(until=self.host.done)
+        return self.host.results
+```
+
+**DUT and testbench are roles, not kinds.** Everything outside the DUT tree is the testbench: here
+only the host. `dut()` is the cut a build takes when it is given none. A build may draw another one
+with `inside=`, and the same module is then DUT in one build and testbench in another. Nothing about
+the module changes. [The design cut](../flows/modules.md#the-cut) is the same rule for a single
+kernel. The tree is also the unit structure everything after simulation uses: each device is one
+[sub-top](#devices) of the Verilog, one unit to synthesize, and one IP to package.
+
+[Building the markov system](../../examples/markov/system.md) walks one system from its modules to
+its DUT tree.
 
 ## The system top: `SystemTopSpec` {#the-spec}
 
@@ -57,9 +111,9 @@ sysm = MarkovSystem(jobs=jobs, link="mm")
 spec = SystemTopSpec.from_system(sysm, top="markov_top")
 ```
 
-`from_system` finds the system's one crossbar and takes the default cut, the same one
-[`add_system_steps`](#running-it) takes: each kernel whose device is a crossbar slave, then each
-memory on the crossbar. The underlying walk is the function `system_top_spec(xbar, inside, ...)`,
+`from_system` takes the system's default cut, [`System.cut()`](#the-system): the kernels and
+memories of its DUT tree, the same cut [`add_system_steps`](#running-it) takes. It finds the system's
+crossbar among its elements. The underlying walk is the function `system_top_spec(xbar, inside, ...)`,
 which takes the crossbar directly. `from_system` calls it, and code that already holds the crossbar
 can call it too.
 
@@ -67,8 +121,8 @@ can call it too.
 
 | parameter | default | meaning |
 |---|---|---|
-| `sysm` | (required) | the pysim system object, not yet run. It must hold one crossbar and one software host |
-| `inside` | the default cut, above | the modules synthesized into the top: kernels (`FreeRunMod`s with a csynth'd module) and on-chip memories (`MemoryMod`). See [the cut](#the-cut) |
+| `sysm` | (required) | the [system object](#the-system), not yet run. It must hold one crossbar and one software host |
+| `inside` | `sysm.cut()` | the modules synthesized into the top: kernels (`FreeRunMod`s with a csynth'd module) and on-chip memories (`MemoryMod`). See [the cut](#the-cut) |
 | `top` | the system class in snake case (`MarkovSystem` → `markov_system`) | the Verilog module name of the system top; the sub-tops are named `<top>_<device>` |
 | `xbar_name` | `xbar_<top>` | the crossbar IP's module name |
 | `id_width` | enough bits to route every crossbar master | the crossbar's AXI ID width |
