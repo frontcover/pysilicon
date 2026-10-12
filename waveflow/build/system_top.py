@@ -96,7 +96,6 @@ from waveflow.build.mm_adaptor_gen import (
     render_view_slot,
     verilog_params,
 )
-from waveflow.hw.interface import DEFAULT_STREAM_DEPTH
 
 if TYPE_CHECKING:
     from waveflow.build.composite_gen import TbSpec
@@ -314,6 +313,11 @@ class SystemTopSpec:
                                top=top or snake(type(sysm).__name__), xbar_name=xbar_name,
                                id_width=id_width)
 
+    def render_sub_verilog(self, name: str, probes: dict | None = None) -> str:
+        """Sub-top *name* (a device or the memory) as a standalone Verilog file
+        (:func:`render_sub_top`)."""
+        return render_sub_top(self, name, probes)
+
     def render_verilog(self, probes: dict | None = None) -> str:
         """The Verilog of this top: each sub-top's module, then the system top
         (:func:`render_system_top`).  *probes* (``{name: beat(...)}``) adds timing-probe outputs."""
@@ -362,6 +366,15 @@ class SystemTopSpec:
                                    self.sub_inst(k.group)))
         return tuple(out)
 
+    def sources_of(self, name: str) -> tuple[tuple[Path, ...], tuple[str, ...]]:
+        """What sub-top *name* compiles: ``(its hand-written leaves' sources, each once; the
+        csynth'd modules it instantiates, each once)`` -- a kernel's files are its csynth output,
+        resolved by the build."""
+        inst = self.sub_inst(name)
+        mine = [i for i in self.instances() if i.sub == inst]
+        leaves = tuple(dict.fromkeys(p for i in mine if i.kind == "leaf" for p in i.sources))
+        return leaves, tuple(dict.fromkeys(i.module for i in mine if i.kind == "kernel"))
+
     def leaf_sources(self) -> tuple[Path, ...]:
         """The hand-written sources the top's instances use, each once -- its xvlog file list."""
         return tuple(dict.fromkeys(p for i in self.instances() if i.kind == "leaf"
@@ -400,17 +413,14 @@ def default_id_width(n_si: int) -> int:
 
 
 def _channel_of(writer, mods):
-    """The routed channel (``MmCreditStreamIF``) that built bus *writer*: the interface on one of
-    *mods*' endpoints whose bus masters include the writer's.  ``None`` if none does."""
-    from waveflow.hw.mm_credit import MmCreditStreamIF
-
+    """The routed channel that realizes bus *writer*: the interface on one of *mods*' endpoints
+    whose :meth:`writers` include it.  ``None`` if none does."""
     stack = list(mods)
     while stack:
         m = stack.pop()
         for ep in (getattr(m, "endpoints", {}) or {}).values():
             iface = getattr(ep, "interface", None)
-            if isinstance(iface, MmCreditStreamIF) and any(
-                    b is writer.m_mem for b in iface.bus_masters()):
+            if any(w is writer for w in getattr(iface, "writers", tuple)()):
                 return iface
         stack += list((getattr(m, "sub_comps", {}) or {}).values())
     return None
@@ -486,7 +496,7 @@ def system_top_spec(xbar, inside, *, top: str = "system_top", xbar_name: str | N
     dw = int(xbar.bitwidth)
     n_si = int(xbar.nports_master)
     idw = default_id_width(n_si) if id_width is None else int(id_width)
-    cfg = AxiXbarConfig.from_crossbar(xbar, xbar_name or f"xbar_{top}", id_width=idw)
+    cfg = xbar.rtl_config(xbar_name or f"xbar_{top}", id_width=idw)
 
     kernels_mods = [m for m in inside if not isinstance(m, MemoryMod)]
 
@@ -539,10 +549,8 @@ def system_top_spec(xbar, inside, *, top: str = "system_top", xbar_name: str | N
             done_ifaces.add(id(iface))
             m_ep, s_ep = iface.endpoints["master"], iface.endpoints["slave"]
             prod, cons = port_of.get(id(m_ep)), port_of.get(id(s_ep))
-            # A link between two kernels with a real depth is a FIFO in RTL too; a view's link IS the
-            # view's FIFO, so it is a plain net.
-            depth = int(iface.depth or DEFAULT_STREAM_DEPTH)
-            fifo = depth if (prod and cons and depth > DEFAULT_STREAM_DEPTH) else 0
+            # The link says what it becomes: a FIFO between two kernels, nets beside a view.
+            fifo = iface.rtl_fifo_depth(between_kernels=bool(prod and cons))
             # A FIFO feeding (or fed by) a bus writer belongs to the writer's channel.
             ends = [e[0] for e in (prod, cons) if e]
             chan = next((e.owner for e in ends if isinstance(e.hw, MmStreamWriter)), None)
@@ -636,14 +644,29 @@ def _view_nets(view) -> list[tuple[str, str]]:
 
 def _group(top: str, rtl, nets, net_ends, mi):
     """Place every kernel, net and slot in a sub-top (the module doc's rules) -> ``(kernels, nets,
-    subs)``.  A kernel names its device; a bus writer joins the device of the kernel whose stream
-    feeds it; a slot is its kernel's device or the memory (set where the slot is built); a net lives
-    where its two ends are."""
+    subs)``.  A kernel or bus writer is in the device that holds it in the DUT tree -- its nearest
+    ``MmSlaveDevice`` ancestor (``plans/system_model.md`` D2), named for that device's kernel; a slot
+    is its kernel's device or the memory (set where the slot is built); a net lives where its two
+    ends are.  A writer in no device (its kernel was not built into one) falls back to the rule the
+    tree encodes: it joins the device of the kernel whose stream feeds it."""
     from dataclasses import replace
 
     from waveflow.hw.mm_credit import MmStreamWriter
+    from waveflow.hw.mm_device import MmSlaveDevice
 
-    group = {k.inst: k.hw.name for k in rtl if not isinstance(k.hw, MmStreamWriter)}
+    def device_of(mod):
+        node = getattr(mod, "parent", None)
+        while node is not None and not isinstance(node, MmSlaveDevice):
+            node = getattr(node, "parent", None)
+        return node
+
+    group = {}
+    for k in rtl:
+        dev = device_of(k.hw)
+        if dev is not None:
+            group[k.inst] = dev.kernel.name
+        elif not isinstance(k.hw, MmStreamWriter):
+            group[k.inst] = k.hw.name
     # A view's stream ends are in its slot's sub-top: net side -> group.
     side: dict[str, str] = {}
     for slot in mi:
@@ -670,7 +693,7 @@ def _group(top: str, rtl, nets, net_ends, mi):
 
     subs: list[SubTop] = []
     for k in rtl:
-        if not isinstance(k.hw, MmStreamWriter):
+        if not isinstance(k.hw, MmStreamWriter) and all(s.name != k.group for s in subs):
             subs.append(SubTop(k.group, "device", f"{top}_{k.group}", f"u_{k.group}_sub", k.hw))
     for slot in mi:
         if slot.kind == "memory":
@@ -826,7 +849,34 @@ def _port_name(decl: str) -> str:
 
 def render_system_top(spec: SystemTopSpec, probes: dict | None = None) -> str:
     """Emit the Verilog top *spec* describes: one module per sub-top (:attr:`SystemTopSpec.subs`),
-    then the system top, which instantiates them beside the crossbar.  *probes* -- ``{name: Probe}``
+    then the system top, which instantiates them beside the crossbar.  *probes* as for
+    :func:`_render_modules`."""
+    mods = _render_modules(spec, probes)
+    text = [f"// {spec.top}.v -- GENERATED by waveflow (build/system_top.py) from the pysim system.\n"
+            "`timescale 1ns/1ps\n"]
+    text += [f"\n// {sub.kind} '{sub.name}': a sub-top of {spec.top}\n" + mods[sub.name]
+             for sub in spec.subs]
+    text.append(("\n" if spec.subs else "") + mods[""])
+    return "".join(text)
+
+
+def render_sub_top(spec: SystemTopSpec, name: str, probes: dict | None = None) -> str:
+    """One sub-top of *spec* -- device or memory *name* -- as a file of its own: the same module text
+    :func:`render_system_top` emits for it, which is self-contained (its ports are AXI4 groups,
+    interrupt lines and probes; its instances are its kernels and leaves).  What a per-device
+    synthesis or IP packaging reads (``plans/ip_packaging_routes.md``); its compile list is
+    :meth:`SystemTopSpec.sources_of`."""
+    sub = next((s for s in spec.subs if s.name == name), None)
+    if sub is None:
+        raise LoweringError(f"{spec.top} has no sub-top {name!r}; it has "
+                            f"{[s.name for s in spec.subs]}")
+    return (f"// {sub.module}.v -- GENERATED by waveflow (build/system_top.py): {sub.kind} '{name}' "
+            f"of {spec.top}, alone.\n`timescale 1ns/1ps\n\n" + _render_modules(spec, probes)[name])
+
+
+def _render_modules(spec: SystemTopSpec, probes: dict | None = None) -> dict[str, str]:
+    """``{sub-top name: its module, "": the system top's module}`` -- rendered together, because a
+    probe or an interrupt decides ports on both sides of a sub-top's boundary.  *probes* -- ``{name: Probe}``
     (:func:`beat`, :func:`stall`, :func:`last` on a pysim endpoint) or ``{name: one-bit expression}``
     over the top's nets -- become outputs ``probe_<name>`` (timing probes a testbench samples every
     cycle); a probe on a net inside a sub-top is computed there and passed up as a port."""
@@ -920,12 +970,9 @@ def render_system_top(spec: SystemTopSpec, probes: dict | None = None) -> str:
         return (f"module {name} (\n  " + ",\n  ".join(decls) + "\n);\n" + "\n".join(lines)
                 + "\nendmodule\n")
 
-    text = [f"// {spec.top}.v -- GENERATED by waveflow (build/system_top.py) from the pysim system.\n"
-            "`timescale 1ns/1ps\n"]
-    text += [f"\n// {sub.kind} '{sub.name}': a sub-top of {spec.top}\n"
-             + module(sub.module, sub_ports[sub.name], bodies[sub.name]) for sub in spec.subs]
-    text.append(("\n" if spec.subs else "") + module(spec.top, ports, body))
-    return "".join(text)
+    out = {sub.name: module(sub.module, sub_ports[sub.name], bodies[sub.name]) for sub in spec.subs}
+    out[""] = module(spec.top, ports, body)
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -968,7 +1015,6 @@ def system_tb_spec(spec: SystemTopSpec, xbar, participants, probes=()) -> "TbSpe
         bfm_models,
         resolve_bfm_model,
     )
-    from waveflow.build.sw_host_gen import endpoints_header, render_host_endpoints_h
     from waveflow.hw.hw_module import discover_dyn_params
     from waveflow.hw.irq import IrqIFSink
 
@@ -1007,11 +1053,14 @@ def system_tb_spec(spec: SystemTopSpec, xbar, participants, probes=()) -> "TbSpe
         models.append(BfmInst("ProbePin", f"pr_{n}", f"probe_{n}", (f'"{n}"',),
                               binds=("sim.dut()", f'"probe_{n}"')))
     stop = models[0].name if participants else None
-    from waveflow.sw import SwHost
-    extra = tuple((endpoints_header(p), render_host_endpoints_h(p))
-                  for p in participants if isinstance(p, SwHost))
+    # Files a model declares it needs generated beside the harness (a host's endpoints header).
+    extra: dict[str, str] = {}
+    for part in participants:
+        for bm in bfm_models(part):
+            for fname, render in bm.generated_files:
+                extra.setdefault(fname, render())
     return TbSpec(top_name=spec.top, models=tuple(models), local_headers=tuple(local), stop_on=stop,
-                  extra_files=extra)
+                  extra_files=tuple(extra.items()))
 
 
 def render_system_ports_h(spec: SystemTopSpec) -> str:
@@ -1074,4 +1123,4 @@ def render_system_tb(spec: SystemTopSpec, tb, n_max: int = 1_000_000) -> tuple[s
 __all__ = ["KernelRtl", "MiSlot", "Probe", "RtlInstance", "StreamNet", "SubTop", "SystemTopSpec",
            "VITIS_MAXI_PINS", "XBAR_INST", "beat",
            "default_id_width", "field_position", "kernel_pins", "last", "render_system_ports_h",
-           "render_system_tb", "render_system_top", "stall", "system_tb_spec", "system_top_spec"]
+           "render_sub_top", "render_system_tb", "render_system_top", "stall", "system_tb_spec", "system_top_spec"]

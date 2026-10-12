@@ -322,3 +322,85 @@ def test_from_system_is_the_walk_with_add_system_steps_defaults():
     assert SystemTopSpec.from_system(sysm).top == "markov_system"        # the class, snake case
     only = SystemTopSpec.from_system(sysm, inside=[sysm.gen, sysm.chain, sysm.mem], top="t")
     assert [s.name for s in only.subs] == ["gen", "chain", "mem"]
+
+
+# ---------------------------------------------------------------------------------------------
+# The DUT tree (plans/system_model.md S1): devices are composites, the grouping is read from them.
+# ---------------------------------------------------------------------------------------------
+
+def test_each_device_holds_its_kernel_views_and_the_writer_acting_for_it():
+    """``build_mm_device`` returns a composite; binding the routed credit stream puts the forward
+    writer (and the FIFO feeding it) in the sender's device and the credit writer in the receiver's,
+    even though the receiver's endpoint belongs to a child of the composite kernel."""
+    sysm, _spec = _markov()
+    gen, chain = sysm.gen_dev, sysm.chain_dev
+    assert list(gen.sub_comps) == ["gen", "gen_qcmd", "gen_u_crd", "gen_mm", "u_fwd_wr"]
+    assert list(chain.sub_comps) == ["chain", "chain_qu", "chain_qresp", "chain_mm", "u_crd_wr"]
+    assert sysm.u_link.fwd_writer.parent is gen and sysm.u_link.crd_writer.parent is chain
+    assert "u_fwd" in gen.interfaces and "u_crd" in chain.interfaces
+    assert sysm.gen.parent is gen and sysm.dut().sub_comps["gen_dev"] is gen
+
+
+def test_the_grouping_is_read_from_the_tree_not_derived():
+    """Move the credit writer to the generator's device by hand: the sub-tops follow the tree.  (The
+    stream-feeding rule would have put it with the chain.)"""
+    from waveflow.build.system_top import SystemTopSpec
+
+    sysm, _spec = _markov()
+    w = sysm.u_link.crd_writer
+    del sysm.chain_dev.sub_comps[w.name]
+    sysm.gen_dev.add_comp(w)
+    spec = SystemTopSpec.from_system(sysm, top="markov_top")
+    by = {i.inst: i.sub for i in spec.instances()}
+    assert by["u_u_crd_wr"] == "u_gen_sub"
+    assert any(n.name == "u_crd" and not n.group for n in spec.nets)    # its link now crosses
+    v = spec.render_verilog()                                          # ...as a port of each
+    chain_ports = re.search(r"^module markov_top_chain \((.*?)\);", v, re.M | re.S).group(1)
+    gen_ports = re.search(r"^module markov_top_gen \((.*?)\);", v, re.M | re.S).group(1)
+    assert re.search(r"output\s+wire \[\d+:0\] u_crd_TDATA", chain_ports)      # the chain drives it
+    assert re.search(r"input\s+wire u_crd_TVALID", gen_ports)                  # the writer reads it
+
+
+# ---------------------------------------------------------------------------------------------
+# Interfaces realize themselves (plans/system_model.md S2)
+# ---------------------------------------------------------------------------------------------
+
+def test_each_interface_states_its_rtl_realization():
+    """The crossbar is a vendor IP configured from its own ports and ranges; a stream is a FIFO only
+    between two kernels and above the default depth; a routed credit stream is its two writers."""
+    import inspect
+
+    from waveflow.build import system_top
+
+    sysm, spec = _markov()
+    assert sysm.xbar.rtl_config(spec.xbar.name, id_width=spec.xbar.id_width) == spec.xbar
+    fwd = next(i for i in sysm.sim._sim_objs if getattr(i, "name", None) == "u_fwd")
+    assert fwd.rtl_fifo_depth(between_kernels=True) == int(sysm.u_link.fwd_depth)
+    assert fwd.rtl_fifo_depth(between_kernels=False) == 0             # a view's link is its FIFO
+    assert sysm.u_link.writers() == (sysm.u_link.fwd_writer, sysm.u_link.crd_writer)
+    # The walk asks; it no longer configures the crossbar or applies the depth rule itself.
+    src = inspect.getsource(system_top.system_top_spec)
+    assert "from_crossbar" not in src and "DEFAULT_STREAM_DEPTH" not in src
+
+
+# ---------------------------------------------------------------------------------------------
+# A sub-top alone (plans/system_model.md S5): the unit a per-device synthesis or IP is built from.
+# ---------------------------------------------------------------------------------------------
+
+def test_a_sub_top_renders_alone_with_its_own_compile_list():
+    """Each sub-top's standalone file is exactly the module the system top holds for it, and its
+    compile list is only what it instantiates.  (That it elaborates alone is the XSI gate
+    test_markov_each_sub_top_elaborates_alone.)"""
+    _sysm, spec = _markov()
+    whole = render_system_top(spec)
+    for sub in spec.subs:
+        alone = spec.render_sub_verilog(sub.name)
+        module = alone[alone.index(f"module {sub.module} ("):]
+        assert alone.count("\nmodule ") == 1 and module in whole
+    leaves, kernels = spec.sources_of("gen")
+    assert kernels == ("markov_gen", "mm_queue_writer_64_128")
+    assert {p.name for p in leaves} == {"axi_slave_front.v", "mm_queue_in.v", "mm_credit_in.v",
+                                        "mm_sync_fifo.v"}
+    assert spec.sources_of("mem") == (spec.sources_of("mem")[0], ())          # no kernel in it
+    with pytest.raises(LoweringError, match="no sub-top 'xbar'"):
+        spec.render_sub_verilog("xbar")

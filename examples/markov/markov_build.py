@@ -182,7 +182,10 @@ if __name__ == "__main__":
                              help="build: csynth a stale top; check: fail on one instead")),
                             (("--probes",), dict(action="store_true",
                              help="build the system top with the timing probes")),
+                            (("--route",), dict(choices=("global", "per_device"),
+                             default="global", help="system_synth: one global synthesis, or each "
+                             "device out of context and linked (plans/ip_packaging_routes.md)")),
                             *PLATFORM_ARGS],
-                params_from_args=lambda a: {"synth": a.synth},
+                params_from_args=lambda a: {"synth": a.synth, "synth_route": a.route},
                 config_from_args=lambda a: platform_config(a, part=DEFAULT_PART,
                                                            clk_freq=1e9 / DEFAULT_PERIOD_NS))

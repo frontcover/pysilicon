@@ -39,8 +39,11 @@ they fit together.
 
 ## What an XSI simulation is made of
 
-An XSI simulation has a single composite `FreeRunMod` that defines the **XSI simulation top**. In
-the [mem_copy example](../../examples/memcpy/), for instance, the XSI simulation top is `MemCopyTB`.
+For one kernel, an XSI simulation has a single composite `FreeRunMod` that defines the **XSI
+simulation top**. In the [mem_copy example](../../examples/memcpy/), for instance, the XSI simulation
+top is `MemCopyTB`. For a system, the same role is played by a `System`, whose `dut()` is the RTL top's
+side of the cut ([Systems and the cut](./concurrent_system.md)); the three kinds of module below
+apply at both scales.
 Its components fall into two groups:
 
 - **The RTL top** — one Verilog module, the design under test, and what `xsim` elaborates. These

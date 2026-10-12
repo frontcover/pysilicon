@@ -12,7 +12,8 @@ summary: "The concurrent flow end to end. One Python object, the XSI simulation 
 The terms on this page — XSI simulation top, kernel / RTL / BFM module, RTL top, Vitis kernel,
 harness — are defined
 in [XSI simulation components](./concurrent_layers.md). Every step is walked with its real code in the
-[mem_copy example](../../examples/memcpy/).
+[mem_copy example](../../examples/memcpy/).  A **system** of several kernels behind a bus has steps
+of its own, below the kernel's: [a system's steps](#a-systems-steps).
 
 ## One Python object, three kinds of module
 
@@ -78,18 +79,8 @@ hand-written framework bodies, copied in by `MemStreamStep`.
 
 **Assemble the RTL top.** For `mem_copy` there is nothing to assemble: it has no RTL modules, so the
 RTL top *is* the Vitis kernel. A design with RTL modules gets a generated wrapper instead —
-`wrapper_gen` joins the kernel's `bram` ports to the memories its graph declares (worked in [A memory reached three ways](../../examples/bram_access/)). A **system** — several
-kernels reached over a bus, each behind a [memory-mapped adaptor](../interface/axi_mm/slave.md), with
-AMD's crossbar and an on-chip memory — gets its top from
-[`system_top`](../../../waveflow/build/system_top.py), which walks the pysim system: name the cut
-(`system_top_spec(xbar, [kernels..., memory])`) and every crossbar slot, adaptor, stream net, credit
-link writer and interrupt output follows from the graph ([XSI system simulation](../build/xsi_system.md)). [mm_fir](../../examples/mm_fir/synth.md) and
-[markov](../../examples/markov/synth.md) are the worked cases; their cycle counts (618 / 611 and
-1870) were unchanged when their hand-rendered tops were replaced by it.  Most of a system's RTL is
-brought by **interfaces**, not modules -- the crossbar (vendor IP), each adaptor's hand-written
-leaves, a deep link's FIFO -- so its resources come from three places: each kernel's csynth report,
-the out-of-context library of leaf and IP configurations, and a synthesis of the whole top; see
-[Systems](../resource/systems.md).
+`wrapper_gen` joins the kernel's `bram` ports to the memories its graph declares (worked in [A memory reached three ways](../../examples/bram_access/)). A
+system's top is derived from the whole system instead: [a system's steps](#a-systems-steps).
 
 **Generate the harness** (target `sequential_xsi_tb`). `tb_top_spec` walks the XSI simulation top,
 checks that every BFM module has a C++ BFM and every port of the RTL top is covered, and
@@ -98,21 +89,6 @@ cycle loop. The models themselves are pre-written ([`xsi_bfm.h`](../../../wavefl
 the harness only wires them. (The code calls the XSI simulation top the testbench — `tb_top_spec`,
 `TbSpec` — so read `tb` there as "XSI simulation top".) The full walk is the
 [XSI testbench](../comp_codegen/xsi_tb.md) page.
-
-A host *program* — one that reads a status register and decides what to write next — is a BFM
-module too, written as [software threads](../build/sw_threads.md): a `SwHost` whose threads are SimPy
-processes in pysim, and the same threads in C++ under XSI. The C++ is written by hand -- it is the
-host's **pre-written realization**, named by `cpp_model` / `cpp_header` (the
-[`bfm_model()`](../custom_hooks/bfm_model.md#host) hook, derived) and kept in a header beside the
-example, as a kernel's HLS body is named by `kernel_task()` -- but it is the program only: its
-endpoints are a generated header, and its calls block on a fiber runtime, so it holds no BFM, no
-address and no state machine. What is generated around it is the harness: `system_tb_spec` binds the
-host's ports to the system top's (`s0_axi`, `irq_<view>`) and `render_system_tb` emits the harness and
-the `main`; the [system_xsi](../build/xsi_system.md#system-xsi) step of a system's build DAG
-(`add_system_steps(dag, sysm)`) does all of it from the system object. The two realizations run the
-same scenario file, and the gate is that every host endpoint's trace is byte-identical between pysim
-and RTL; [mm_fir](../../examples/mm_fir/xsi.md#the-host-program) and
-[markov](../../examples/markov/xsi.md) are the worked cases.
 
 **XSI simulation.** The harness drives the RTL top in `xsim`, cycle by cycle. The gate is **exact**: a
 bit-exact result *and* an exact cycle count (`mem_copy` = 2908 cycles for 16 jobs), so a count that
@@ -124,6 +100,30 @@ file list and the harness and invokes the same `run.bat` / `run.sh`.
 > The Vitis kernel and the harness are generated from the **same** object that runs the Python golden —
 > one statement, two backends. That is what keeps the pysim model and the RTL from testing different
 > things.
+
+## A system's steps {#a-systems-steps}
+
+A system is described in [Systems and the cut](./concurrent_system.md): a `System` whose `dut()` is a
+tree of devices, a memory and the crossbar, with the host as the testbench. One call,
+`add_system_steps(dag, sysm)`, puts its whole flow on a build DAG. Each step is one line here and
+documented in [XSI system simulation](../build/xsi_system.md#running-it):
+
+| step | what it does | the colour it realizes ([picture](./concurrent_system.md#a-system-in-one-picture)) |
+|---|---|---|
+| **codegen** | the example's own: headers, each kernel's and bus writer's HLS top | |
+| **[csynth](../build/xsi_system.md#csynth)** | Vitis, once per HLS top; re-run only when its sources change | blue |
+| **[system_rtl](../build/xsi_system.md#system-rtl)** | the crossbar IP (**xbar_ip**), then the Verilog top derived from the DUT (a [`SystemTopSpec`](../build/xsi_system.md#the-spec), a module per device) | purple, green |
+| **[scenario](../build/xsi_system.md#scenario)** | the host writes the stimulus both simulations read | |
+| **[pysim](../build/xsi_system.md#pysim)** | the system in Python, from that scenario: the golden traces and a cycle estimate | |
+| **[system_xsi](../build/xsi_system.md#system-xsi)** | the harness around the host's C++ twin, compiled with the RTL and run cycle by cycle | tan |
+| **[compare](../build/xsi_system.md#compare)** | every host endpoint's trace, RTL against pysim, byte for byte | |
+| **system_synth** (opt-in) | the system through Vivado: [globally](../resource/systems.md#the-system-synthesis), or [per device, then linked](../resource/systems.md#per-device) | |
+
+The host is a BFM module like any other, written as [software threads](../build/sw_threads.md): a
+`SwHost` whose threads are SimPy processes in pysim and the same program in C++ under XSI, named by
+its [`bfm_model()`](../custom_hooks/bfm_model.md#host) hook. The gate is the kernel's, at system scale:
+the host's traces byte-identical between pysim and RTL, and an exact cycle count
+([mm_fir](../../examples/mm_fir/xsi.md#the-host-program) 618 / 611, [markov](../../examples/markov/xsi.md) 1870).
 
 **Source of truth:** `waveflow/build/composite_gen.py` (`composite_top_spec`, `render_top`,
 `tb_top_spec`, `render_tb_harness`), `waveflow/build/wrapper_gen.py` (the RTL top, when there is one),

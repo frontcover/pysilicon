@@ -42,3 +42,78 @@ def test_compare_traces_names_what_differs(tmp_path):
     assert compare_traces(a, a) == []
     assert compare_traces(a, b) == ["extra/words.bin", "extra/bounds.bin", "extra/meta.json",
                                     "qout/words.bin"]
+
+
+# ---------------------------------------------------------------------------------------------
+# The System contract (plans/system_model.md S0)
+# ---------------------------------------------------------------------------------------------
+
+def test_a_system_declares_its_cut():
+    """Both systems state their DUT through dut() -- a tree whose children are the devices and the
+    memory (system_model S1) -- and cut() flattens it to the kernels and memories discover() hands
+    on: the cut the old derivation from the crossbar's slaves gave, so the top is unchanged."""
+    from examples.markov.markov_build import system
+    from examples.mm_fir.mm_fir_build import system as fir_system
+    from waveflow.simulation.system import DutTop, System
+
+    s, f = system(), fir_system("per_view")
+    assert isinstance(s, System) and isinstance(f, System)
+    assert isinstance(s.dut(), DutTop)
+    assert list(s.dut().sub_comps.values()) == [s.gen_dev, s.chain_dev, s.mem]
+    assert s.xbar in s.dut().interfaces.values()
+    assert s.cut() == [s.gen, s.chain, s.mem] and f.cut() == [f.fir]
+    assert s.xbar in s.elements() and s.host in s.elements()
+
+
+def test_a_class_that_is_not_a_system_is_refused_by_name():
+    class Loose:
+        sim = None
+
+    with pytest.raises(LoweringError, match=r"not a waveflow System.*dut\(\).*run\(\)"):
+        discover(Loose())
+
+
+def test_a_system_without_its_cut_cannot_be_built():
+    from waveflow.simulation.system import System
+
+    class NoCut(System):
+        def run(self):
+            return None
+
+    with pytest.raises(TypeError, match="dut"):
+        NoCut()
+
+
+def test_the_host_declares_its_generated_header_and_the_harness_names_no_participant_type():
+    """system_model S4: a SwHost's endpoints header is part of what its bfm_model() declares, so
+    system_tb_spec treats every participant alike -- it imports no participant type."""
+    import inspect
+
+    from examples.markov.markov_build import system
+    from waveflow.build import system_top
+
+    s = system()
+    (bm,) = [s.host.bfm_model()]
+    ((fname, render),) = bm.generated_files
+    assert fname == "MarkovHost_endpoints.h"
+    assert "MarkovHost_endpoints" in render()                  # rendered on demand, from the wired host
+    src = inspect.getsource(system_top.system_tb_spec)
+    assert "SwHost" not in src and "isinstance(p" not in src
+
+
+def test_the_bus_and_the_host_are_found_by_role():
+    """system_model D1: the bus is the DUT tree's link that realizes as bus IP; the host is the
+    bus master outside the DUT.  discover() names neither type."""
+    import inspect
+
+    from examples.markov.markov_build import system
+
+    s = system()
+    xbar, host, _cut = discover(s)
+    assert xbar is s.xbar and host is s.host
+    src = inspect.getsource(discover)
+    assert "AXIMMCrossBarIF" not in src and "SwHost" not in src
+    # Take the crossbar out of the DUT: the system no longer has a bus to build a top around.
+    del s.dut().interfaces[s.xbar.name]
+    with pytest.raises(LoweringError, match="one crossbar"):
+        discover(s)

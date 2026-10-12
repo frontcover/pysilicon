@@ -56,28 +56,77 @@ class XsiRun:
 
 
 def discover(sysm):
-    """``(xbar, host, inside)`` of a system object: its one crossbar, its one software host, and the
-    default cut -- each kernel whose device is a crossbar slave, and each memory on the crossbar."""
-    from waveflow.hw.memif import AXIMMCrossBarIF
-    from waveflow.hw.memory import MemoryMod
-    from waveflow.sw import SwHost
+    """``(xbar, host, inside)`` of a :class:`~waveflow.simulation.system.System`: its bus, the
+    testbench participant that drives it, and its default cut
+    (:meth:`~waveflow.simulation.system.System.cut`).
 
-    objs = list(getattr(sysm.sim, "_sim_objs", []))
-    xbars = [o for o in objs if isinstance(o, AXIMMCrossBarIF)]
-    hosts = [o for o in objs if isinstance(o, SwHost)]
-    if len(xbars) != 1 or len(hosts) != 1:
-        raise LoweringError(f"{type(sysm).__name__}: a bus system has one crossbar and one software host; "
-                            f"found {len(xbars)} crossbar(s) and {len(hosts)} host(s)")
-    xbar, host = xbars[0], hosts[0]
-    inside: list = []
-    for k in range(int(xbar.nports_slave)):
-        ep = xbar.endpoints.get(f"slave_{k}")
-        mod = getattr(ep, "comp", None)
-        dev = getattr(mod, "mm_device", None)
-        target = dev.kernel if dev is not None else (mod if isinstance(mod, MemoryMod) else None)
-        if target is not None and all(target is not m for m in inside):
-            inside.append(target)
-    return xbar, host, inside
+    Each is found by **role**, not by type (``plans/system_model.md`` D1):
+
+    * the **bus** is the DUT's link that realizes as bus IP -- the interface of the DUT tree that
+      declares an ``rtl_config`` (S2), today the crossbar;
+    * the **host** is the participant with a bus master on that bus whose owner is **outside** the
+      DUT tree -- the testbench side of the cut.  Its realization is its own ``bfm_model()``.
+
+    A system top needs exactly one of each, today."""
+    from waveflow.simulation.system import System
+
+    if not isinstance(sysm, System):
+        raise LoweringError(f"{type(sysm).__name__} is not a waveflow System: a system flow takes a "
+                            f"subclass of waveflow.simulation.system.System, which builds its graph on "
+                            f"self.sim and implements dut() (the default cut) and run()")
+    root = sysm.dut()
+    buses = [i for i in root.interfaces.values() if callable(getattr(i, "rtl_config", None))]
+    if len(buses) != 1:
+        raise LoweringError(f"{type(sysm).__name__}: a bus system's DUT links its devices through one "
+                            f"crossbar (an interface realized as bus IP, rtl_config); its DUT "
+                            f"'{root.name}' has {len(buses)}")
+    bus = buses[0]
+
+    def in_dut(mod) -> bool:
+        while mod is not None:
+            if mod is root:
+                return True
+            mod = getattr(mod, "parent", None)
+        return False
+
+    hosts: list = []
+    for name, ep in bus.endpoints.items():
+        owner = getattr(ep, "comp", None)
+        if name.startswith("master_") and owner is not None and not in_dut(owner) \
+                and all(owner is not h for h in hosts):
+            hosts.append(owner)
+    if len(hosts) != 1:
+        raise LoweringError(f"{type(sysm).__name__}: a system top is driven by one testbench bus "
+                            f"master (a host outside the DUT on '{bus.name}'); found "
+                            f"{[getattr(h, 'name', h) for h in hosts]}")
+    return bus, hosts[0], sysm.cut()
+
+
+def elaborate_sub_top(spec, name: str, *, root: Path, work_dir: Path) -> Path:
+    """Compile device (or memory) *name* of *spec* **alone** and elaborate it: the standalone module
+    (:meth:`~waveflow.build.system_top.SystemTopSpec.render_sub_verilog`), its leaves, and its
+    kernels' csynth Verilog under *root* -- nothing else.  It passing is what makes a sub-top a unit:
+    a per-device synthesis or IP can be built from it with no system around it
+    (``plans/system_model.md`` S5).  Returns the work directory; raises
+    :class:`~waveflow.scripts.sv_sim.SvSimError` naming the failing tool."""
+    from waveflow.scripts.sv_sim import _run, sim_tool
+
+    sub = next(s for s in spec.subs if s.name == name)
+    work = Path(work_dir) / sub.module
+    work.mkdir(parents=True, exist_ok=True)
+    top_v = work / f"{sub.module}.v"
+    top_v.write_text(spec.render_sub_verilog(name), encoding="utf-8")
+    leaves, kernels = spec.sources_of(name)
+    files = [*leaves]
+    for module in kernels:
+        files += sorted(_rtl_dir(Path(root), module).glob("*.v"))
+    files.append(top_v)
+    (work / f"{sub.module}.f").write_text("\n".join(Path(f).resolve().as_posix() for f in files)
+                                          + "\n", encoding="utf-8")
+    _run(f'"{sim_tool("xvlog")}" -f {sub.module}.f', work, capture_output=True, echo=False)
+    _run(f'"{sim_tool("xelab")}" work.{sub.module} -s {sub.module}_elab', work,
+         capture_output=True, echo=False)
+    return work
 
 
 def _rtl_dir(root: Path, module: str) -> Path:
