@@ -155,6 +155,16 @@ public:
     /// "which port's consumer is the one that cannot keep up", which a sum cannot.
     std::vector<std::uint64_t> words_sent_ch;
     std::vector<std::uint64_t> dropped_ch;
+
+    //: If set, ``post_sim`` writes the counters above as JSON to this path -- what a system run
+    //: gathers as a recording (``BurstBundle::write_counters``).  Empty: nothing written.
+    std::string counters_out;
+    void post_sim() override {
+        if (counters_out.empty()) return;
+        BurstBundle::write_counters(counters_out, {
+            {"words_sent", (long long)words_sent}, {"dropped", (long long)dropped},
+            {"last_drop_cycle", (long long)last_drop_cycle}});
+    }
     /// AXIS ports this model masters -- the tile's receive channel count.
     std::size_t n_ch() const { return ch_.size(); }
     /// The sample format it was built with.  Exposed so a testbench can ASSERT what reached the
@@ -363,6 +373,19 @@ public:
     /// Grid index of the most recent zero-fill (0 = never).  A count cannot separate a startup
     /// transient from a steady-state fault; this can.
     std::uint64_t last_zero_fill_idx = 0;
+
+    //: If set, ``post_sim`` writes the counters above as JSON to this path -- what a system run
+    //: gathers as a recording (``BurstBundle::write_counters``).  Empty: nothing written.
+    std::string counters_out;
+    void post_sim() override {
+        if (counters_out.empty()) return;
+        BurstBundle::write_counters(counters_out, {
+            {"words_recv", (long long)words_recv}, {"underrun", (long long)underrun},
+            {"last_underrun_cycle", (long long)last_underrun_cycle},
+            {"blocks_out", (long long)blocks_out},
+            {"blocks_zero_filled", (long long)blocks_zero_filled},
+            {"last_zero_fill_idx", (long long)last_zero_fill_idx}});
+    }
 
 private:
     /// One block period has elapsed: play whatever is buffered, or zero-fill and count.

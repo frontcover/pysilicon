@@ -39,6 +39,8 @@ from waveflow.hw.synth import sim_only
 from waveflow.simulation.rf_tb import RfDataSink, RfDataSource, read_rf_bundle, write_rf_bundle
 from waveflow.simulation.simobj import ProcessGen
 from waveflow.simulation.simulation import Simulation
+from waveflow.utils.burst_io import write_run_params
+from waveflow.hw.hw_system import DutTop, HwSystem
 
 from waveflow.hw.rfdc import Rfdc
 from waveflow.hw.rfdc_samp_word import RfdcSampWord, Rfsoc4x2SampWord
@@ -732,6 +734,55 @@ def run_and_check() -> bool:
     print("rf_loopback pysim golden: PASSED")
     return True
 
+
+@dataclass
+class RfLoopbackSystem(HwSystem):
+    """rf_loopback as a **system** (``plans/system_model.md`` S3d): vendor IP in the testbench.
+
+    The DUT is the pass-through kernel alone.  The RFDC cannot be brought into the DUT as vendor IP
+    today, so it is a testbench participant: in pysim the :class:`~waveflow.hw.rfdc.Rfdc` model, under
+    XSI its per-port C++ models (``RfdcAdcMaster`` / ``RfdcDacSlave``), each **spanning the cut** -- an
+    AXI-Stream port of the top on the fabric side, an RF behavioral edge on the other, to the RF data
+    source and sink.  On the board it is the RFDC IP, a cell of the block design beside the DUT's IP.
+
+    The sink's recording is checked by the example, not compared exactly (``recording_check``):
+    pysim paces the RF side on the edge and cannot see the sub-block sample loss the RTL measures,
+    so the two legitimately differ (``tests/examples/test_rf_loopback_xsi.py`` records how).
+    """
+
+    n_src_blk: int = 8
+    blksize: int = 256
+    #: The RTL run's cycle bound (the scenario's ``run.json``); see ``rf_loopback_xsi.XSI_N_CYCLES``.
+    n_cycles: int = 16000
+
+    def __post_init__(self) -> None:
+        self.runner = RfLoopbackSim(n_src_blk=int(self.n_src_blk), name="xsi_tb",
+                                    blksize=int(self.blksize))
+        self.tb = self.runner.tb
+        self.sim = self.tb.sim
+        self.clk = self.tb.axis_clk
+        self.data_width = int(self.tb.rfdc.axis_bitwidth)
+        self.dut_top = DutTop.of("rf_loopback_dut", self.sim, comps=[self.tb.dut])
+        self.tb.sink.recording_check = "example"
+        self._root: Path | None = None
+
+    def dut(self) -> DutTop:
+        """The default DUT: the pass-through kernel alone; the converter is testbench."""
+        return self.dut_top
+
+    def write_scenario(self, root) -> None:
+        self.runner.write_scenario(root)
+        write_run_params(Path(root) / "vectors", n_cycles=int(self.n_cycles))
+        self._root = Path(root)
+
+    def run(self) -> "RfLoopbackTB":
+        if self._root is None:
+            with tempfile.TemporaryDirectory() as tmp:
+                self.write_scenario(tmp)
+                self.sim.run_sim()
+        else:
+            self.sim.run_sim()
+        return self.tb
 
 if __name__ == "__main__":
     run_and_check()

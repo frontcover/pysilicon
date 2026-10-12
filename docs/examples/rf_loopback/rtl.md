@@ -3,8 +3,8 @@ title: Taking it to RTL
 parent: RF loopback
 nav_order: 3
 audience: hls
-api: [RfSampPassThrough, kernel_task, bfm_model, check, potential_targets, sim_only]
-summary: "Step 7: the digital logic becomes hardware. What check says about each module in the graph, the DUT synthesized cut alone between generic AXI-Stream BFMs, one task body generated and one handed over, what each verification layer actually proves, and the recorded XSI cycle gate."
+api: [RfSampPassThrough, kernel_task, bfm_model, check, potential_targets, sim_only, RfLoopbackSystem, recording_check, reports_counters]
+summary: "Step 7: the digital logic becomes hardware. What check says about each module in the graph, the DUT synthesized cut alone between generic AXI-Stream BFMs, one task body generated and one handed over, what each verification layer actually proves, the recorded XSI cycle gate, and the same gate through the system flow -- the RFDC in the testbench, its models' loss counters gathered as a recording."
 ---
 
 # Taking it to RTL
@@ -166,6 +166,67 @@ went from dropping 72 words to dropping none. Both numbers live in
 > [pattern B](../../guide/rf/rfdc/rules.md) answers, and `examples/rf_blk_delay` drops **zero** on
 > the same converters. Do not quote 62 as a design constant; it depends on the model's input-FIFO
 > depth, and the gate asserts only the sign.
+
+## The same gate, through the system flow {#system-flow}
+
+The loopback also runs through the [system flow](../../guide/flows/concurrent_system.md), as an
+`HwSystem`:
+
+```bash
+python -m examples.rf_loopback.rf_loopback_system_build --synth check
+pytest -m xsi tests/examples/test_rf_loopback_system_xsi.py
+```
+
+`RfLoopbackSystem` (in `rf_loopback.py`) cuts the same graph differently in words, not in effect. The
+**DUT is the pass-through kernel alone.** The RFDC cannot be brought into the DUT as vendor IP, so it
+is **testbench**:
+
+- in pysim, the `Rfdc` model;
+- under XSI, its two C++ models, `RfdcAdcMaster` and `RfdcDacSlave`;
+- on the board, the RFDC IP, a cell of the block design beside the DUT's IP.
+
+Each converter model **spans the cut**. Its fabric side drives or answers a stream port of the top.
+Its RF side talks over a behavioral edge, a `BlockChannel`, to the RF data source or sink. The
+harness the system flow generates is the one the kernel flow generates, model for model: the same
+classes, arguments, settings and channels.
+
+Two things are checked by this example rather than compared against pysim, because the two backends
+legitimately disagree. pysim paces the RF side on the edge and cannot see sub-block sample loss (see
+[the fidelity boundary](../../guide/rf/rfdc/fidelity.md)).
+
+**The sink's capture.** The sink declares `recording_check = "example"`, so the system flow gathers
+`vectors/rf_out` from both runs but does not compare them. `check_xsi` asserts on the RTL capture:
+- the startup period is zero-fill;
+- the first data block is bit-exact;
+- 7 of the 63 collected periods carry data.
+
+**The loss counters.** These are not registers. They are each testbench model's own bookkeeping:
+- the ADC model counts words the fabric was not ready for, which it had to discard;
+- the DAC model counts grid periods it had nothing to play;
+- each RF channel counts its transfers and drops;
+- the source and sink count blocks.
+
+In the system flow, each of these models writes its counters as JSON at the end of the run, to
+`vectors/counters/<model>.json`. Its declaration says it keeps them (`reports_counters`), and the
+harness tells it where to write. The run gathers that directory as one more recording. `check_counters`
+then asserts the kernel gate's counter claims in Python:
+
+| claim | measured |
+|---|---|
+| the ADC accounts for every word: sent + dropped = 512 | 450 + 62 |
+| the ADC drops some: this relay cannot keep up while the DAC paces its writes | 62 |
+| the DAC emits on its grid for the whole run | 64 periods |
+| every period without a surviving data block is zero-fill | 57 = 64 − 7 |
+| words the fabric took but the DAC did not are still inside the DUT, under one block | 2 |
+| the RF edges themselves drop nothing; the loss is at the fabric boundary | 0 and 0 |
+
+In the kernel flow the same numbers come from a hand-written main, `xsi/rf_loopback_counters.cpp`,
+that reads the fields off the model objects after the run. The system flow needs no hand-written C++.
+
+Counters a model keeps are verification instrumentation: they say what the *testbench* saw. A design
+that must report loss on the board needs observability of its own: status registers in a device
+that the host reads, or the RFDC IP's own status interface. That is design work, not a way to pass
+this gate.
 
 ## See also
 

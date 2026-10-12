@@ -128,8 +128,10 @@ os.environ.setdefault("WAVEFLOW_EVENTS", "off")
 #: 168 -> 173 on 2026-10-12 (plans/system_model.md S5): each markov / mm_fir sub-top elaborates
 #: alone (test_markov_xsi.py x3, test_mm_fir_xsi.py x2).  173 -> 174 (S3a): mem_copy's system top,
 #: no crossbar, elaborates (test_xsi_bfm.py).  174 -> 176 (S3c): mem_copy through the system flow --
-#: recordings match pysim, golden at 2908 (test_mem_copy_system_xsi.py).
-WANT_XSI_GATES = 176
+#: recordings match pysim, golden at 2908 (test_mem_copy_system_xsi.py).  176 -> 178 (S3d):
+#: rf_loopback through the system flow, the RFDC in the testbench (test_rf_loopback_system_xsi.py).
+#: 178 -> 179: its loss counters, written by the models as a recording.
+WANT_XSI_GATES = 179
 
 #: Filled in at collection; module state because a pytest run is one process and the hooks that
 #: write and read it are plain functions.
