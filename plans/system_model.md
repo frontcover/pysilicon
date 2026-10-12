@@ -205,6 +205,18 @@ Stage 0's grouping exactly; Verilog byte-identical; **calibration keys unchanged
 **S2 -- interface realization hooks.**  D3 for the four interfaces; `system_top_spec`'s branches move
 onto them.  Gate: Verilog byte-identical.
 
+> **Built (2026-10-12), for three of the four:**
+> - `AXIMMCrossBarIF.rtl_config(name, id_width=)` returns its `AxiXbarConfig` (the vendor IP);
+> - `StreamIF.rtl_fifo_depth(between_kernels=)` returns the `mm_sync_fifo` depth, or 0 for nets;
+> - `MmCreditStreamIF.writers()` returns its two writers.  `_channel_of` finds a writer's channel
+>   through it, instead of matching bus-master identities.
+>
+> `system_top_spec` asks the hooks.  It no longer calls `from_crossbar` or applies the depth rule.
+> `IrqIF` got no hook: "a line whose sink is outside the cut becomes a top output" is a fact about the
+> cut, not about the line, so it stays in the walk.  The walk's *order* (SI then MI slots from the
+> crossbar, writers found from kernels' stream peers) is still crossbar-shaped.  Removing that is S3.
+> Gate: Verilog and harness byte-identical.
+
 **S3 -- the generic walk.**  D4.  The walk names no interface or module type.  Gate: Verilog
 byte-identical, plus one new system with **no crossbar** (two kernels joined by a stream, host on
 streams) through `system_rtl` and XSI.

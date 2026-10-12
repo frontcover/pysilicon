@@ -96,7 +96,6 @@ from waveflow.build.mm_adaptor_gen import (
     render_view_slot,
     verilog_params,
 )
-from waveflow.hw.interface import DEFAULT_STREAM_DEPTH
 
 if TYPE_CHECKING:
     from waveflow.build.composite_gen import TbSpec
@@ -400,17 +399,14 @@ def default_id_width(n_si: int) -> int:
 
 
 def _channel_of(writer, mods):
-    """The routed channel (``MmCreditStreamIF``) that built bus *writer*: the interface on one of
-    *mods*' endpoints whose bus masters include the writer's.  ``None`` if none does."""
-    from waveflow.hw.mm_credit import MmCreditStreamIF
-
+    """The routed channel that realizes bus *writer*: the interface on one of *mods*' endpoints
+    whose :meth:`writers` include it.  ``None`` if none does."""
     stack = list(mods)
     while stack:
         m = stack.pop()
         for ep in (getattr(m, "endpoints", {}) or {}).values():
             iface = getattr(ep, "interface", None)
-            if isinstance(iface, MmCreditStreamIF) and any(
-                    b is writer.m_mem for b in iface.bus_masters()):
+            if any(w is writer for w in getattr(iface, "writers", tuple)()):
                 return iface
         stack += list((getattr(m, "sub_comps", {}) or {}).values())
     return None
@@ -486,7 +482,7 @@ def system_top_spec(xbar, inside, *, top: str = "system_top", xbar_name: str | N
     dw = int(xbar.bitwidth)
     n_si = int(xbar.nports_master)
     idw = default_id_width(n_si) if id_width is None else int(id_width)
-    cfg = AxiXbarConfig.from_crossbar(xbar, xbar_name or f"xbar_{top}", id_width=idw)
+    cfg = xbar.rtl_config(xbar_name or f"xbar_{top}", id_width=idw)
 
     kernels_mods = [m for m in inside if not isinstance(m, MemoryMod)]
 
@@ -539,10 +535,8 @@ def system_top_spec(xbar, inside, *, top: str = "system_top", xbar_name: str | N
             done_ifaces.add(id(iface))
             m_ep, s_ep = iface.endpoints["master"], iface.endpoints["slave"]
             prod, cons = port_of.get(id(m_ep)), port_of.get(id(s_ep))
-            # A link between two kernels with a real depth is a FIFO in RTL too; a view's link IS the
-            # view's FIFO, so it is a plain net.
-            depth = int(iface.depth or DEFAULT_STREAM_DEPTH)
-            fifo = depth if (prod and cons and depth > DEFAULT_STREAM_DEPTH) else 0
+            # The link says what it becomes: a FIFO between two kernels, nets beside a view.
+            fifo = iface.rtl_fifo_depth(between_kernels=bool(prod and cons))
             # A FIFO feeding (or fed by) a bus writer belongs to the writer's channel.
             ends = [e[0] for e in (prod, cons) if e]
             chan = next((e.owner for e in ends if isinstance(e.hw, MmStreamWriter)), None)

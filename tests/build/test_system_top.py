@@ -359,3 +359,25 @@ def test_the_grouping_is_read_from_the_tree_not_derived():
     gen_ports = re.search(r"^module markov_top_gen \((.*?)\);", v, re.M | re.S).group(1)
     assert re.search(r"output\s+wire \[\d+:0\] u_crd_TDATA", chain_ports)      # the chain drives it
     assert re.search(r"input\s+wire u_crd_TVALID", gen_ports)                  # the writer reads it
+
+
+# ---------------------------------------------------------------------------------------------
+# Interfaces realize themselves (plans/system_model.md S2)
+# ---------------------------------------------------------------------------------------------
+
+def test_each_interface_states_its_rtl_realization():
+    """The crossbar is a vendor IP configured from its own ports and ranges; a stream is a FIFO only
+    between two kernels and above the default depth; a routed credit stream is its two writers."""
+    import inspect
+
+    from waveflow.build import system_top
+
+    sysm, spec = _markov()
+    assert sysm.xbar.rtl_config(spec.xbar.name, id_width=spec.xbar.id_width) == spec.xbar
+    fwd = next(i for i in sysm.sim._sim_objs if getattr(i, "name", None) == "u_fwd")
+    assert fwd.rtl_fifo_depth(between_kernels=True) == int(sysm.u_link.fwd_depth)
+    assert fwd.rtl_fifo_depth(between_kernels=False) == 0             # a view's link is its FIFO
+    assert sysm.u_link.writers() == (sysm.u_link.fwd_writer, sysm.u_link.crd_writer)
+    # The walk asks; it no longer configures the crossbar or applies the depth rule itself.
+    src = inspect.getsource(system_top.system_top_spec)
+    assert "from_crossbar" not in src and "DEFAULT_STREAM_DEPTH" not in src

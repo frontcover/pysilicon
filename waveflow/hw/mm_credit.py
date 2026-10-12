@@ -262,6 +262,13 @@ class MmCreditStreamIF(Interface):
         self.qin = None
         self.crd_in = None
 
+    def writers(self) -> "tuple[MmStreamWriter, MmStreamWriter]":
+        """The channel's RTL realization inside a DUT (``plans/system_model.md`` D3): its two bus
+        writers -- forward, then credit -- each a csynth'd module, placed in the device of the kernel
+        it acts for when the channel is bound.  The FIFO on the forward link is that link's own
+        (:meth:`~waveflow.hw.interface.StreamIF.rtl_fifo_depth`)."""
+        return (self.fwd_writer, self.crd_writer)
+
     def bus_masters(self) -> list[MMIFMaster]:
         """The two bus masters this channel adds to the crossbar: forward, then credit."""
         return [self.fwd_writer.m_mem, self.crd_writer.m_mem]
