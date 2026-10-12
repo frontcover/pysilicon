@@ -181,6 +181,27 @@ places its writers in the devices at `bind`.  The DUT root holds the devices, th
 crossbar.  `SystemTopSpec`'s grouping is read from the tree, not derived.  Gate: the tree reproduces
 Stage 0's grouping exactly; Verilog byte-identical; **calibration keys unchanged** (see Open).
 
+> **Built (2026-10-12).**
+> - `MmSlaveDevice` is an `HwModule` composite (device named `<kernel>_dev`).  Its children are the
+>   kernel, the views and the adaptor, and its interfaces are the view streams.
+> - `MmCreditStreamIF.bind` adds each writer, and the stream feeding it, to the nearest `MmSlaveDevice`
+>   ancestor of the endpoint's kernel.  The ancestor climb is needed because `MarkovChain`'s `s_u`
+>   belongs to its child `chain_core`.  A kernel in no device leaves its writer unplaced, since any
+>   other composite would take the writer as a task.
+> - `DutTop` (`waveflow/simulation/system.py`) is the root.  `DutTop.of(name, sim, comps=, ifs=)`
+>   builds it.  `System.dut()` returns it and `System.cut()` flattens it for `inside=` (each device's
+>   kernel, then each memory).
+> - `system_top._group` reads kernels' and writers' devices off the tree.  The stream-feeding rule
+>   remains only as the fallback for a writer in no device.
+>
+> **Gates:**
+> - Verilog byte-identical for markov and both mm_fir shapes, with and without probes (212,241 bytes);
+> - pysim end times identical;
+> - **all 59 calibration keys identical**.  `parent` is in `_CONTEXT_ATTRS`, and the views'
+>   `mm_device` attribute did not move them either;
+> - a test moves the credit writer to the other device by hand: the sub-tops follow the tree, and the
+>   link then crosses as ports of both.
+
 **S2 -- interface realization hooks.**  D3 for the four interfaces; `system_top_spec`'s branches move
 onto them.  Gate: Verilog byte-identical.
 
@@ -190,6 +211,7 @@ streams) through `system_rtl` and XSI.
 
 **S4 -- the TB side through hooks.**  D5.  Gate: the harness is byte-identical; `system_tb_spec` names
 no participant type.
+
 
 **S5 -- cuts other than the default.**  A build passes a DUT sub-tree: one device as the DUT, its
 neighbours as TB.  This is the unit harness's first need, and the per-device synthesis's.  Gate: one

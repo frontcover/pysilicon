@@ -57,7 +57,7 @@ class XsiRun:
 
 def discover(sysm):
     """``(xbar, host, inside)`` of a :class:`~waveflow.simulation.system.System`: its one crossbar,
-    its one software host, and its default cut (:meth:`~waveflow.simulation.system.System.dut`).
+    its one software host, and its default cut (:meth:`~waveflow.simulation.system.System.cut`).
 
     The cut is the system's own declaration.  The crossbar and the host are still found by type
     among the graph's elements; ``plans/system_model.md`` S3/S4 replace that with a walk that asks
@@ -76,7 +76,7 @@ def discover(sysm):
     if len(xbars) != 1 or len(hosts) != 1:
         raise LoweringError(f"{type(sysm).__name__}: a bus system has one crossbar and one software host; "
                             f"found {len(xbars)} crossbar(s) and {len(hosts)} host(s)")
-    return xbars[0], hosts[0], list(sysm.dut())
+    return xbars[0], hosts[0], sysm.cut()
 
 
 def _rtl_dir(root: Path, module: str) -> Path:

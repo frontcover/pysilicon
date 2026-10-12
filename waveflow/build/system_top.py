@@ -636,14 +636,29 @@ def _view_nets(view) -> list[tuple[str, str]]:
 
 def _group(top: str, rtl, nets, net_ends, mi):
     """Place every kernel, net and slot in a sub-top (the module doc's rules) -> ``(kernels, nets,
-    subs)``.  A kernel names its device; a bus writer joins the device of the kernel whose stream
-    feeds it; a slot is its kernel's device or the memory (set where the slot is built); a net lives
-    where its two ends are."""
+    subs)``.  A kernel or bus writer is in the device that holds it in the DUT tree -- its nearest
+    ``MmSlaveDevice`` ancestor (``plans/system_model.md`` D2), named for that device's kernel; a slot
+    is its kernel's device or the memory (set where the slot is built); a net lives where its two
+    ends are.  A writer in no device (its kernel was not built into one) falls back to the rule the
+    tree encodes: it joins the device of the kernel whose stream feeds it."""
     from dataclasses import replace
 
     from waveflow.hw.mm_credit import MmStreamWriter
+    from waveflow.hw.mm_device import MmSlaveDevice
 
-    group = {k.inst: k.hw.name for k in rtl if not isinstance(k.hw, MmStreamWriter)}
+    def device_of(mod):
+        node = getattr(mod, "parent", None)
+        while node is not None and not isinstance(node, MmSlaveDevice):
+            node = getattr(node, "parent", None)
+        return node
+
+    group = {}
+    for k in rtl:
+        dev = device_of(k.hw)
+        if dev is not None:
+            group[k.inst] = dev.kernel.name
+        elif not isinstance(k.hw, MmStreamWriter):
+            group[k.inst] = k.hw.name
     # A view's stream ends are in its slot's sub-top: net side -> group.
     side: dict[str, str] = {}
     for slot in mi:
@@ -670,7 +685,7 @@ def _group(top: str, rtl, nets, net_ends, mi):
 
     subs: list[SubTop] = []
     for k in rtl:
-        if not isinstance(k.hw, MmStreamWriter):
+        if not isinstance(k.hw, MmStreamWriter) and all(s.name != k.group for s in subs):
             subs.append(SubTop(k.group, "device", f"{top}_{k.group}", f"u_{k.group}_sub", k.hw))
     for slot in mi:
         if slot.kind == "memory":

@@ -64,7 +64,7 @@ from waveflow.hw.mm_host import (
     MemSlaveLayout,
 )
 from waveflow.simulation.simulation import Simulation
-from waveflow.simulation.system import System
+from waveflow.simulation.system import DutTop, System
 from waveflow.sw import SwHost
 
 DW = 64
@@ -583,6 +583,7 @@ class MmFirSystem(System):
                                        clk=self.clk)
         self.status_if.bind("master", fir.m_status)
         self.status_if.bind("slave", host.status)
+        self.dut_top = DutTop.of("mm_fir_dut", sim, comps=[fir])
 
     def _wire_mm(self) -> None:
         sim, clk = self.sim, self.clk
@@ -614,10 +615,11 @@ class MmFirSystem(System):
         self.host.qout = mm.stream_slave("qout", irq=self.host.irq["qout"])
         self.host.qresp = mm.stream_slave("qresp", irq=self.host.irq["qresp"])
         self.host.status = mm.status("regs")
+        self.dut_top = DutTop.of("mm_fir_dut", sim, comps=[self.device], ifs=[self.xbar])
 
-    def dut(self) -> list:
-        """The default cut: the FIR kernel, with its device."""
-        return [self.fir]
+    def dut(self) -> DutTop:
+        """The default DUT: the FIR kernel's device (or, wired directly, the kernel alone)."""
+        return self.dut_top
 
     def run(self) -> np.ndarray:
         self.sim.run_sim(until=self.host.done)

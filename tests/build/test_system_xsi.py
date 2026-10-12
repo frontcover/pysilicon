@@ -49,15 +49,19 @@ def test_compare_traces_names_what_differs(tmp_path):
 # ---------------------------------------------------------------------------------------------
 
 def test_a_system_declares_its_cut():
-    """Both systems state their default cut through dut(); discover() reads it, no longer derives it
-    from the crossbar's slaves -- and it is the cut the derivation gave, so the top is unchanged."""
+    """Both systems state their DUT through dut() -- a tree whose children are the devices and the
+    memory (system_model S1) -- and cut() flattens it to the kernels and memories discover() hands
+    on: the cut the old derivation from the crossbar's slaves gave, so the top is unchanged."""
     from examples.markov.markov_build import system
     from examples.mm_fir.mm_fir_build import system as fir_system
-    from waveflow.simulation.system import System
+    from waveflow.simulation.system import DutTop, System
 
     s, f = system(), fir_system("per_view")
     assert isinstance(s, System) and isinstance(f, System)
-    assert s.dut() == [s.gen, s.chain, s.mem] and f.dut() == [f.fir]
+    assert isinstance(s.dut(), DutTop)
+    assert list(s.dut().sub_comps.values()) == [s.gen_dev, s.chain_dev, s.mem]
+    assert s.xbar in s.dut().interfaces.values()
+    assert s.cut() == [s.gen, s.chain, s.mem] and f.cut() == [f.fir]
     assert s.xbar in s.elements() and s.host in s.elements()
 
 
@@ -78,3 +82,4 @@ def test_a_system_without_its_cut_cannot_be_built():
 
     with pytest.raises(TypeError, match="dut"):
         NoCut()
+

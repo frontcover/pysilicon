@@ -154,8 +154,10 @@ arrangement one level down: `composite_top_spec` returns its `TopSpec`.
 
 ### Devices: the top's sub-tops {#devices}
 
-The top is not flat. The walk places every instance in one of three places, by rule, and renders each
-**device** and each **memory** as its own Verilog module (a *sub-top*) that the system top instantiates:
+The top is not flat. Every instance is in one of three places, and each **device** and each **memory**
+is rendered as its own Verilog module (a *sub-top*) that the system top instantiates. The places are the
+system's own DUT tree (`System.dut()`): `build_mm_device` returns each device as a composite holding its
+kernel, views and adaptor, so the walk reads a kernel's device off the tree rather than inferring it.
 
 | place | holds | in markov |
 |---|---|---|
@@ -166,7 +168,9 @@ The top is not flat. The walk places every instance in one of three places, by r
 **Where a bus writer goes.** A writer acts for the kernel whose stream feeds it. A routed credit
 stream's **forward writer** carries the sender's data, so it sits in the sender's device. Its **credit
 writer** returns the receiver's credit, so it sits in the receiver's device. Neither sits with the
-crossbar.
+crossbar. `MmCreditStreamIF` makes that placement itself, when it is bound: it adds each writer, and the
+stream feeding it, to the device of the kernel it acts for. Move a writer to another device and the
+sub-tops follow the tree.
 
 What crosses a sub-top's boundary is clock, reset, its AXI4 slots (its MI slot as a slave and each of
 its masters' SI slots), its interrupt lines and its timing probes. In a memory-mapped system nothing

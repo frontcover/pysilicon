@@ -322,3 +322,40 @@ def test_from_system_is_the_walk_with_add_system_steps_defaults():
     assert SystemTopSpec.from_system(sysm).top == "markov_system"        # the class, snake case
     only = SystemTopSpec.from_system(sysm, inside=[sysm.gen, sysm.chain, sysm.mem], top="t")
     assert [s.name for s in only.subs] == ["gen", "chain", "mem"]
+
+
+# ---------------------------------------------------------------------------------------------
+# The DUT tree (plans/system_model.md S1): devices are composites, the grouping is read from them.
+# ---------------------------------------------------------------------------------------------
+
+def test_each_device_holds_its_kernel_views_and_the_writer_acting_for_it():
+    """``build_mm_device`` returns a composite; binding the routed credit stream puts the forward
+    writer (and the FIFO feeding it) in the sender's device and the credit writer in the receiver's,
+    even though the receiver's endpoint belongs to a child of the composite kernel."""
+    sysm, _spec = _markov()
+    gen, chain = sysm.gen_dev, sysm.chain_dev
+    assert list(gen.sub_comps) == ["gen", "gen_qcmd", "gen_u_crd", "gen_mm", "u_fwd_wr"]
+    assert list(chain.sub_comps) == ["chain", "chain_qu", "chain_qresp", "chain_mm", "u_crd_wr"]
+    assert sysm.u_link.fwd_writer.parent is gen and sysm.u_link.crd_writer.parent is chain
+    assert "u_fwd" in gen.interfaces and "u_crd" in chain.interfaces
+    assert sysm.gen.parent is gen and sysm.dut().sub_comps["gen_dev"] is gen
+
+
+def test_the_grouping_is_read_from_the_tree_not_derived():
+    """Move the credit writer to the generator's device by hand: the sub-tops follow the tree.  (The
+    stream-feeding rule would have put it with the chain.)"""
+    from waveflow.build.system_top import SystemTopSpec
+
+    sysm, _spec = _markov()
+    w = sysm.u_link.crd_writer
+    del sysm.chain_dev.sub_comps[w.name]
+    sysm.gen_dev.add_comp(w)
+    spec = SystemTopSpec.from_system(sysm, top="markov_top")
+    by = {i.inst: i.sub for i in spec.instances()}
+    assert by["u_u_crd_wr"] == "u_gen_sub"
+    assert any(n.name == "u_crd" and not n.group for n in spec.nets)    # its link now crosses
+    v = spec.render_verilog()                                          # ...as a port of each
+    chain_ports = re.search(r"^module markov_top_chain \((.*?)\);", v, re.M | re.S).group(1)
+    gen_ports = re.search(r"^module markov_top_gen \((.*?)\);", v, re.M | re.S).group(1)
+    assert re.search(r"output\s+wire \[\d+:0\] u_crd_TDATA", chain_ports)      # the chain drives it
+    assert re.search(r"input\s+wire u_crd_TVALID", gen_ports)                  # the writer reads it
