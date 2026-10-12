@@ -14,6 +14,13 @@ markov docs comparing both routes on measured numbers.
 **Revised 2026-10-11:** a [Docs](#docs) section places each new page with its stage, and lists five
 existing build steps (and one index link) documented nowhere, to close independently.
 
+**Paused after Stage 0 (2026-10-11).**  Stage 0 and Docs 0 are done.  Stages 1-4 wait on
+`plans/system_model.md`.  A system today has no class stating its contract: `discover()` finds it by
+searching for one crossbar and one `SwHost`, and the walk is crossbar-centric.  That plan gives the
+system a `System` base, the cut as a per-build partition into DUT and TB, realization hooks for
+interfaces, and a generic walk that builds `SystemTopSpec`.  Per-device synthesis and packaging then
+build on that instead of on `discover()`.
+
 ## The question
 
 A *system* -- several kernels behind memory-mapped adaptors, AMD's crossbar, an on-chip memory
