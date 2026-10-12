@@ -35,12 +35,13 @@ from waveflow.hw.codegen_targets import SEQUENTIAL_XSI_TB
 from waveflow.hw.fixpoint import fixed_sum, from_real, mult, quantize
 from waveflow.hw.hw_freerun import FreeRunMod
 from waveflow.hw.hw_module import HwParam
+from waveflow.hw.hw_system import DutTop, HwSystem
 from waveflow.hw.interface import StreamIF
 from waveflow.hw.memif import AXIMMCrossBarIF, assign_address_ranges
 from waveflow.hw.memory import MemoryMod, MemSeg
 from waveflow.simulation.simulation import Simulation
 from waveflow.simulation.stream_tb import StreamDriver, StreamSink
-from waveflow.utils.burst_io import write_burst_bundle
+from waveflow.utils.burst_io import write_burst_bundle, write_run_params
 
 from examples.fir_block.fir_block import (
     DEFAULT_NTAP,
@@ -327,6 +328,50 @@ class FirBlockSim:
         print(f"[fir_block] program={tb._program} blk={tb.blk} ntap={int(tb.ntap)} "
               f"W={int(tb.samp_w)} blocks_ok={len(self.expected)} completions={len(bursts)}")
         return tb.dut
+
+
+@dataclass
+class FirBlockSystem(HwSystem):
+    """fir_block as a **system** (``plans/system_model.md`` S3e): the same :class:`FirBlockTB` graph,
+    the cut stated as a DUT tree -- the :class:`FirBlock` kernel alone -- rather than implied by the
+    testbench class.  The crossbar that models the two ``m_axi`` bundles' contention in pysim is
+    testbench, so both bundles are top ports facing the memory model, and ``s_cmd`` / ``s_done`` are
+    top ports facing the driver and the sink.
+
+    The scenario is :class:`FirBlockSim`'s plus the run's bound (``vectors/run.json``), with the sink
+    anchored too so pysim records what the RTL records (``vectors/s_done``, ``vectors/out``)."""
+
+    program: tuple = DEFAULT_PROGRAM
+    blk: int = DEFAULT_BLK
+
+    def __post_init__(self) -> None:
+        self.runner = FirBlockSim(program=tuple(self.program), blk=int(self.blk), name="xsi_tb")
+        self.tb = self.runner.tb
+        self.sim = self.tb.sim
+        self.clk = self.tb.clk
+        #: The width of the top's stream ports and m_axi groups: there is no crossbar to take it from.
+        self.data_width = int(self.tb.mem_dwidth)
+        self.dut_top = DutTop.of("fir_block_dut", self.sim, comps=[self.tb.dut])
+        self._root: Path | None = None
+
+    def dut(self) -> DutTop:
+        """The default DUT: the filter kernel alone."""
+        return self.dut_top
+
+    def write_scenario(self, root) -> None:
+        self.runner.write_scenario(root)
+        write_run_params(Path(root) / "vectors", n_cycles=int(self.tb.n_cycles))
+        self.tb.done_sink.root = Path(root)
+        self._root = Path(root)
+
+    def run(self) -> FirBlock:
+        if self._root is None:
+            with tempfile.TemporaryDirectory() as tmp:
+                self.write_scenario(tmp)
+                self.sim.run_sim()
+        else:
+            self.sim.run_sim()
+        return self.runner.check()
 
 
 def run_and_check() -> bool:
