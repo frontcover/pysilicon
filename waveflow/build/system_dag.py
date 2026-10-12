@@ -684,23 +684,23 @@ class KernelResourcesStep(_SystemStep):
         plat = getattr(config, "platform_info", None)
         filed_into = str(getattr(plat, "write_dir", plat.dir)) if plat is not None else None
         for k in self.rtl.spec.kernels:
-            if k.module not in done:              # one csynth per module: attribute it once
-                out = work / "kernel_resources" / f"{k.module}.json"
-                xml = Path(inputs[report_artifact(k.module)]) / "syn" / "report" / "csynth.xml"
+            if k.csynth_module not in done:              # one csynth per module: attribute it once
+                out = work / "kernel_resources" / f"{k.csynth_module}.json"
+                xml = Path(inputs[report_artifact(k.csynth_module)]) / "syn" / "report" / "csynth.xml"
                 prev = json.loads(out.read_text(encoding="utf-8")) if out.is_file() else None
                 # Records are filed once per csynth, not once per build: an attribution newer than
                 # its report, already filed into this platform, is reused as is.
                 if (prev is not None and prev.get("filed_into") == filed_into and xml.is_file()
                         and out.stat().st_mtime >= xml.stat().st_mtime):
-                    done[k.module] = prev
+                    done[k.csynth_module] = prev
                 else:
-                    done[k.module] = inspect_synth(
-                        k.hw, inputs[report_artifact(k.module)], top_name=k.module, config=config,
+                    done[k.csynth_module] = inspect_synth(
+                        k.hw, inputs[report_artifact(k.csynth_module)], top_name=k.csynth_module, config=config,
                         out=out,
-                        synth_seconds=synth_seconds_of(inputs.get(seconds_artifact(k.module))),
+                        synth_seconds=synth_seconds_of(inputs.get(seconds_artifact(k.csynth_module))),
                         owner=owner_label(k.owner))
-            blob = done[k.module]
-            index[k.inst] = {"top": k.module, "owner": owner_label(k.owner),
+            blob = done[k.csynth_module]
+            index[k.inst] = {"top": k.csynth_module, "owner": owner_label(k.owner),
                              "modules": [m["key"] for m in blob["modules"]],
                              "top_total": blob["top"], "integration": blob["integration"],
                              "filed_into": blob["filed_into"]}
