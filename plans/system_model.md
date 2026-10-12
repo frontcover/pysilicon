@@ -277,6 +277,21 @@ testbench-side vendor IPs as block-design cells, not only the DUT's devices.
    `bfm_model()`.
 4. **mem_copy, then an RF example, as `HwSystem`s** (the gates below).
 5. **The docs, once there is one mechanism.**
+   - `flows/concurrent_layers.md` rewritten around `HwSystem` at both scales, in DUT / testbench
+     vocabulary.  "RTL top" becomes "the DUT's Verilog", and the "XSI simulation top" is retired.
+   - A kernel-scale figure there: mem_copy as a system with no crossbar, in `system_cut.tex`'s
+     colours.  The colours are the three kinds of module (blue kernel, green RTL, tan BFM) plus
+     purple for an interface realized as vendor IP.
+   - The flow-steps diagram redrawn from the `HwSystem` and recoloured to match.
+
+**Gates:**
+- markov and mm_fir unchanged: Verilog and harness byte-identical, the 18 XSI gates;
+- **mem_copy as a `HwSystem` with no crossbar**: its `dut()` is the kernel, and its testbench is the
+  stream driver, the sink and the memory BFM.  It passes its existing gate (2908 cycles, bit-exact)
+  through the system flow.  This is also the first step of folding the single-kernel mechanism into
+  `HwSystem` (Open);
+- **an RF example as a `HwSystem`**, the RFDC in the testbench through its `bfm_model()`, passing its
+  existing gate.  This checks the vendor-IP-outside case.
 
 **Found while scoping (2026-10-12): the two mechanisms differ in *verification* too.**  A kernel-scale
 testbench (`MemCopyTB` + `MemCopySim`) has its scenario written by an example-level function, checks
@@ -342,32 +357,30 @@ Golden checks stay as an optional per-example step: "the destination equals the 
 > Not yet rewritten: the flow-steps page's prose still teaches the "XSI simulation top" (the
 > composite testbench class).  That rewrite follows the examples' migration.
 >
-> **S3d analysed, not built: it needs decisions.**  rf_loopback is the simplest RF candidate (no
-> `rtl_module`), and it differs from mem_copy in two ways:
-> 1. **The RFDC spans the cut.**  Its model has an RTL-facing port *and* a behavioral edge (a C++
->    channel between two testbench models).  `system_tb_spec` does not emit behavioral edges;
->    `tb_top_spec` does, through `_discover_behavioral_edges` / `_emit_behavioral_edges`.  Porting
->    those is mechanical.
-> 2. **Its pysim and RTL legitimately disagree.**  `test_rf_loopback_xsi.py` records that pysim
->    cannot see sub-block sample loss ("the two backends disagree about loss and this records how").
->    So "recordings identical, RTL against pysim" is the wrong gate for it.  A system needs a way to
->    say which recordings are compared exactly and which only through an example check.  That is a
->    design call (a per-recording policy on the participant, or an example-level compare hook).
-   - `flows/concurrent_layers.md` rewritten around `HwSystem` at both scales, in DUT / testbench
-     vocabulary.  "RTL top" becomes "the DUT's Verilog", and the "XSI simulation top" is retired.
-   - A kernel-scale figure there: mem_copy as a system with no crossbar, in `system_cut.tex`'s
-     colours.  The colours are the three kinds of module (blue kernel, green RTL, tan BFM) plus
-     purple for an interface realized as vendor IP.
-   - The flow-steps diagram redrawn from the `HwSystem` and recoloured to match.
-
-**Gates:**
-- markov and mm_fir unchanged: Verilog and harness byte-identical, the 18 XSI gates;
-- **mem_copy as a `HwSystem` with no crossbar**: its `dut()` is the kernel, and its testbench is the
-  stream driver, the sink and the memory BFM.  It passes its existing gate (2908 cycles, bit-exact)
-  through the system flow.  This is also the first step of folding the single-kernel mechanism into
-  `HwSystem` (Open);
-- **an RF example as a `HwSystem`**, the RFDC in the testbench through its `bfm_model()`, passing its
-  existing gate.  This checks the vendor-IP-outside case.
+> **S3d built (2026-10-12): rf_loopback as an `HwSystem`, the RFDC in the testbench.**
+> The two decisions were taken as recommended:
+> 1. **Behavioral edges in the system harness.**  `_ext_port_models(..., graph)` builds the same
+>    endpoint→model map `tb_top_spec` builds, over the participants outside the DUT tree.  It hands
+>    the existing helpers (`_discover_behavioral_edges`, `_resolve_model_binding`,
+>    `_emit_behavioral_edges`) a shim for the graph and the DUT's top-facing endpoints.  A model
+>    spanning the cut binds a top port *and* a channel.
+> 2. **A per-recording policy on the participant.**  `recording_check = "example"` (default
+>    `"exact"`); `HwSystem.compared_recordings()` is the exact subset.  `compare` judges only those;
+>    the rest are gathered from both runs for the example's check.
+>
+> `RfLoopbackSystem` (in `rf_loopback.py`) and `rf_loopback_system_build.py`:
+> - The system harness is **the kernel flow's, model for model**: same classes, arguments,
+>   DynParams and channels; only the bound port names differ.
+> - The whole flow passes.  The example's check on the RTL recording reproduces the bundle half of
+>   the kernel gate, claim for claim: zero-fill startup, the first data block bit-exact, 7
+>   data-carrying periods, 63 collected blocks.
+> - New gates `test_rf_loopback_system_xsi.py` (2); `WANT_XSI_GATES` 178.
+>
+> **Not reproduced: the loss counters** (`ADC_DROPPED`, `DAC_BLOCKS_ZERO_FILLED`, ...).  The kernel
+> gate prints them from a **hand-written main** that reads fields off the model objects, and the
+> system flow's main is generated.  A third decision: how an example adds its own report to a
+> generated system run.  Either the models print their counters in `post_sim` (one format, every
+> run), or an `HwSystem` hook supplies the main.
 
 **S4 -- the TB side through hooks.**  D5.  Gate: the harness is byte-identical; `system_tb_spec` names
 no participant type.

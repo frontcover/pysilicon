@@ -22,7 +22,10 @@ testbench, not only a software host:
   there.  The default is the host's (``SwHost.write_scenario``); a system with no host writes its own.
 * :meth:`recordings` -- the bundles testbench participants record under that root: each sink's
   ``out_bundle``, each memory's ``dump_segs``.  Derived from the participants' own declarations, so a
-  system states nothing; the flow compares each one, RTL against pysim.
+  system states nothing; the flow compares each one, RTL against pysim -- unless the participant says
+  otherwise: ``recording_check = "example"`` (an attribute, default ``"exact"``) marks a recording
+  pysim cannot match by construction (an RF sink, where pysim cannot see sub-block loss), which the
+  example's own check reads instead (:meth:`compared_recordings`).
 * :meth:`clock` -- the clock a run's length is counted in.
 
 A system is not an :class:`~waveflow.hw.hw_module.HwModule`: it is never synthesized as a whole, and it
@@ -142,6 +145,28 @@ class HwSystem(ABC):
                 out.append(str(o.out_bundle))
             out += [str(seg.bundle) for seg in (getattr(o, "dump_segs", None) or ())]
         return tuple(dict.fromkeys(out))
+
+    def compared_recordings(self) -> tuple[str, ...]:
+        """The recordings compared **exactly**, RTL against pysim: every :meth:`recordings` entry
+        whose participant has not set ``recording_check = "example"``.  The rest are still gathered
+        from both runs, for the example's own check."""
+        root = self.dut()
+
+        def in_dut(mod) -> bool:
+            while mod is not None:
+                if mod is root:
+                    return True
+                mod = getattr(mod, "parent", None)
+            return False
+
+        skip: set[str] = set()
+        for o in self.elements():
+            if in_dut(o) or getattr(o, "recording_check", "exact") == "exact":
+                continue
+            if getattr(o, "out_bundle", ""):
+                skip.add(str(o.out_bundle))
+            skip |= {str(seg.bundle) for seg in (getattr(o, "dump_segs", None) or ())}
+        return tuple(r for r in self.recordings() if r not in skip)
 
     def clock(self):
         """The clock a run's length is counted in: the host's, else the system's ``clk``."""

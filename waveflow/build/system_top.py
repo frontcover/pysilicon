@@ -1135,8 +1135,10 @@ def system_tb_spec(spec: SystemTopSpec, xbar, participants, probes=(), graph=Non
             models.append(BfmInst(bm.cls, name, first, bm.extra_args, dyn if i == 0 else (),
                                   binds=tuple(binds)))
     shared: dict = {}
+    channels: list = []
     if graph is not None:
-        models += _ext_port_models(spec, ns, shared, local)
+        more, channels = _ext_port_models(spec, ns, shared, local, graph, skip=participants)
+        models += more
     for n in probes:
         models.append(BfmInst("ProbePin", f"pr_{n}", f"probe_{n}", (f'"{n}"',),
                               binds=("sim.dut()", f'"probe_{n}"')))
@@ -1148,53 +1150,109 @@ def system_tb_spec(spec: SystemTopSpec, xbar, participants, probes=(), graph=Non
             for fname, render in bm.generated_files:
                 extra.setdefault(fname, render())
     return TbSpec(top_name=spec.top, shared=tuple(shared.values()), models=tuple(models),
-                  local_headers=tuple(local), stop_on=stop, extra_files=tuple(extra.items()))
+                  channels=tuple(channels), local_headers=tuple(local), stop_on=stop,
+                  extra_files=tuple(extra.items()))
 
 
-def _ext_port_models(spec: SystemTopSpec, ns: str, shared: dict, local: list) -> list:
-    """A model for every stream port and ``m_axi`` group leaving the top: the testbench participant
-    wired to the kernel's endpoint, through the testbench's own interface (a stream, or a crossbar
-    that models contention in pysim).  *shared* collects shared objects (a memory's arena) by name;
-    *local* example-local model headers."""
+def _ext_port_models(spec: SystemTopSpec, ns: str, shared: dict, local: list, graph,
+                     skip=()) -> tuple[list, list]:
+    """``(models, channels)`` for the testbench of *graph* beyond its host(s) *skip*: a model for
+    every stream port and ``m_axi`` group leaving the top, and a channel (with its peer models) for
+    every **behavioral edge** -- an interface joining two testbench participants with no DUT port on
+    it (``plans/system_model.md`` S3d).
+
+    Resolved exactly as :func:`~waveflow.build.composite_gen.tb_top_spec` resolves a kernel's
+    testbench, by its own helpers: each participant's endpoint is looked up in the graph, and where it
+    sits decides what it contributes -- a top port (``sim.dut(), <ns>::<port>``), or a channel
+    variable.  So a model spanning both sides of the cut, as a converter's does (an AXIS port on the
+    fabric side, the RF edge on the other), resolves each port by its own kind.  *shared* collects
+    shared objects (a memory's arena) by name; *local* example-local model headers."""
     from waveflow.build.composite_gen import (
         BfmInst,
         _bfm_port_attrs,
         _bfm_port_endpoint,
+        _boundary_port,
+        _discover_behavioral_edges,
+        _emit_behavioral_edges,
         _render_dyn_value,
+        _resolve_model_binding,
         bfm_dual_class,
         bfm_model_header,
         bfm_models,
     )
     from waveflow.hw.hw_module import declares_hook, discover_dyn_params
+    from waveflow.hw.interface import Interface
 
-    def model_for(ep):
-        """``(participant, its model spanning endpoint *ep*)``, or ``(None, None)``."""
-        part = getattr(ep, "comp", None)
-        if part is None or not declares_hook(part, "bfm_model"):
-            return None, None
-        for bm in bfm_models(part):
-            if any(_bfm_port_endpoint(part, a) is ep for a in _bfm_port_attrs(bm)):
-                return part, bm
-        return None, None
+    root = graph.dut()
 
-    def dyn(part):
-        return tuple((f, _render_dyn_value(v)) for f, v in sorted(discover_dyn_params(part).items()))
+    def in_dut(mod) -> bool:
+        while mod is not None:
+            if mod is root:
+                return True
+            mod = getattr(mod, "parent", None)
+        return False
 
-    out = []
-    kinds = {}
-    for k in spec.kernels:
-        for p in k.ports:
-            kinds[(k.inst, p.name)] = p.kind
-    for net in spec.nets:
-        if not net.ext:
-            continue
+    def dyn_of(obj):
+        return tuple((f, _render_dyn_value(v)) for f, v in sorted(discover_dyn_params(obj).items()))
+
+    skip_ids = {id(x) for x in skip}
+    elements = graph.elements()
+    parts = [o for o in elements if not isinstance(o, Interface) and id(o) not in skip_ids
+             and not in_dut(o) and declares_hook(o, "bfm_model")]
+    # endpoint identity -> (participant, the model spanning it, that model's identity)
+    model_of_ep: dict[int, tuple] = {}
+    for c in parts:
+        for i, bm in enumerate(bfm_models(c)):
+            for attr in _bfm_port_attrs(bm):
+                model_of_ep[id(_bfm_port_endpoint(c, attr))] = (c, bm, (id(c), i))
+
+    kinds = {(k.inst, p.name): p.kind for k in spec.kernels for p in k.ports}
+    # The DUT side of every top port that leaves it -- the "boundary" a testbench faces.
+    boundary: list[tuple[str, object]] = []
+    boundary_of: dict[int, tuple[str, object]] = {}
+    ext_nets = [n for n in spec.nets if n.ext]
+    for net in ext_nets:
+        iface = net.owner
+        inner = iface.endpoints["slave" if net.ext == "in" else "master"]
+        outer = iface.endpoints["master" if net.ext == "in" else "slave"]
+        kind = "axis_in" if net.ext == "in" else "axis_out"
+        boundary.append((net.name, inner))
+        boundary_of[id(outer)] = (net.name, _boundary_port(net.name, kind, 0, None))
+    for inst, port, _prefix in spec.maxi_ext:
+        k = next(k for k in spec.kernels if k.inst == inst)
+        boundary.append((port, dict(k.endpoints)[port]))
+
+    # Behavioral edges: interfaces with every endpoint outside the DUT, between participants.
+    class _Graph:
+        interfaces = {i.name: i for i in elements if isinstance(i, Interface)
+                      and all(getattr(ep, "comp", None) is not None and not in_dut(ep.comp)
+                              for ep in getattr(i, "endpoints", {}).values() if ep is not None)
+                      and any(id(ep) in model_of_ep for ep in i.endpoints.values() if ep is not None)}
+        ordered_subcomps = parts
+
+    class _Dut:
+        pass
+
+    dut = _Dut()
+    dut.boundary = boundary
+    dut.sub_comps = getattr(root, "sub_comps", {})
+    edges = _discover_behavioral_edges(_Graph, dut, model_of_ep) if _Graph.interfaces else []
+    channel_of = {id(ep): e.chan for e in edges for ep in e.sides.values()}
+
+    out: list = []
+    claimed: set = set()
+    emitted: set = set()
+    for net in ext_nets:
         iface = net.owner
         ep = iface.endpoints["master" if net.ext == "in" else "slave"]
-        part, bm = model_for(ep)
-        if part is None:
+        if id(ep) not in model_of_ep:
             raise LoweringError(f"{spec.top}: stream port {net.name!r} leaves the top, but its other "
                                 f"end ({type(getattr(ep, 'comp', None)).__name__}) declares no "
                                 f"bfm_model() spanning it -- nothing would drive or answer it")
+        part, bm, key = model_of_ep[id(ep)]
+        if key in emitted:
+            continue                  # one model spanning several ports is constructed once
+        binds, prefix, chan = _resolve_model_binding(part, bm, ns, boundary_of, channel_of)
         kind = "axis_in" if net.ext == "in" else "axis_out"
         cls = bfm_dual_class(kind, bm.cls)
         if bm.header is not None:
@@ -1202,33 +1260,31 @@ def _ext_port_models(spec: SystemTopSpec, ns: str, shared: dict, local: list) ->
             hdr = str(bfm_model_header(part, bm))
             if hdr not in local:
                 local.append(hdr)
-        out.append(BfmInst(cls, net.name, net.name, bm.extra_args, dyn(part),
-                           binds=("sim.dut()", f"{ns}::{net.name}")))
+        out.append(BfmInst(cls, net.name, prefix or net.name, bm.extra_args, dyn_of(part),
+                           channel=chan, binds=binds))
+        emitted.add(key)
+        claimed.update(id(_bfm_port_endpoint(part, a)) for a in _bfm_port_attrs(bm))
     for inst, port, prefix in spec.maxi_ext:
         k = next(k for k in spec.kernels if k.inst == inst)
         ep = dict(k.endpoints)[port]
         iface = getattr(ep, "interface", None)
-        found = None
-        for peer in (getattr(iface, "endpoints", {}) or {}).values():
-            if peer is not ep:
-                part, bm = model_for(peer)
-                if part is not None:
-                    found = (part, bm)
-                    break
+        found = next((model_of_ep[id(peer)] for peer in (getattr(iface, "endpoints", {}) or {}).values()
+                      if peer is not ep and id(peer) in model_of_ep), None)
         if found is None:
             raise LoweringError(f"{spec.top}: m_axi group {prefix!r} ({inst}.{port}) leaves the top, "
                                 f"but no testbench participant on its interface declares a "
                                 f"bfm_model() -- nothing would answer it")
-        part, bm = found
+        part, bm, _key = found
         kind = kinds[(inst, port)]
         if bm.shared is not None:
-            shared.setdefault(bm.shared, (bm.cls, bm.shared, bm.extra_args, dyn(part)))
+            shared.setdefault(bm.shared, (bm.cls, bm.shared, bm.extra_args, dyn_of(part)))
             out.append(BfmInst(bfm_dual_class(kind, None), prefix, prefix, (bm.shared,),
                                binds=("sim.dut()", f"{ns}::{prefix}")))
         else:
             out.append(BfmInst(bfm_dual_class(kind, bm.cls), prefix, prefix, bm.extra_args,
-                               dyn(part), binds=("sim.dut()", f"{ns}::{prefix}")))
-    return out
+                               dyn_of(part), binds=("sim.dut()", f"{ns}::{prefix}")))
+    channels, peers = _emit_behavioral_edges(edges, model_of_ep, claimed, dyn_of)
+    return out + peers, channels
 
 
 def render_system_ports_h(spec: SystemTopSpec) -> str:

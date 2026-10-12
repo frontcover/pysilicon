@@ -373,10 +373,13 @@ class CompareStep(_SystemStep):
         # A host's traces are compared whole.  A sink's or a memory's recording is compared on its
         # words: framing at RTL is whatever TLAST the DUT drives, which is not the pysim sink's.
         host = _host(self.sysm) is not None
+        # Only what is compared exactly: a recording its participant marks "example" is gathered
+        # from both runs for the example's own check, and not judged here.
+        names = None if host else {Path(r).name for r in self.sysm.compared_recordings()}
         bad = compare_traces(Path(inputs[self.a(self.traces_from)]),
                              Path(inputs[self.a("pysim_traces")]),
                              files=("words.bin", "bounds.bin", "meta.json") if host
-                             else ("words.bin",))
+                             else ("words.bin",), names=names)
         out.write_text(json.dumps({"trace_mismatches": bad}, indent=2) + "\n", encoding="utf-8")
         if bad:
             raise RuntimeError(f"the testbench's RTL traces differ from pysim's: {bad}")
