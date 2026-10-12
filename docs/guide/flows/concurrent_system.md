@@ -79,18 +79,20 @@ synthesis or an IP is built from, and what [Systems](../resource/systems.md#per-
 What the spec holds, how to construct it, and its parameters are in
 [The system top: `SystemTopSpec`](../build/xsi_system.md#the-spec).
 
-## Two scales, two mechanisms today
+## Two scales, one idea
 
-The concurrent flow works at two scales, and today they are built two ways:
+The concurrent flow works at two scales:
 
-| scale | the top of the simulation | worked example |
+| scale | the graph | worked example |
 |---|---|---|
-| **one kernel** | a composite `FreeRunMod` holding the kernel and its BFM modules ([XSI simulation components](./concurrent_layers.md)) | [mem_copy](../../examples/memcpy/) |
-| **a system** | a `HwSystem` whose `dut()` is a tree of devices | [markov](../../examples/markov/), [mm_fir](../../examples/mm_fir/) |
+| **one kernel** | an `HwSystem` whose DUT is the kernel alone, with no crossbar ([XSI simulation components](./concurrent_layers.md)) | [mem_copy](../../examples/memcpy/) |
+| **a system** | an `HwSystem` whose `dut()` is a tree of devices | [markov](../../examples/markov/), [mm_fir](../../examples/mm_fir/) |
 
-They are the same idea, a DUT and a testbench drawn by a cut, at two sizes. A single-kernel testbench
-is a system with no crossbar. Folding the first mechanism into the second is open work
-(`plans/system_model.md`).
+They are the same idea, a DUT and a testbench drawn by a cut, at two sizes. A single-kernel design is
+a system with no crossbar. Its ports leave the top as streams and `m_axi` groups, and testbench models
+answer them. mem_copy runs through the system flow that way and reproduces its single-kernel gate
+exactly. Most other single-kernel examples still use an older mechanism, a composite testbench
+class; moving them over is open work (`plans/system_model.md`).
 
 ## Next
 

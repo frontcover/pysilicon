@@ -297,6 +297,62 @@ Golden checks stay as an optional per-example step: "the destination equals the 
   stream driver, sink and memory model; `system_tb_spec` binds any participant (item 2).
 - **S3c: mem_copy as an `HwSystem`.**  Trace comparison *and* its golden check, 2908 cycles.
 - **S3d: an RF example** with the RFDC in the testbench; then the docs (item 5).
+
+> **S3a built (2026-10-12, `bdc98fc5`).**
+> - `system_top_spec` takes `xbar=None`; the spec carries its own `dw`/`aw`/`idw`.
+> - `StreamNet.ext`: a net with an end outside the cut is a top AXIS port named for its net.
+> - `maxi_ext`: an `m_axi` bundle on no crossbar inside the DUT becomes a top AXI4 master `m<k>_axi`.
+> - An on-chip memory in the cut but on no crossbar is refused, not dropped.
+> - `discover()` returns zero or one bus and an optional host.  `elaborate_top` elaborates a no-bus top.
+> - Side finding: the direct-wired markov renders its credit link between the two sub-tops as ports
+>   (the packaging plan's open "direct wiring" case, rendered).
+>
+> **S3b + S3c built (2026-10-12).**
+> - **Recorders:** the stream sink and the memory model dump `out_bundle` / `dump_segs` in pysim too,
+>   in the C++ format, once a scenario has anchored them (`root`).
+> - **`HwSystem` contract:** `write_scenario(root)` (the host's by default), `recordings()` (derived
+>   from the participants outside the DUT that declare `out_bundle` / `dump_segs`), `clock()`.
+> - **DAG steps:**
+>   - `scenario` calls `sysm.write_scenario`;
+>   - with no host, `pysim` runs from a fresh scenario copy and gathers the recordings;
+>   - `system_xsi` runs the RTL with a fresh scenario copy as its `vectors/` directory and gathers
+>     the same;
+>   - `compare` checks a host's traces whole, a recording on its `words.bin` (RTL framing is
+>     whatever TLAST the DUT drives);
+>   - `system_rtl` makes no IP when there is no crossbar.
+> - **Harness:** `system_tb_spec(..., graph=)` answers every stream port and `m_axi` group leaving
+>   the top with the participant wired to it, resolved as `tb_top_spec` does: a shared `FlatMemory`
+>   behind both bundles.  With no host the main runs the scenario's `run.json` bound.  The ports
+>   header pins each external `m_axi` group's other-direction channels.
+> - **mem_copy** (`MemCopySystem`, `examples/mem_copy/mem_copy_system_build.py`) passed the whole flow
+>   on its first run.  csynth was up to date; the sink's and the memory's recordings are identical
+>   RTL against pysim; the golden holds on the RTL recordings, last completion at **2908** cycles,
+>   the single-kernel gate's own number.  New gates: `test_mem_copy_system_xsi.py` (2),
+>   `WANT_XSI_GATES` 176.  markov and mm_fir are byte-identical throughout.
+>
+> **The docs step, as far as it is true today (2026-10-12).**
+> - `flows/figures/kernel_cut.tex` / `.svg`: mem_copy as a system with no crossbar, in
+>   `system_cut.tex`'s palette.
+> - `concurrent_layers.md` "What an XSI simulation is made of": DUT / testbench first, the RTL top
+>   defined as the DUT's Verilog, the figure, and the `HwSystem` at both scales.  It says plainly
+>   that most single-kernel examples still use a composite testbench class.
+> - `concurrent_system.md`: "Two scales, one idea".
+> - The flow-steps Mermaid diagram is recoloured to the shared palette.
+>
+> Not yet rewritten: the flow-steps page's prose still teaches the "XSI simulation top" (the
+> composite testbench class).  That rewrite follows the examples' migration.
+>
+> **S3d analysed, not built: it needs decisions.**  rf_loopback is the simplest RF candidate (no
+> `rtl_module`), and it differs from mem_copy in two ways:
+> 1. **The RFDC spans the cut.**  Its model has an RTL-facing port *and* a behavioral edge (a C++
+>    channel between two testbench models).  `system_tb_spec` does not emit behavioral edges;
+>    `tb_top_spec` does, through `_discover_behavioral_edges` / `_emit_behavioral_edges`.  Porting
+>    those is mechanical.
+> 2. **Its pysim and RTL legitimately disagree.**  `test_rf_loopback_xsi.py` records that pysim
+>    cannot see sub-block sample loss ("the two backends disagree about loss and this records how").
+>    So "recordings identical, RTL against pysim" is the wrong gate for it.  A system needs a way to
+>    say which recordings are compared exactly and which only through an example check.  That is a
+>    design call (a per-recording policy on the participant, or an example-level compare hook).
    - `flows/concurrent_layers.md` rewritten around `HwSystem` at both scales, in DUT / testbench
      vocabulary.  "RTL top" becomes "the DUT's Verilog", and the "XSI simulation top" is retired.
    - A kernel-scale figure there: mem_copy as a system with no crossbar, in `system_cut.tex`'s

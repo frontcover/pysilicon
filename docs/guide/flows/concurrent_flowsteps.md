@@ -45,7 +45,22 @@ flowchart LR
   RT --> XSI["XSI simulation<br/>(xsim, cycle by cycle)"]
   HARN --> XSI
   XSI --> CHK["bit-exact output<br/>+ exact cycle count"]
+
+  classDef hls fill:#DCE9F7,stroke:#2C6FB5,color:#1a1a1a;
+  classDef rtl fill:#DFF0D8,stroke:#3C7A2E,color:#1a1a1a;
+  classDef ip  fill:#EADCF2,stroke:#7A4A9A,color:#1a1a1a;
+  classDef tb  fill:#F2E6D0,stroke:#9A6B1F,color:#1a1a1a;
+  classDef dut fill:#FFFFFF,stroke:#1F3B5C,stroke-width:2px,color:#1a1a1a;
+  class KM,HLS,KV hls;
+  class RM,HV rtl;
+  class IP ip;
+  class BM,HARN tb;
+  class RT dut;
 ```
+
+The colours are those of the [system picture](./concurrent_system.md#a-system-in-one-picture): blue
+is Vitis HLS (kernel modules, through csynth), green hand-written RTL, purple an interface realized
+as vendor IP, tan the testbench, and the outlined box the DUT's Verilog.
 
 In the [mem_copy example](../../examples/memcpy/) the XSI simulation top is `MemCopyTB`, and its
 modules fall into the three roles like this:
