@@ -75,7 +75,7 @@ Records go to the build's [platform](../calib/) (`--platform`), at the part and 
 csynth'd for.  A build **writes** its work-tier platform and a lookup **reads** that first and then the
 published library of the same name, so the next estimate sees what the build just filed.
 
-## The system synthesis
+## The system synthesis {#the-system-synthesis}
 
 `python markov_build.py --through system_synth --platform <name>` synthesizes markov's top out of context
 (xc7z020, 10 ns; 116 s of Vivado 2025.1) and attributes every inventory instance:

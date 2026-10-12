@@ -281,6 +281,13 @@ cut, then `SystemTopSpec` as the result of the walk.  A guide page on writing a 
 > the sentence needs your call before it goes into the guide.
 ## Open
 
+- **Two mechanisms for one idea (found 2026-10-12, writing the flows docs).**  A single-kernel XSI
+  testbench is a composite `FreeRunMod` (`MemCopyTB`, `potential_targets = {sequential_xsi_tb}`),
+  whose children the cut splits into the RTL top and the BFMs.  A system is a `System` whose `dut()`
+  is a tree.  They are the same idea at two scales, and a single-kernel testbench is a system with no
+  crossbar: exactly S3's missing gate.  Folding the first into the second would leave the flows guide
+  one mechanism to teach.  `flows/concurrent_system.md` ("Two scales, two mechanisms today")
+  describes both as they are and points here.
 - **Calibration keys.**  `HwModule` keeps its RTL registries out of the dataclass fields so that
   calibration keys stay stable (`hw/hw_module.py:368-375`).  Re-parenting kernels under device
   composites may change paths or structure signatures, and with them the record-store keys.  S1 must
