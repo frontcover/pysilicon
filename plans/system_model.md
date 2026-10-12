@@ -68,13 +68,13 @@ believes or that the system flows have shown.
 
 ### D1. A `System` base class that states the contract
 
-`waveflow/hw/system.py`:
+`waveflow/simulation/system.py`:
 
 ```python
-class System:
+class System(ABC):
     """A design and its environment: the element graph, simulated by run(), cut per build."""
     sim: Simulation
-    def dut(self) -> HwModule: ...              # the default DUT: the root of the synthesizable tree
+    def dut(self) -> HwModule: ...              # the default DUT: the root of the synthesizable tree (S1; a list in S0)
     def run(self) -> Any: ...                   # simulate the whole graph in pysim
     def elements(self) -> Iterator[SimObj]: ... # every module and interface, by walking the graph
 ```
@@ -167,6 +167,14 @@ Verilog can stay byte-identical, asserts that it does.
 from it and implement `dut()` (returning today's cut as a flat composite, if that is the smaller step)
 and `run()`.  `discover()` delegates to the system.  Gate: no behaviour change; generated Verilog
 byte-identical; a test that a class missing `dut()` fails with a message naming the contract.
+
+> **Built (2026-10-11, branch `system-model-s0`).**  `waveflow/simulation/system.py`, not `hw/`: a
+> system owns the `Simulation` and holds software as well as hardware.  `System` is an ABC with
+> abstract `dut()` and `run()`, and `elements()` over the graph.  In S0 `dut()` returns the cut as a
+> **list** (markov `[gen, chain, mem]`, mm_fir `[fir]`).  A flat composite would re-parent the
+> modules, which is S1's calibration-key question, so the tree root waits for S1.  `discover()`
+> refuses a non-`System` by naming the contract and takes the cut from `dut()`.  It still finds the
+> crossbar and the host by type, until S3/S4.
 
 **S1 -- devices as composites.**  `build_mm_device` returns a composite `HwModule`; `MmCreditStreamIF`
 places its writers in the devices at `bind`.  The DUT root holds the devices, the memory and the

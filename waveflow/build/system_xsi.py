@@ -56,28 +56,27 @@ class XsiRun:
 
 
 def discover(sysm):
-    """``(xbar, host, inside)`` of a system object: its one crossbar, its one software host, and the
-    default cut -- each kernel whose device is a crossbar slave, and each memory on the crossbar."""
+    """``(xbar, host, inside)`` of a :class:`~waveflow.simulation.system.System`: its one crossbar,
+    its one software host, and its default cut (:meth:`~waveflow.simulation.system.System.dut`).
+
+    The cut is the system's own declaration.  The crossbar and the host are still found by type
+    among the graph's elements; ``plans/system_model.md`` S3/S4 replace that with a walk that asks
+    each element how it is realized."""
     from waveflow.hw.memif import AXIMMCrossBarIF
-    from waveflow.hw.memory import MemoryMod
+    from waveflow.simulation.system import System
     from waveflow.sw import SwHost
 
-    objs = list(getattr(sysm.sim, "_sim_objs", []))
+    if not isinstance(sysm, System):
+        raise LoweringError(f"{type(sysm).__name__} is not a waveflow System: a system flow takes a "
+                            f"subclass of waveflow.simulation.system.System, which builds its graph on "
+                            f"self.sim and implements dut() (the default cut) and run()")
+    objs = sysm.elements()
     xbars = [o for o in objs if isinstance(o, AXIMMCrossBarIF)]
     hosts = [o for o in objs if isinstance(o, SwHost)]
     if len(xbars) != 1 or len(hosts) != 1:
         raise LoweringError(f"{type(sysm).__name__}: a bus system has one crossbar and one software host; "
                             f"found {len(xbars)} crossbar(s) and {len(hosts)} host(s)")
-    xbar, host = xbars[0], hosts[0]
-    inside: list = []
-    for k in range(int(xbar.nports_slave)):
-        ep = xbar.endpoints.get(f"slave_{k}")
-        mod = getattr(ep, "comp", None)
-        dev = getattr(mod, "mm_device", None)
-        target = dev.kernel if dev is not None else (mod if isinstance(mod, MemoryMod) else None)
-        if target is not None and all(target is not m for m in inside):
-            inside.append(target)
-    return xbar, host, inside
+    return xbars[0], hosts[0], list(sysm.dut())
 
 
 def _rtl_dir(root: Path, module: str) -> Path:

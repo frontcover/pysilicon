@@ -64,6 +64,7 @@ from waveflow.hw.mm_host import (
     MemSlaveLayout,
 )
 from waveflow.simulation.simulation import Simulation
+from waveflow.simulation.system import System
 from waveflow.sw import SwHost
 
 DW = 64
@@ -527,7 +528,7 @@ class FirHost(SwHost):
 
 
 @dataclass
-class MmFirSystem:
+class MmFirSystem(System):
     """Everything wired: the host, the kernel, and between them either the bus or nothing.
 
     ``link="mm"`` (default): host -> crossbar -> {register bank, queue in, queue out} <-> kernel,
@@ -613,6 +614,10 @@ class MmFirSystem:
         self.host.qout = mm.stream_slave("qout", irq=self.host.irq["qout"])
         self.host.qresp = mm.stream_slave("qresp", irq=self.host.irq["qresp"])
         self.host.status = mm.status("regs")
+
+    def dut(self) -> list:
+        """The default cut: the FIR kernel, with its device."""
+        return [self.fir]
 
     def run(self) -> np.ndarray:
         self.sim.run_sim(until=self.host.done)
