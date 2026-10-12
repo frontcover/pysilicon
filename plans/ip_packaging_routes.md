@@ -1,0 +1,321 @@
+# Plan: two routes from a system to a bitstream -- one global synthesis, or an IP per component
+
+**Status:** discussion, 2026-10-12.  Nothing built.  Written after `plans/system_resources.md` (merged in
+PR #250) measured markov's system top in Vivado, and before `plans/board_packaging.md` (scoped, not
+started) reaches a multi-kernel system.  Its job is to put the two routes side by side, with what has
+been measured and what has only been estimated, so the choice can be made on evidence.  The user's
+stated preference is the per-IP route (B); the first stage below measures what it costs before anything
+is committed to.
+
+**Revised 2026-10-12:** route B's granularity is decided -- **one IP per device**, four for markov
+(see [Granularity: one IP per device](#granularity-one-ip-per-device)) -- and the plan ends with the
+markov docs comparing both routes on measured numbers.
+
+## The question
+
+A *system* -- several kernels behind memory-mapped adaptors, AMD's crossbar, an on-chip memory
+(`examples/markov`, `examples/mm_fir`) -- is today one generated Verilog top (`system_top.py`).  XSI
+simulates it, and `system_synth` synthesizes it in one Vivado run.  To reach the board, it must become
+something a Vivado block design can hold.  There are two ways to do that, and they differ in what is an
+IP and in how synthesis runs.
+
+| | **Route A -- one IP per system** | **Route B -- one IP per component** |
+|---|---|---|
+| what is packaged | the generated system top, whole (kernels, leaves, crossbar inside) | each pysim object: each kernel, each adaptor, each routed channel, the memory; the crossbar is vendor IP already |
+| what the block design holds | PS + SmartConnect + **one** system cell | PS + SmartConnect + the components, wired bus to bus; a composite is a hierarchical IP |
+| who wires the components | `system_top.py` (Verilog, exists) | a block-design generator, from the same pysim graph (does not exist) |
+| synthesis | one run over everything (Vivado's "global") | one out-of-context run per IP, then link (Vivado's default for a block design) |
+| matches | `plans/board_packaging.md` §9.2 option (a), applied to a system | §9.2 option (b), generalized; no plan covers it yet |
+
+**Packaging and synthesis mode are independent choices.**  A block design of packaged IPs can still be
+synthesized globally (the block design's synthesis option), and a generated top can be synthesized per
+instance (`ooc_link`, below).  The routes are named by their natural pairing, but each cost below is
+labelled with which of the two choices causes it.
+
+## What has been measured (markov, xc7z020, 10 ns, Vivado 2025.1)
+
+From PR #250 (`plans/system_resources.md`, Results):
+
+- **One global synthesis** of the system top: 116 s of `synth_design` (plus Vivado start-up); total
+  **6,287 LUT / 7,187 FF / 4 BRAM18**.
+- **Each leaf out of context**, `synth_design` only: `axi_slave_front` 34-37 s, `mm_bram_port` 34 s,
+  `mm_queue_out` 36 s, `mm_queue_in` 48-49 s, `mm_credit_in` 54 s, `bram_t2p` (512 x 64, now 2 LUT +
+  one block RAM) 58 s, `mm_sync_fifo` 60 s.  A small IP's synthesis time is **fixed overhead**, not
+  design size: the 2-LUT memory costs as much as anything else.
+- **The parts measured separately, summed** ("composed"): 11,938 LUT / 8,088 FF / 6 BRAM18 against the
+  6,287 / 7,187 / 4 measured -- +90% LUT.  But the kernels in that sum are csynth *estimates*, not
+  Vivado runs, so this is **not** the cost of route B; see the first open item.
+- **Context effects that were measured:** the crossbar is 1,292 LUT out of context and 849 in markov's
+  global synthesis; the memory needs two RAMB36 out of context (both ports live) and one in markov
+  (port B tied idle).
+- **`KEEP_HIERARCHY` on every instance** (a global synthesis that may not optimize across instances):
+  7,829 LUT / 9,314 FF, **+25% LUT / +30% FF**.  This is an upper bound on what losing cross-boundary
+  optimization can cost, not the cost of route B: per-IP synthesis plus link-time `opt_design` recovers
+  part of it.
+
+Not measured: export / packaging times, Vivado start-up per run, a real per-IP link, a block design.
+
+## Route A -- one IP per system
+
+**What it is.**  `ipx::package_project` over the system top's sources -- the top, the leaves it uses
+(`SystemTopSpec.leaf_sources`), each kernel's csynth Verilog, the crossbar's `.xci` -- yielding one IP
+whose boundary is the host's AXI4 port (`s0_axi`) and the interrupt lines.  The block design is
+`board_packaging.md`'s S1-sized one: PS, SmartConnect, this cell.
+
+**Advantages**
+
+- **Exists, nearly.**  The generated top, its inventory and its synthesis are built and gated; what is
+  missing is one packaging step and a block-design template (`board_packaging.md` §4.4: by hand, once).
+- **Best area and timing.**  Vivado optimizes across every instance boundary: tied-off ports prune
+  (markov's memory: one RAMB36, not two), unused outputs vanish, logic is shared.
+- **Fastest cold build.**  One synthesis: ~2.5 min wall clock for markov.
+- **What ships is what XSI simulated.**  One Verilog top serves both.
+- **The resource number is already measured.**  `system_synth` is this route's synthesis.
+
+**Costs**
+
+- **The total is not the sum of the parts.**  Each instance's in-context number is a share of the
+  design: Vivado moved a read mux between instances and dissolved two of them (priced since PR #250 by
+  their cell names).  Prediction before synthesis therefore needs a model of the cross-boundary effects
+  -- the open +90% gap.  *(Caused by global synthesis, not by packaging.)*
+- **Every change re-synthesizes everything.**  A one-line edit to one kernel costs the whole system's
+  synthesis.  Fine at markov's size, and it grows with the system.  *(Global synthesis.)*
+- **No component on the board alone.**  The only packaged unit is the whole system; debugging one
+  kernel on hardware means building a second design by hand.  *(Packaging granularity.)*
+- **A system that grows past one designer's block design** has nowhere to go: the one cell is the
+  whole design.
+
+## Route B -- one IP per component
+
+**What it is.**  Each pysim object becomes an IP: a kernel through `export_design -format ip_catalog`
+(no `-flow`, `board_packaging.md` §5.6); hand-written leaves through `ipx::package_project`, grouped as
+the inventory already groups them -- one IP per owner (an adaptor = its front + its views; a routed
+channel = its writers + its FIFO; the memory = window + RAM); the crossbar as the vendor IP it already
+is.  A composite (a kernel with its device) is a hierarchical IP of those.  A generator emits the block
+design from the pysim graph, as `system_top.py` emits Verilog today.  For markov: about seven cells.  *(Revised: one IP per device instead -- four cells for markov; see
+[Granularity: one IP per device](#granularity-one-ip-per-device).)*
+
+**Advantages** (the user's three, checked)
+
+- **The total is (close to) the sum of the parts.**  Each IP is synthesized alone, so its number is its
+  own and reusable; the design total is the sum plus link-time cleanup (`opt_design` removing unloaded
+  or constant logic) plus the interconnect cells the block design adds.  The composed estimate stops
+  being an estimate.  *(Per-IP synthesis.)*
+- **No top-level re-synthesis.**  An unchanged IP reuses its checkpoint (Vivado's IP cache, or this
+  repo's out-of-context library, keyed by the same identity: sources + parameters).  A change
+  re-synthesizes the IPs it touches.  Link, place and route still run over the whole design each time,
+  and for a bitstream they are usually the larger share.  *(Per-IP synthesis.)*
+- **Each component can go on the board alone**, in a small test block design -- if its ports are ones
+  the board can drive (AXI-Lite from the PS, AXI-Stream through a DMA).  *(Packaging.)*
+- **Design-space exploration pays per configuration, once.**  A sweep that touches one kernel
+  synthesizes that kernel per point, not the system.
+
+**Costs**
+
+- **Lost cross-boundary optimization.**  Bounded above by the +25% LUT of `KEEP_HIERARCHY`; the real
+  per-IP figure, with link-time `opt_design`, is unmeasured.  Estimate: a few hundred LUT on markov
+  (~5%), plus whatever tie-offs fail to prune.  *(Per-IP synthesis.)*
+- **Tie-offs must become parameters.**  Out of context, markov's memory cannot know port B is idle, so it
+  takes two RAMB36.  The fix is to say so in the IP's parameters (`bram_t2p` with a `PORT_B_USED`
+  generic), so each IP specializes inside its own synthesis -- which also puts the tie-off in its
+  identity, the open question `system_resources.md` left.  Recovers pruning; does not recover
+  cross-boundary sharing or LUT packing.
+- **Every link must be a declared interface.**  Inside a Verilog top any wire works; between IPs each
+  link needs a bus definition.  Streams map to AXI-Stream; the credit-stream pairs, BRAM ports,
+  interrupt lines and constant inputs (a bus writer's `target`) need interface definitions or IP
+  parameters.  Per interface *type*, once -- but real work.
+- **A block-design generator.**  `board_packaging.md` §4.4 defers one deliberately ("build the BD once
+  by hand") for its five single-kernel designs; a seven-cell system is past what is reasonable by hand
+  and past what a template survives.  The generator walks the same graph `system_top_spec` walks.
+- **Two realizations of one graph.**  XSI runs the generated Verilog top; the board runs the block
+  design.  Both must come from one spec (as the inventory and the renderer do today), or they drift.
+- **Cold-build time.**  Packaging itself is cheap (estimated: under a minute for a kernel's
+  `export_design`; seconds per `ipx::package_project` within one Vivado session, ~20-40 s per session
+  start).  The cost is **one out-of-context synthesis per IP**, each ~1 min of mostly fixed overhead:
+
+  | markov, estimated from the leaf timings above | cold build | after a one-block change |
+  |---|---|---|
+  | global (route A) | ~2.5 min | ~2.5 min |
+  | per-IP, sequential, ~15 runs (every leaf its own IP) | ~15-20 min | ~1-1.5 min |
+  | per-IP, ~7 runs (one IP per pysim object) | ~8-10 min | ~1-1.5 min |
+  | per-IP, 4 parallel jobs | ~3-5 min | ~1-1.5 min |
+  | **per device, 4 IPs** (chosen; crossbar ~4 min once per configuration) | ~7-8 min sequential, ~4-5 parallel | ~1-1.5 min |
+
+  Granularity is the main lever, because the overhead is per run.  *(Per-IP synthesis.)*  All rows are
+  estimates; Stage 1 measures the chosen one.
+- **Caches to keep out of git and invalidate correctly.**  Checkpoints and the IP cache are large,
+  path-dependent and Vivado-version-specific (`board_packaging.md` §11 already bars `.runs/`, `.cache/`).
+  Invalidation is solved by keying on identity, as the out-of-context library does.
+
+## Granularity: one IP per device
+
+**Decided (2026-10-12):** route B packages one IP per **device**, not one per pysim object.  A device
+is what `build_mm_device` already assembles around a kernel, plus the bus masters that kernel needs:
+
+- **a device IP** = the kernel (its csynth Verilog) + its memory-mapped views + its AXI front + **the
+  bus writers that act for that kernel**;
+- **the memory** = its window + the RAM, one IP;
+- **the crossbar** = AMD's IP, configured, as it already is.
+
+**Where a bus writer goes.**  A routed credit link (`MmCreditStreamIF`) has two writers, and each goes
+in the device of the kernel it acts for -- not with the crossbar:
+
+- the **forward writer** carries the sender's data into the receiver's queue: it is the *sender's* bus
+  master, so it joins the sender's device, beside the sender's `CreditIn` view;
+- the **credit writer** returns credit into the sender's `CreditIn`: it is the *receiver's* bus master,
+  so it joins the receiver's device.
+
+Bundling the writers with the crossbar was considered and rejected.  The crossbar is the most expensive
+IP to synthesize (~4 min out of context) and the writers change whenever a link's parameters change
+(width, credit window, depth) -- exactly the knobs a design-space search sweeps, so every link change
+would pay the crossbar's synthesis.  And in a block design the interconnect may be Vivado's own
+(SmartConnect), which cannot absorb custom logic.
+
+**markov at this granularity: four IPs.**
+
+| IP | contents | boundary |
+|---|---|---|
+| generator device | `MarkovGen` + `qcmd` (queue in) + `u_crd` (credit in) + the front + the forward writer | AXI-MM slave, AXI-MM master, interrupts |
+| chain device | `MarkovChain` (its memory writer included) + `qu` (queue in) + `qresp` (queue out) + the front + the credit writer | AXI-MM slave, AXI-MM master(s), interrupts |
+| memory | the window + `bram_t2p` | AXI-MM slave |
+| crossbar | `axi_crossbar` | AXI-MM |
+
+**Why this grouping.**
+
+- **Every link between IPs is standard AXI-MM or an interrupt line.**  The kernel-to-view streams, the
+  credit-stream pairs and the FIFOs -- the links this plan's Route B costs listed as needing custom
+  interface definitions -- all end up *inside* a device.  For the memory-mapped wiring, no custom bus
+  definitions are needed at all.
+- **Tie-offs inside a device prune inside its own synthesis** (an unused view, an idle port).  The
+  memory is still its own IP, so its port-B tie-off still needs Stage 2's parameter.
+- **It is the unit everything else wants.**  The host sees a device through its AXI port, so a device's
+  unit harness (verification and timing) drives it the same way; it is what goes on the board alone;
+  and it is the natural unit for a sub-agent to own (`plans/multi_agent_flows.md`).  A sending
+  kernel's whole side of a link -- its stream, the forward writer, its credit counter -- is in one IP
+  and is tested end to end there.
+- **Four fixed overheads instead of about seven**, and the crossbar's is paid once per configuration.
+
+**What it gives up.**  Reuse below the device: two identical adaptors in two devices synthesize twice.
+And a per-instance split inside a device (kernel vs adaptor) is no longer a separate synthesis -- it is
+recovered within the device's run by the cell-name census `system_resources.md` already uses.
+
+**Identity.**  A device IP's identity is the digest of everything in it: the kernel's csynth Verilog,
+each leaf's source and parameters, each writer's parameters.  A kernel's csynth stays cached under the
+kernel's own identity, so a change to a view's depth re-runs the device's out-of-context synthesis but
+not the kernel's csynth.
+
+**Open: the direct wiring.**  markov also runs with the two kernels joined directly (`link="direct"`): a
+`CreditStreamIF` between them, no bus.  At device granularity that link crosses two IPs and needs a
+credit-stream interface definition -- or the two kernels form one IP when joined directly.  Decide when
+a direct-wired system is packaged; the memory-mapped wiring does not need it.
+
+## Choosing per purpose, not once
+
+Because packaging and synthesis mode are independent, a design packaged as route B can be synthesized
+either way:
+
+| purpose | packaging | synthesis |
+|---|---|---|
+| final bitstream | per component (B) | global -- best area and timing, fastest cold build |
+| design-space exploration, incremental work | per component (B) | per IP -- each configuration paid once |
+| debugging one component on the board | that component's IP | its own test block design |
+| first light on the board, soonest | one per system (A) | global |
+
+So the routes need not be exclusive: A is the shortest path to a bitstream for a system that exists
+today; B is the structure that makes area predictable and components testable, and it can still be
+synthesized globally for the shipped bitstream.
+
+## Stages
+
+Each stage is evidence for the next; stop at any rung if the numbers say so.
+
+**Stage 0 -- devices from the inventory.**  A grouping derived, not hand-listed: from
+`SystemTopSpec.instances()` and each instance's `owner`, map every RTL instance to its device, the
+memory or the crossbar, by the rules in [Granularity](#granularity-one-ip-per-device) (a bus writer to
+the kernel it acts for).  Then render each device as a **sub-top** of the system top, so route A's
+global synthesis, XSI and route B's per-device synthesis all read the same device modules -- one
+realization of the graph, not two.  Gates: markov's fifteen instances fall into the four groups, each
+exactly once (and mm_fir's, both topologies); the system top re-rendered with device sub-tops runs
+markov's XSI gate unchanged (1870 cycles, traces identical) and its global synthesis total moves by no
+more than noise.
+
+**Stage 1 -- measure the per-device cost, no packaging.**  An `ooc_link` mode for `system_synth`: each
+device sub-top, the memory and the crossbar synthesized out of context (the leaf library already does
+the leaves; add the kernels' csynth Verilog), the checkpoints linked into the system top,
+`opt_design`, report.  Each out-of-context result files under its identity, so a repeat is a cache hit.
+On markov, record, from the runs' own timing events (`waveflow.events`):
+
+- area: the `ooc_link` total, the sum of the four parts, the link term, and the gap to global;
+- wall clock: cold, sequential and parallel; after a change to one device (a view depth); after a change
+  to one kernel's source (its csynth plus its device);
+- per-IP synthesis times, and each kernel's out-of-context Vivado number -- which splits the open +90%
+  into csynth's estimate error and context.
+
+Gate: the `ooc_link` total equals the sum of its parts plus a link term that is measured, not assumed;
+unchanged devices show no synthesis span in a one-device rebuild.
+
+**Stage 2 -- tie-offs as parameters.**  Add parameters for the tie-offs the inventory can see
+(`bram_t2p` port B, unused crossbar slots), carried in each leaf's identity.  Gate: markov's memory is
+one RAMB36 out of context; the composed BRAM equals the measured.
+
+**Stage 3 -- package.**  `ipx::package_project` per device sub-top (its kernel's csynth Verilog and its
+leaves' sources), the memory as one IP, the crossbar's `.xci` as is.  At device granularity the
+memory-mapped wiring needs no custom interface definitions (every inter-IP link is AXI-MM or an
+interrupt); the direct wiring's credit stream is the open case.  Gate: rung 3 of `board_packaging.md`
+(VLNV and ports) for each of markov's four IPs.
+
+**Stage 4 -- the block-design generator.**  From the system spec, `create_bd_cell` /
+`connect_bd_intf_net` for each IP and link; `validate_bd_design` (rung 4) as the gate.  The XSI top and
+the block design rendered from one spec.
+
+**Stage 5 -- choose the default.**  With stages 1-4 measured, decide which synthesis mode a system's
+bitstream uses by default, and record why.
+
+**Stage 6 -- the markov docs: both routes, measured.**  `docs/examples/markov/synth.md` already shows
+route A (csynth of the four tops, the crossbar and the top, the system's resources).  Add the
+comparison, on markov's own numbers from Stages 1-2:
+
+- the four-IP grouping, as a table and a figure, and why each bus writer sits where it does;
+- resources: global (A) against per-device (B) -- the sum of parts, the link term, the gap, per
+  resource -- and what the gap is (cross-boundary optimization and tie-offs, named);
+- synthesis time: cold, and after a one-device change, for both routes;
+- what each route is for (the [purpose table](#choosing-per-purpose-not-once)).
+
+Conditions, so the page stays true:
+
+- **reproducible:** both routes run from `markov_build.py` (a `--route global|per_device` option on the
+  synthesis steps), and every number on the page comes from a run's timing events and synthesis
+  records, never typed in;
+- **the part named:** the numbers are for the stand-in part (xc7z020), not the board's; say so;
+- **one page, not a new chapter:** a section of `synth.md` (or one sibling page), linked from
+  markov's build page, so markov's reading order is unchanged.
+
+Gate: the page's numbers regenerate from the build (a docs figure step, as markov's figures do), and
+the docs snippet harness passes.
+
+## Open
+
+- **The composed-vs-measured gap** (+90% LUT on markov): Stage 1 separates its two causes.
+- **Granularity** -- decided: one IP per device
+  ([above](#granularity-one-ip-per-device)).  Still open within it: the direct wiring's credit stream
+  between devices.
+- **The part.**  Everything above is on xc7z020 (what the kernels are csynth'd for); the board is the
+  RFSoC 4x2 (`xczu48dr`), which this machine's Vivado cannot synthesize.  `board_packaging.md` S0's
+  `Board` should supply the part to both plans; measurements use a stand-in where the license requires
+  one (`reference-vivado-license-no-rfsoc-synth`).
+- **Post-route numbers.**  `board_packaging.md`'s bitstream rung produces a routed design; running
+  `system_synth`'s per-instance attribution on it would file post-route records at no extra synthesis.
+
+## Relationship to other plans
+
+- `plans/system_resources.md` -- the inventory, the out-of-context library, `system_synth`: everything
+  Stage 1 builds on, and the measurements quoted here.
+- `plans/board_packaging.md` -- the board flow for single kernels.  Its §9.2 is this plan's question in
+  miniature (option (a) = route A, option (b) = route B); its §4.4 deferral of a block-design generator
+  is what Stage 4 revisits for systems.  Its §9.4 claimed `bram_t2p.v` infers block RAM; that was
+  false until PR #250.
+- `plans/rfsoc_4x2_bringup.md` -- the board and the clean-clone acceptance test any bitstream must pass.
+- `plans/incremental_xsi.md` -- the device sub-tops of Stage 0 must keep XSI's content stamps valid; a
+  device's unit harness runs on an `XsiSnapshot` of its sub-top.
+- `plans/multi_agent_flows.md` -- the device as the unit a sub-agent owns: its harness, its IP, its
+  calibration.
