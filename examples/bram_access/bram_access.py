@@ -88,6 +88,7 @@ from waveflow.hw.clock import Clock
 from waveflow.hw.codegen_targets import COMPOSITE_KERNEL, SEQUENTIAL_XSI_TB
 from waveflow.hw.hw_freerun import FreeRunMod
 from waveflow.hw.hw_module import HwParam
+from waveflow.hw.hw_system import DutTop, HwSystem
 from waveflow.hw.interface import StreamIF, StreamIFMaster, StreamIFSlave
 from waveflow.hw.mem_stream import KernelTask
 from waveflow.simulation.simobj import ProcessGen
@@ -1084,6 +1085,61 @@ def run_pysim(root=None, sc: Scenario | None = None, *, bitwidth: int = WORD_BW,
             drv.root = root
         tb.sim.run_sim()
     return tb
+
+
+@dataclass
+class BramAccessSystem(HwSystem):
+    """bram_access as a **system** (``plans/system_model.md`` S3e): the same :class:`BramAccessTB`
+    graph, the cut stated as a DUT tree -- :class:`BramAccess` alone, its memory inside it.
+
+    The memory is hand-written RTL beside the kernel (``add_rtl_mod``), so the system top
+    instantiates the DUT as its **wrapper** -- the kernel and ``bram_t2p`` joined -- whose ports are
+    the six AXI-Stream ones facing the three drivers and three sinks.  The scenario is
+    :func:`write_scenario`'s plus the run's bound (``vectors/run.json``), every driver and sink
+    anchored at the root so pysim records what the RTL records."""
+
+    n_cycles: int = XSI_N_CYCLES
+
+    def __post_init__(self) -> None:
+        from waveflow.simulation.simulation import Simulation
+
+        self.tb = BramAccessTB(name="xsi_tb", sim=Simulation(), n_cycles=int(self.n_cycles))
+        self.sim = self.tb.sim
+        self.clk = self.tb.clk
+        #: The width of the top's stream ports: there is no crossbar to take it from.
+        self.data_width = int(self.tb.bitwidth)
+        self.dut_top = DutTop.of("bram_access_dut", self.sim, comps=[self.tb.dut])
+        self.scenario: Scenario | None = None
+        self._root: Path | None = None
+
+    def dut(self) -> DutTop:
+        """The default DUT: the kernel and its memory, as one wrapper."""
+        return self.dut_top
+
+    def write_scenario(self, root) -> None:
+        from waveflow.utils.burst_io import write_run_params
+
+        root = Path(root)
+        self.scenario = write_scenario(root)
+        write_run_params(root / "vectors", n_cycles=int(self.n_cycles))
+        tb = self.tb
+        for o in (tb.cmd_w_drv, tb.data_w_drv, tb.cmd_r_drv, tb.resp_w_snk, tb.data_r_snk,
+                  tb.resp_r_snk):
+            o.root = root
+        self._root = root
+
+    def run(self) -> BramAccessTB:
+        """Run pysim and apply the acceptance check to what the sinks captured."""
+        import tempfile
+
+        if self._root is None:
+            with tempfile.TemporaryDirectory() as tmp:
+                self.write_scenario(tmp)
+                self.sim.run_sim()
+        else:
+            self.sim.run_sim()
+        check_outputs(*captured(self.tb), sc=self.scenario, where="pysim: ")
+        return self.tb
 
 
 def captured(tb: BramAccessTB) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
