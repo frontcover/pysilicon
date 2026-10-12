@@ -3,6 +3,7 @@ title: XSI System Simulation
 parent: Build System
 nav_order: 6.5
 audience: python
+api: [system_top_spec, SystemTopSpec, SubTop, RtlInstance, render_system_top, add_system_steps, run_system_xsi]
 summary: "Simulating a whole memory-mapped system at RTL -- several csynth'd kernels behind their adaptors, AMD's crossbar, an on-chip memory, and a host -- from the pysim system object, with nothing restated: add_system_steps(dag, sysm) puts csynth (one step per HLS top, fresh while its source stamp matches; build or check), the crossbar IP and the Verilog top (system_rtl), the scenario, pysim, the RTL run and the trace comparison on a BuildDag, and run_system_xsi(sysm) is the same as one call. It walks the graph to the Verilog top (crossbar slots, adaptors, stream nets, credit-link writers, interrupt outputs, tie-offs), generates the harness around the host's C++ twin (its threads on generated endpoints), runs it, and checks the host against pysim: both run one scenario file, every host endpoint records what crossed it, and the traces must be byte-identical; the cycle count is an exact gate of its own. Worked on mm_fir (618 / 611) and markov (1870)."
 ---
 
@@ -63,9 +64,58 @@ The **tie-off rules** live once, in [`system_top.py`](../../../waveflow/build/sy
 [why `offset=off`](../comp_codegen/freerunning_composite.md#how-a-pointer-reaches-a-task)); an `m_axi` pin
 the crossbar lacks tied low or left open; a Vitis master's one-bit IDs against the crossbar's wider ones;
 a stream input nothing drives (`TLAST` low, `TKEEP`/`TSTRB` all ones); padded crossbar slots answering
-nothing. The spec is answerable before it is rendered — `spec.si`, `spec.mi`, `spec.nets`,
-`spec.irqs`, `spec.modules` (the csynth'd modules whose RTL a workspace compiles), `spec.subs` (the
-devices, below).
+nothing.
+
+### The spec: `SystemTopSpec` {#the-spec}
+
+`system_top_spec` does not return Verilog. It returns a **`SystemTopSpec`**, a frozen dataclass that
+describes the RTL top the system becomes. The spec is one of three layers, each derived from the one
+before:
+
+| layer | what it is | markov's |
+|---|---|---|
+| the pysim system | the Python object you write and simulate: kernels, interfaces, crossbar, host | `MarkovSystem` |
+| **the spec** | the RTL top as data, walked from the system and cut at `inside` | `SystemTopSpec`, top `markov_top` |
+| the Verilog | text rendered from the spec | `markov_top.v` |
+
+The spec can be queried **before anything is rendered or built**:
+
+| field / method | answers |
+|---|---|
+| `kernels` | each csynth'd module in the top (`KernelRtl`): its module name, instance, ports (from the same `TopSpec` its csynth top was built from), and the pysim module it realizes |
+| `modules` | the csynth'd modules, each once: whose RTL a workspace compiles |
+| `si`, `host_axi` | each crossbar master slot. A master outside the cut (the host) is a top port `s<k>_axi`; one inside is a wire `si<k>_axi` |
+| `mi` | each crossbar slave slot (`MiSlot`): a view, an adaptor's views, the memory, or a padded stub |
+| `nets` | each stream link (`StreamNet`): its FIFO depth, the side-channel facts its tie-offs follow, and which sub-top drives and reads it |
+| `irqs` | the interrupt lines leaving the cut, as top outputs `irq_<view>` |
+| `subs` | the [devices and the memory](#devices), each a sub-top (`SubTop`) |
+| `instances()` | the inventory: every RTL instance (`RtlInstance`) with its module, parameters, sources, identity, owning pysim object, sub-top and path |
+| `leaf_sources()` | the hand-written leaves the top uses, each once: its compile list |
+| `probe_expr(p)`, `probe_home(p)` | a timing probe named by a pysim endpoint, resolved to a Verilog expression and to the module it is computed in |
+
+```python
+from waveflow.build.system_top import system_top_spec
+
+spec = system_top_spec(sysm.xbar, [sysm.gen, sysm.chain, sysm.mem], top="markov_top")
+spec.modules        # ('markov_gen', 'markov_chain', 'mm_queue_writer_64_128', 'mm_credit_writer_64')
+[s.inst for s in spec.subs]                  # ['u_gen_sub', 'u_chain_sub', 'u_mem_sub']
+len(spec.instances())                        # 15
+```
+
+**Every consumer reads the same spec.** None of them re-walks the graph or parses the Verilog:
+
+| consumer | reads the spec for |
+|---|---|
+| `render_system_top` | the Verilog itself |
+| `system_tb_spec`, `render_system_tb` | the XSI harness: which host model binds to which top port |
+| `system_synth` ([Systems](../resource/systems.md)) | joining Vivado's per-instance report to the inventory, by path |
+| `estimate_system` | pricing each instance from the record store |
+| `measure_instances` (`rtl_ooc`) | the leaves to synthesize out of context |
+
+So the inventory and the rendered top cannot disagree (a test checks that every inventory instance is
+rendered exactly once, in the module its `sub` names). On a build DAG, the `system_rtl` step holds the
+spec as `.spec`, and the later steps read it from there. A single composite kernel has the same
+arrangement one level down: `composite_top_spec` returns its `TopSpec`.
 
 ### Devices: the top's sub-tops {#devices}
 
