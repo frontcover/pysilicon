@@ -116,6 +116,19 @@ top, computed in the module that holds its net. `render_verilog` is the method f
 `render_system_top(spec, probes)`. On a build DAG the `system_top` step writes this text to
 `<work>/<top>.v` ([system_rtl](#system-rtl)).
 
+One device (or the memory) can also be rendered **alone**:
+
+```python
+verilog = spec.render_sub_verilog("gen")         # markov_top_gen, as a file of its own
+leaves, kernels = spec.sources_of("gen")         # its compile list: leaf sources, csynth'd modules
+```
+
+The module is exactly the one the whole file holds for it. Its ports are AXI4 groups, interrupt lines
+and probes, so it needs nothing around it. `elaborate_sub_top(spec, "gen", root=..., work_dir=...)`
+(`waveflow/build/system_xsi.py`) compiles and elaborates it with only its own sources, and an XSI gate
+runs that for every markov and mm_fir sub-top. A per-device synthesis or an IP is built from this
+unit.
+
 ### Reading it
 
 | field / method | answers |

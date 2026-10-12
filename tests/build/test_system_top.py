@@ -381,3 +381,26 @@ def test_each_interface_states_its_rtl_realization():
     # The walk asks; it no longer configures the crossbar or applies the depth rule itself.
     src = inspect.getsource(system_top.system_top_spec)
     assert "from_crossbar" not in src and "DEFAULT_STREAM_DEPTH" not in src
+
+
+# ---------------------------------------------------------------------------------------------
+# A sub-top alone (plans/system_model.md S5): the unit a per-device synthesis or IP is built from.
+# ---------------------------------------------------------------------------------------------
+
+def test_a_sub_top_renders_alone_with_its_own_compile_list():
+    """Each sub-top's standalone file is exactly the module the system top holds for it, and its
+    compile list is only what it instantiates.  (That it elaborates alone is the XSI gate
+    test_markov_each_sub_top_elaborates_alone.)"""
+    _sysm, spec = _markov()
+    whole = render_system_top(spec)
+    for sub in spec.subs:
+        alone = spec.render_sub_verilog(sub.name)
+        module = alone[alone.index(f"module {sub.module} ("):]
+        assert alone.count("\nmodule ") == 1 and module in whole
+    leaves, kernels = spec.sources_of("gen")
+    assert kernels == ("markov_gen", "mm_queue_writer_64_128")
+    assert {p.name for p in leaves} == {"axi_slave_front.v", "mm_queue_in.v", "mm_credit_in.v",
+                                        "mm_sync_fifo.v"}
+    assert spec.sources_of("mem") == (spec.sources_of("mem")[0], ())          # no kernel in it
+    with pytest.raises(LoweringError, match="no sub-top 'xbar'"):
+        spec.render_sub_verilog("xbar")

@@ -125,7 +125,9 @@ os.environ.setdefault("WAVEFLOW_EVENTS", "off")
 #: only simulates, an RTL edit is seen and undone, separate vectors dirs match a single run, and the
 #: traced snapshot coexists with the untraced one.  167 -> 168 (Stage 4): one mem_copy testbench serves
 #: every workload, its arena and cycle bound read from vectors/run.json.
-WANT_XSI_GATES = 168
+#: 168 -> 173 on 2026-10-12 (plans/system_model.md S5): each markov / mm_fir sub-top elaborates
+#: alone (test_markov_xsi.py x3, test_mm_fir_xsi.py x2).
+WANT_XSI_GATES = 173
 
 #: Filled in at collection; module state because a pytest run is one process and the hooks that
 #: write and read it are plain functions.

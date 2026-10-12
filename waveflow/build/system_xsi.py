@@ -79,6 +79,33 @@ def discover(sysm):
     return xbars[0], hosts[0], sysm.cut()
 
 
+def elaborate_sub_top(spec, name: str, *, root: Path, work_dir: Path) -> Path:
+    """Compile device (or memory) *name* of *spec* **alone** and elaborate it: the standalone module
+    (:meth:`~waveflow.build.system_top.SystemTopSpec.render_sub_verilog`), its leaves, and its
+    kernels' csynth Verilog under *root* -- nothing else.  It passing is what makes a sub-top a unit:
+    a per-device synthesis or IP can be built from it with no system around it
+    (``plans/system_model.md`` S5).  Returns the work directory; raises
+    :class:`~waveflow.scripts.sv_sim.SvSimError` naming the failing tool."""
+    from waveflow.scripts.sv_sim import _run, sim_tool
+
+    sub = next(s for s in spec.subs if s.name == name)
+    work = Path(work_dir) / sub.module
+    work.mkdir(parents=True, exist_ok=True)
+    top_v = work / f"{sub.module}.v"
+    top_v.write_text(spec.render_sub_verilog(name), encoding="utf-8")
+    leaves, kernels = spec.sources_of(name)
+    files = [*leaves]
+    for module in kernels:
+        files += sorted(_rtl_dir(Path(root), module).glob("*.v"))
+    files.append(top_v)
+    (work / f"{sub.module}.f").write_text("\n".join(Path(f).resolve().as_posix() for f in files)
+                                          + "\n", encoding="utf-8")
+    _run(f'"{sim_tool("xvlog")}" -f {sub.module}.f', work, capture_output=True, echo=False)
+    _run(f'"{sim_tool("xelab")}" work.{sub.module} -s {sub.module}_elab', work,
+         capture_output=True, echo=False)
+    return work
+
+
 def _rtl_dir(root: Path, module: str) -> Path:
     return root / f"{module}_proj" / "solution1" / "syn" / "verilog"
 

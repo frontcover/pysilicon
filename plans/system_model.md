@@ -236,6 +236,20 @@ neighbours as TB.  This is the unit harness's first need, and the per-device syn
 markov device through `system_rtl` with its neighbours as BFMs (the RTL builds; running it is
 `unit_harness.md`'s job).
 
+> **First half built (2026-10-12): a sub-top as a unit.**
+> - `SystemTopSpec.render_sub_verilog(name)` (`render_sub_top`) renders one device or the memory as
+>   a standalone file: exactly the module the whole top holds for it.
+> - `sources_of(name)` gives its compile list (leaf sources and csynth'd modules).
+> - `system_xsi.elaborate_sub_top(spec, name, root=, work_dir=)` compiles and elaborates it with only
+>   those sources.
+> - New XSI gates elaborate markov's three sub-tops and mm_fir's device in both shapes alone
+>   (`WANT_XSI_GATES` 168 → 173).  The whole top's Verilog is still byte-identical.
+>
+> Still open: the second half, a cut that *is* a sub-tree, with the neighbours as testbench models.
+> It needs the walk to render a crossbar outside the cut (the device's AXI ports as top ports facing
+> BFMs).  That is S3's generic walk, or `unit_harness.md`'s first stage.  The standalone sub-top is
+> also what `ip_packaging_routes.md` Stage 1 (per-device out-of-context synthesis) builds on.
+
 **S6 -- docs.**  `build/xsi_system.md` opens with `System` (what a system must provide, D1), then the
 cut, then `SystemTopSpec` as the result of the walk.  A guide page on writing a system replaces "read
 `discover`".  `flows/index.md`'s two flows are the cut drawn two ways.
