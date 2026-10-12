@@ -368,6 +368,7 @@ examples/rf_repeat_play/xsi_work/
 examples/bram_access/xsi_work/
 examples/rf_blk_delay/xsi_work/
 examples/rf_samp_buf_rx/xsi_work/
+examples/rf_samp_buf_tx/xsi_work/
 # examples/vitis_fft (born under plans/source_layout.md): no hand-written C++ at all -- include/, gen/
 # (with the .tcl), xsi/ and the pysim's vectors/ are build output; vitis_fft_build.generate() restores them.
 examples/vitis_fft/include/

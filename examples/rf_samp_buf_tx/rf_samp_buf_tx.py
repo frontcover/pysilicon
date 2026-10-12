@@ -32,6 +32,7 @@ from waveflow.build.composite_gen import RFSOC4X2_CLK_HZ  # noqa: E402
 from waveflow.hw.clock import Clock  # noqa: E402
 from waveflow.hw.codegen_targets import SEQUENTIAL_XSI_TB  # noqa: E402
 from waveflow.hw.hw_freerun import FreeRunMod  # noqa: E402
+from waveflow.hw.hw_system import DutTop, HwSystem  # noqa: E402
 from waveflow.hw.interface import StreamIF  # noqa: E402
 from waveflow.hw.rf_samp_buf import (  # noqa: E402
     BUF_DEPTH,  # noqa: F401  (re-exported: the RX default, for comparison)
@@ -320,6 +321,56 @@ class RfSampBufTxTB(FreeRunMod):
         resp_axis.bind("master", self.dut.s_resp)
         resp_axis.bind("slave", self.resp_sink.stream_ep)
         self.add_if(resp_axis)
+
+
+@dataclass
+class RfSampBufTxSystem(HwSystem):
+    """The playout buffer as a **system** (``plans/system_model.md`` S3e): the same
+    :class:`RfSampBufTxTB` graph, the cut stated as a DUT tree -- :class:`RfSampBufTx` alone, its
+    ``bram_t2p`` inside it, so the system top instantiates its **wrapper**.  The RFDC is testbench,
+    its DAC model spanning the cut.
+
+    The RF sink's recording is the example's to check (``recording_check``): pysim's player is not
+    paced by ``TREADY``, so its priming transient differs from the RTL's and the loaded ramp lands at
+    a different offset -- what both must show is the ramp unbroken and in order.  The scenario is
+    :func:`write_scenario` plus the run's bound (``vectors/run.json``)."""
+
+    n_cycles: int = 40000
+
+    def __post_init__(self) -> None:
+        self.tb = RfSampBufTxTB(name="xsi_tb", sim=Simulation(), n_cycles=int(self.n_cycles))
+        self.sim = self.tb.sim
+        self.clk = self.tb.axis_clk
+        #: The width of the top's stream ports: there is no crossbar to take it from.
+        self.data_width = int(self.tb.rfdc.axis_bitwidth)
+        self.dut_top = DutTop.of("rf_samp_buf_tx_dut", self.sim, comps=[self.tb.dut])
+        self.tb.sink.recording_check = "example"
+        self._root: Path | None = None
+
+    def dut(self) -> DutTop:
+        """The default DUT: the buffer and its memory, as one wrapper."""
+        return self.dut_top
+
+    def write_scenario(self, root) -> None:
+        from waveflow.utils.burst_io import write_run_params
+
+        root = Path(root)
+        write_scenario(root, samp_per_word=int(self.tb.word.samp_per_word))
+        write_run_params(root / "vectors", n_cycles=int(self.n_cycles))
+        for o in (self.tb.cmd_drv, self.tb.sink, self.tb.resp_sink):
+            o.root = root
+        self._root = root
+
+    def run(self) -> RfSampBufTxTB:
+        import tempfile
+
+        if self._root is None:
+            with tempfile.TemporaryDirectory() as tmp:
+                self.write_scenario(tmp)
+                self.sim.run_sim()
+        else:
+            self.sim.run_sim()
+        return self.tb
 
 
 def write_scenario(root, samp_per_word: int = 1, cmds=GATE_COMMANDS) -> None:
