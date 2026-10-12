@@ -487,7 +487,12 @@ def _rtl_of(mod, dw: int, owner=None) -> KernelRtl:
     if not name:
         raise LoweringError(f"{type(mod).__name__} '{mod.name}' is inside the cut but names no "
                             f"csynth'd module (cpp_kernel_name)")
-    fresh = type(mod)(name=name, sim=Simulation())
+    # The instance's own build parameters, so the spec (and a wrapper's memory sizes) is the one its
+    # csynth top was elaborated with, not the class defaults.
+    from waveflow.hw.hw_module import _hw_param_names
+
+    fresh = type(mod)(name=name, sim=Simulation(),
+                      **{n: getattr(mod, n) for n in sorted(_hw_param_names(type(mod)))})
     spec = composite_top_spec(fresh, width=dw)
     eps = tuple(_unpack_boundary(e) for e in mod.boundary)
     if not getattr(fresh, "rtl_mods", None):
