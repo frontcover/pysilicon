@@ -48,6 +48,24 @@ kernel, hand-written leaf, vendor IP -- with its parameters, sources, identity a
 realizes (``plans/system_resources.md`` Stage 1).  The renderers read each instance's name and
 parameter list from the same spec objects the inventory reads, so the two cannot disagree; the
 compile list (:meth:`SystemTopSpec.leaf_sources`) is the inventory's.
+
+**Devices: the top's sub-tops** (``plans/ip_packaging_routes.md`` Stage 0).  Every instance belongs
+to one of three places, derived from the graph, never listed by hand:
+
+* a **device** -- one per kernel inside the cut: the kernel, its memory-mapped views or adaptor (their
+  front and leaves), and the bus writers that act for it.  A routed credit stream's forward writer
+  carries the sender's data, so it joins the sender's device; its credit writer returns the receiver's
+  credit, so it joins the receiver's.  A writer acts for the kernel whose stream feeds it;
+* the **memory** -- an on-chip memory's front, window and RAM;
+* the **top** itself -- the crossbar, the stub slots, and any link whose two ends are in different
+  devices (a FIFO on such a link too).
+
+Each device and memory is rendered as its own module (a *sub-top*, :class:`SubTop`), which the system
+top instantiates; the system top holds only the crossbar and the links between sub-tops.  Every
+inter-sub-top link of a memory-mapped system is an AXI4 port group or an interrupt line.  A net keeps
+its name across the boundary -- a sub-top's ports are named for the nets they carry -- so every
+instance name, net name and tie-off is the one a flat top would have had.  XSI, a global synthesis and
+a per-device synthesis all read the same sub-top modules.
 """
 from __future__ import annotations
 
@@ -125,6 +143,8 @@ class KernelRtl:
     endpoints: tuple[tuple[str, object], ...] = ()
     hw: object = field(default=None, compare=False, repr=False)
     owner: object = field(default=None, compare=False, repr=False)
+    #: The sub-top it is rendered in (:class:`SubTop` name).
+    group: str = ""
 
 
 def kernel_pins(k: KernelRtl) -> list[tuple[str, str]]:
@@ -167,6 +187,17 @@ class StreamNet:
     #: The pysim object the FIFO is accounted to: the ``StreamIF``, or the routed channel whose writer
     #: it feeds.
     owner: object = field(default=None, compare=False, repr=False)
+    #: The sub-top that drives the net and the one that reads it ("" for neither: an end outside the
+    #: cut).  When they differ, the net is a port of each and its wires (and FIFO) are in the top.
+    prod_group: str = ""
+    cons_group: str = ""
+
+    @property
+    def group(self) -> str:
+        """Where the net -- its wires and its FIFO -- lives: the one sub-top holding both ends, or
+        the top ("") for a link between two."""
+        ends = {g for g in (self.prod_group, self.cons_group) if g}
+        return ends.pop() if len(ends) == 1 else ""
 
     @property
     def consumer_net(self) -> str:
@@ -190,6 +221,21 @@ class MiSlot:
     name: str = ""
     views: tuple = ()
     owner: object = field(default=None, compare=False, repr=False)
+    #: The sub-top it is rendered in ("" for a stub: the top).
+    group: str = ""
+
+
+@dataclass(frozen=True)
+class SubTop:
+    """One sub-top of a system top: a **device** (a kernel with its views and the bus writers that act
+    for it) or the **memory** (front, window, RAM).  ``module`` is its Verilog module, ``inst`` its
+    instance in the system top, ``owner`` the pysim kernel or memory it is named for."""
+
+    name: str
+    kind: str                          # "device" | "memory"
+    module: str
+    inst: str
+    owner: object = field(default=None, compare=False, repr=False)
 
 
 @dataclass(frozen=True)
@@ -211,6 +257,13 @@ class RtlInstance:
     sources: tuple[Path, ...] = ()
     identity: "ModuleIdentity | None" = None
     owner: object = field(default=None, compare=False, repr=False)
+    #: The sub-top instance it sits in ("" for the system top itself).
+    sub: str = ""
+
+    @property
+    def path(self) -> str:
+        """Its hierarchical name under the system top: ``<sub-top inst>/<inst>``, or ``<inst>``."""
+        return f"{self.sub}/{self.inst}" if self.sub else self.inst
 
 
 @dataclass(frozen=True)
@@ -239,6 +292,12 @@ class SystemTopSpec:
     ep_si: tuple[tuple[int, str], ...] = ()
     #: The pysim crossbar the top was walked from (the owner of the crossbar instance).
     xbar_owner: object = field(default=None, compare=False, repr=False)
+    #: The devices and the memory, each rendered as its own module (:class:`SubTop`).
+    subs: tuple[SubTop, ...] = ()
+
+    def sub_inst(self, group: str) -> str:
+        """The instance name of sub-top *group* ("" -> "": the system top)."""
+        return next(s.inst for s in self.subs if s.name == group) if group else ""
 
     def instances(self) -> tuple[RtlInstance, ...]:
         """Every instance the top holds, in the order :func:`render_system_top` emits them: the
@@ -253,12 +312,12 @@ class SystemTopSpec:
         cfg = self.xbar
         dw, aw, idw = cfg.data_width, cfg.addr_width, cfg.id_width
 
-        def leaf(inst: str, module: str, params: dict, owner) -> RtlInstance:
+        def leaf(inst: str, module: str, params: dict, owner, group: str) -> RtlInstance:
             src = leaf_module_sources(module)
             return RtlInstance(inst, module, "leaf", dict(params), src,
-                               identify_rtl(module, params, src), owner)
+                               identify_rtl(module, params, src), owner, self.sub_inst(group))
 
-        out = [leaf(n.fifo_inst, "mm_sync_fifo", n.fifo_params(dw), n.owner)
+        out = [leaf(n.fifo_inst, "mm_sync_fifo", n.fifo_params(dw), n.owner, n.group)
                for n in self.nets if n.fifo_depth]
         out.append(RtlInstance(XBAR_INST, cfg.name, "ip", cfg.hw_params(), (), cfg.identity(),
                                self.xbar_owner))
@@ -267,15 +326,16 @@ class SystemTopSpec:
                 continue
             law = adaptor_law(len(slot.views)) if slot.kind == "adaptor" else slot.views[0].law
             out.append(leaf(front_inst(slot.name), "axi_slave_front",
-                            front_params(dw, aw, idw, law), slot.owner))
+                            front_params(dw, aw, idw, law), slot.owner, slot.group))
             for v in slot.views:
                 if isinstance(v, BramView):
-                    out.append(leaf(v.mem_inst, v.mem_module, v.mem_params(dw), v.owner))
-                out.append(leaf(v.inst, v.module, v.leaf_params(dw), v.owner))
+                    out.append(leaf(v.mem_inst, v.mem_module, v.mem_params(dw), v.owner, slot.group))
+                out.append(leaf(v.inst, v.module, v.leaf_params(dw), v.owner, slot.group))
         for k in self.kernels:
             ident = (identify_instance(k.hw, exempt=boundary_endpoint_ids(k.hw))
                      if k.hw is not None else None)
-            out.append(RtlInstance(k.inst, k.module, "kernel", {}, (), ident, k.owner))
+            out.append(RtlInstance(k.inst, k.module, "kernel", {}, (), ident, k.owner,
+                                   self.sub_inst(k.group)))
         return tuple(out)
 
     def leaf_sources(self) -> tuple[Path, ...]:
@@ -288,6 +348,16 @@ class SystemTopSpec:
         if isinstance(probe, str):
             return probe
         return probe.expr(dict(self.ep_nets), dict(self.ep_si))
+
+    def probe_home(self, probe: "Probe | str") -> str:
+        """The sub-top whose nets *probe* reads ("" for the system top): a stream endpoint's net
+        inside a sub-top is there; a bus master's SI slot, a link between sub-tops and a raw
+        expression are in the system top."""
+        nets = dict(self.ep_nets)
+        if isinstance(probe, str) or id(probe.ep) not in nets:
+            return ""
+        net = nets[id(probe.ep)]
+        return next((n.group for n in self.nets if net in (n.name, n.consumer_net)), "")
 
     @property
     def host_axi(self) -> tuple[str, ...]:
@@ -427,6 +497,7 @@ def system_top_spec(xbar, inside, *, top: str = "system_top", xbar_name: str | N
             port_of[id(ep)] = (k, by_name[n])
 
     nets: list[StreamNet] = []
+    net_ends: list[tuple] = []                # per net: (producer KernelRtl | None, consumer ...)
     net_of: dict[int, str] = {}               # id(endpoint) -> the net it is on
     axis_nets: list[tuple[str, str, str]] = []
     done_ifaces: set[int] = set()
@@ -459,6 +530,7 @@ def system_top_spec(xbar, inside, *, top: str = "system_top", xbar_name: str | N
                 consumer_keep=(cons[1].axi4s if cons else False),
                 owner=chan if chan is not None else iface)
             nets.append(net)
+            net_ends.append((prod[0] if prod else None, cons[0] if cons else None))
             net_of[id(m_ep)] = net.name
             net_of[id(s_ep)] = net.consumer_net
             if prod:
@@ -502,7 +574,8 @@ def system_top_spec(xbar, inside, *, top: str = "system_top", xbar_name: str | N
             law = int(ep.addr_range.size).bit_length() - 1
             kport = f"{mod.name}_b"
             mi.append(MiSlot("memory", mod.name,
-                             (BramView(mod.name, kport=kport, baw=baw, law=law, owner=mod),), mod))
+                             (BramView(mod.name, kport=kport, baw=baw, law=law, owner=mod),), mod,
+                             group=mod.name))
             idle_mem.append(kport)
             continue
         if dev is None or id(dev.kernel) not in ids:
@@ -511,17 +584,79 @@ def system_top_spec(xbar, inside, *, top: str = "system_top", xbar_name: str | N
         views = [mod] if dev.adaptor is None else list(dev.adaptor.views)
         rviews = tuple(_view_of(v, net_of, 12) for v in views)
         mi.append(MiSlot("adaptor" if dev.adaptor is not None else "view",
-                         mod.name, rviews, mod))
+                         mod.name, rviews, mod, group=dev.kernel.name))
         for v in views:
             line = getattr(getattr(v, "m_irq", None), "interface", None)
             sink = line.endpoints.get("sink") if line is not None else None
             if sink is not None and id(getattr(sink, "comp", None)) not in ids:
                 irqs.append((f"irq_{v.name}", v.name))
 
+    rtl, nets, subs = _group(top, rtl, nets, net_ends, mi)
     return SystemTopSpec(top=top, xbar=cfg, si=tuple(si), mi=tuple(mi), nets=tuple(nets),
                          kernels=tuple(rtl), irqs=tuple(irqs), maxi_si=tuple(maxi_si),
                          axis_nets=tuple(axis_nets), idle_memory_ports=tuple(idle_mem),
-                         ep_nets=tuple(net_of.items()), ep_si=tuple(ep_si), xbar_owner=xbar)
+                         ep_nets=tuple(net_of.items()), ep_si=tuple(ep_si), xbar_owner=xbar,
+                         subs=tuple(subs))
+
+
+def _view_nets(view) -> list[tuple[str, str]]:
+    """``(net side, "p" | "c")`` for each stream a view's leaf drives (p) or reads (c)."""
+    if isinstance(view, QueueView):
+        return [(view.axis, "p" if view.kind == "in" else "c")]
+    if isinstance(view, CreditInView):
+        return [(view.axis, "p")]
+    if isinstance(view, RegBankView):
+        return [(view.cfg_axis, "p"), (view.status_axis, "c")]
+    return []
+
+
+def _group(top: str, rtl, nets, net_ends, mi):
+    """Place every kernel, net and slot in a sub-top (the module doc's rules) -> ``(kernels, nets,
+    subs)``.  A kernel names its device; a bus writer joins the device of the kernel whose stream
+    feeds it; a slot is its kernel's device or the memory (set where the slot is built); a net lives
+    where its two ends are."""
+    from dataclasses import replace
+
+    from waveflow.hw.mm_credit import MmStreamWriter
+
+    group = {k.inst: k.hw.name for k in rtl if not isinstance(k.hw, MmStreamWriter)}
+    # A view's stream ends are in its slot's sub-top: net side -> group.
+    side: dict[str, str] = {}
+    for slot in mi:
+        for v in slot.views:
+            for n, _d in _view_nets(v):
+                side[n] = slot.group
+    for k in rtl:
+        if k.inst in group:
+            continue
+        fed = [i for i, (_p, c) in enumerate(net_ends) if c is k]
+        src = {group.get(net_ends[i][0].inst) if net_ends[i][0] is not None
+               else side.get(nets[i].name) for i in fed} - {None}
+        if len(src) != 1:
+            raise LoweringError(f"bus writer {k.inst}: cannot tell which kernel it acts for (its "
+                                f"input stream comes from {sorted(src) or 'nothing inside the cut'})")
+        group[k.inst] = src.pop()
+    rtl = [replace(k, group=group[k.inst]) for k in rtl]
+
+    def end(k, name: str) -> str:
+        return group[k.inst] if k is not None else side.get(name, "")
+
+    nets = [replace(n, prod_group=end(p, n.name), cons_group=end(c, n.consumer_net))
+            for n, (p, c) in zip(nets, net_ends)]
+
+    subs: list[SubTop] = []
+    for k in rtl:
+        if not isinstance(k.hw, MmStreamWriter):
+            subs.append(SubTop(k.group, "device", f"{top}_{k.group}", f"u_{k.group}_sub", k.hw))
+    for slot in mi:
+        if slot.kind == "memory":
+            subs.append(SubTop(slot.group, "memory", f"{top}_{slot.group}", f"u_{slot.group}_sub",
+                               slot.owner))
+    names = [s.name for s in subs]
+    if len(set(names)) != len(names):
+        raise LoweringError(f"{top}: two sub-tops share a name ({names}); kernels and on-chip "
+                            f"memories inside one cut need distinct names")
+    return rtl, nets, subs
 
 
 # ---------------------------------------------------------------------------
@@ -652,12 +787,28 @@ def _instance(k: KernelRtl, spec: SystemTopSpec, dw: int, aw: int, idw: int) -> 
     return f"  {k.module} {k.inst} (\n    " + ",\n    ".join(conns) + "\n  );"
 
 
+def _axis_ports(net: str, dw: int, drives: bool) -> list[str]:
+    """A sub-top's ports for stream net *net*, which it drives (``drives``) or reads: every signal
+    of :func:`_stream_wires`, so a tie-off can land on whichever side holds it."""
+    f, r = ("output", "input ") if drives else ("input ", "output")
+    return [f"{f} wire [{dw - 1}:0] {net}_TDATA", f"{f} wire {net}_TVALID", f"{r} wire {net}_TREADY",
+            f"{f} wire {net}_TLAST", f"{f} wire [{dw // 8 - 1}:0] {net}_TKEEP",
+            f"{f} wire [{dw // 8 - 1}:0] {net}_TSTRB"]
+
+
+def _port_name(decl: str) -> str:
+    return decl.split()[-1]
+
+
 def render_system_top(spec: SystemTopSpec, probes: dict | None = None) -> str:
-    """Emit the Verilog top *spec* describes.  *probes* -- ``{name: Probe}`` (:func:`beat`,
-    :func:`stall`, :func:`last` on a pysim endpoint) or ``{name: one-bit expression}`` over the top's
-    nets -- become outputs ``probe_<name>`` (timing probes a testbench samples every cycle)."""
+    """Emit the Verilog top *spec* describes: one module per sub-top (:attr:`SystemTopSpec.subs`),
+    then the system top, which instantiates them beside the crossbar.  *probes* -- ``{name: Probe}``
+    (:func:`beat`, :func:`stall`, :func:`last` on a pysim endpoint) or ``{name: one-bit expression}``
+    over the top's nets -- become outputs ``probe_<name>`` (timing probes a testbench samples every
+    cycle); a probe on a net inside a sub-top is computed there and passed up as a port."""
     cfg = spec.xbar
     dw, aw, idw = cfg.data_width, cfg.addr_width, cfg.id_width
+    home = {n: spec.probe_home(e) for n, e in (probes or {}).items()}
     probes = {n: spec.probe_expr(e) for n, e in (probes or {}).items()}
     ports = ["input wire ap_clk", "input wire ap_rst_n"]
     for p in spec.host_axi:
@@ -665,53 +816,92 @@ def render_system_top(spec: SystemTopSpec, probes: dict | None = None) -> str:
     ports += [f"output wire {o}" for o, _v in spec.irqs]
     ports += [f"output wire probe_{n}" for n in probes]
 
-    body: list[str] = []
+    # Each module's body and, for a sub-top, its ports -- each connected by name in the top, since a
+    # sub-top's port is named for the net it carries.
+    bodies: dict[str, list[str]] = {"": [], **{s.name: [] for s in spec.subs}}
+    sub_ports: dict[str, list[str]] = {s.name: ["input wire ap_clk", "input wire ap_rst_n"]
+                                       for s in spec.subs}
+    body = bodies[""]
+    k_group = {k.inst: k.group for k in spec.kernels}
+    si_group = {p: k_group[inst] for inst, _port, p in spec.maxi_si}
     for p, outside in spec.si:
         if not outside:
+            g = si_group[p]
             body += ["  " + d for d in axi_wire_decls(p, axi_signals(dw, aw, idw))]
-            body += [f"  assign {p}_AWID = 0;", f"  assign {p}_ARID = 0;"]
+            sub_ports[g] += axi_port_decls(p, axi_signals(dw, aw, idw), facing="master")
+            bodies[g] += [f"  assign {p}_AWID = 0;", f"  assign {p}_ARID = 0;"]
     mi = [f"mi{k}_axi" for k in range(len(spec.mi))]
-    for p in mi:
+    for slot, p in zip(spec.mi, mi):
         body += ["  " + d for d in axi_wire_decls(p, mi_wire_signals(dw, aw, idw))]
+        if slot.group:
+            sub_ports[slot.group] += axi_port_decls(p, mi_wire_signals(dw, aw, idw), facing="slave")
     for net in spec.nets:
-        body += _stream_wires(net.name, dw)
+        g = net.group
+        bodies[g] += _stream_wires(net.name, dw)
         if net.fifo_depth:
-            body += _stream_wires(net.consumer_net, dw)
+            bodies[g] += _stream_wires(net.consumer_net, dw)
+        if not g:                       # a link between two sub-tops: a port of each
+            sub_ports[net.prod_group] += _axis_ports(net.name, dw, drives=True)
+            sub_ports[net.cons_group] += _axis_ports(net.consumer_net, dw, drives=False)
     for net in spec.nets:
+        g = net.group
+        drv = net.prod_group or g      # the producer's side holds its tie-offs
         if net.fifo_depth:
-            body += _fifo(net, dw)
+            bodies[g] += _fifo(net, dw)
             if not net.producer_tlast:
-                body.append(f"  assign {net.name}_TLAST = 1'b0;")
+                bodies[drv].append(f"  assign {net.name}_TLAST = 1'b0;")
             if net.consumer_keep:
-                body += [f"  assign {net.consumer_net}_TKEEP = {{{dw // 8}{{1'b1}}}};",
-                         f"  assign {net.consumer_net}_TSTRB = {{{dw // 8}{{1'b1}}}};"]
+                bodies[g] += [f"  assign {net.consumer_net}_TKEEP = {{{dw // 8}{{1'b1}}}};",
+                              f"  assign {net.consumer_net}_TSTRB = {{{dw // 8}{{1'b1}}}};"]
             continue
         if net.consumer_tlast and not net.producer_tlast:
-            body.append(f"  assign {net.name}_TLAST = 1'b0;")
+            bodies[drv].append(f"  assign {net.name}_TLAST = 1'b0;")
         if net.consumer_keep and not net.producer_keep:
-            body += [f"  assign {net.name}_TKEEP = {{{dw // 8}{{1'b1}}}};",
-                     f"  assign {net.name}_TSTRB = {{{dw // 8}{{1'b1}}}};"]
+            bodies[drv] += [f"  assign {net.name}_TKEEP = {{{dw // 8}{{1'b1}}}};",
+                            f"  assign {net.name}_TSTRB = {{{dw // 8}{{1'b1}}}};"]
     body.append(render_xbar_instance(cfg, XBAR_INST, [p for p, _o in spec.si], mi))
     for slot, p in zip(spec.mi, mi):
+        out = bodies[slot.group]
         if slot.kind == "stub":
-            body.append(f"  // MI slot {p}: padded in by the crossbar config, never addressed")
-            body += [f"  assign {p}_{name} = 0;" for name, _w, m2s in mi_wire_signals(dw, aw, idw)
-                     if not m2s]
+            out.append(f"  // MI slot {p}: padded in by the crossbar config, never addressed")
+            out += [f"  assign {p}_{name} = 0;" for name, _w, m2s in mi_wire_signals(dw, aw, idw)
+                    if not m2s]
         elif slot.kind == "adaptor":
-            body.append(render_adaptor_slot(slot.name, slot.views, p, dw, aw, idw))
+            out.append(render_adaptor_slot(slot.name, slot.views, p, dw, aw, idw))
         else:
             if slot.kind == "memory":
                 k = slot.views[0].kport
-                body += [f"  wire [31:0] {k}_addr = 0; wire {k}_en = 1'b0; wire [1:0] {k}_we = 2'b0;",
-                         f"  wire [{dw - 1}:0] {k}_din = 0; wire [{dw - 1}:0] {k}_dout;"]
-            body.append(render_view_slot(slot.views[0], p, dw, aw, idw))
-    body += [f"  assign {o} = {v}_irq;" for o, v in spec.irqs]
-    body += [f"  assign probe_{n} = {e};" for n, e in probes.items()]
+                out += [f"  wire [31:0] {k}_addr = 0; wire {k}_en = 1'b0; wire [1:0] {k}_we = 2'b0;",
+                        f"  wire [{dw - 1}:0] {k}_din = 0; wire [{dw - 1}:0] {k}_dout;"]
+            out.append(render_view_slot(slot.views[0], p, dw, aw, idw))
+    # An interrupt leaves its sub-top as the top's own output name.
+    slot_of_view = {v.name: slot.group for slot in spec.mi for v in slot.views}
+    for o, v in spec.irqs:
+        g = slot_of_view.get(v, "")
+        bodies[g].append(f"  assign {o} = {v}_irq;")
+        if g:
+            sub_ports[g].append(f"output wire {o}")
+    for n, e in probes.items():
+        bodies[home[n]].append(f"  assign probe_{n} = {e};")
+        if home[n]:
+            sub_ports[home[n]].append(f"output wire probe_{n}")
     for k in spec.kernels:
-        body.append(_instance(k, spec, dw, aw, idw))
-    return (f"// {spec.top}.v -- GENERATED by waveflow (build/system_top.py) from the pysim system.\n"
-            f"`timescale 1ns/1ps\nmodule {spec.top} (\n  " + ",\n  ".join(ports) + "\n);\n"
-            + "\n".join(body) + "\nendmodule\n")
+        bodies[k.group].append(_instance(k, spec, dw, aw, idw))
+    for sub in spec.subs:
+        conns = [f".{n}({n})" for n in map(_port_name, sub_ports[sub.name])]
+        body.append(f"  // {sub.kind} '{sub.name}'\n  {sub.module} {sub.inst} (\n    "
+                    + ",\n    ".join(conns) + "\n  );")
+
+    def module(name: str, decls: list[str], lines: list[str]) -> str:
+        return (f"module {name} (\n  " + ",\n  ".join(decls) + "\n);\n" + "\n".join(lines)
+                + "\nendmodule\n")
+
+    text = [f"// {spec.top}.v -- GENERATED by waveflow (build/system_top.py) from the pysim system.\n"
+            "`timescale 1ns/1ps\n"]
+    text += [f"\n// {sub.kind} '{sub.name}': a sub-top of {spec.top}\n"
+             + module(sub.module, sub_ports[sub.name], bodies[sub.name]) for sub in spec.subs]
+    text.append(("\n" if spec.subs else "") + module(spec.top, ports, body))
+    return "".join(text)
 
 
 # ---------------------------------------------------------------------------
@@ -857,7 +1047,7 @@ def render_system_tb(spec: SystemTopSpec, tb, n_max: int = 1_000_000) -> tuple[s
     return main, files
 
 
-__all__ = ["KernelRtl", "MiSlot", "Probe", "RtlInstance", "StreamNet", "SystemTopSpec",
+__all__ = ["KernelRtl", "MiSlot", "Probe", "RtlInstance", "StreamNet", "SubTop", "SystemTopSpec",
            "VITIS_MAXI_PINS", "XBAR_INST", "beat",
            "default_id_width", "field_position", "kernel_pins", "last", "render_system_ports_h",
            "render_system_tb", "render_system_top", "stall", "system_tb_spec", "system_top_spec"]

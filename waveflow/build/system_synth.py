@@ -4,20 +4,22 @@
 the generated system top, with every instance's sources: the crossbar by ``read_ip`` on its ``.xci``,
 the hand-written leaves the inventory uses (:meth:`~waveflow.build.system_top.SystemTopSpec.instances`),
 each kernel's csynth Verilog, and the top.  ``report_utilization -hierarchical`` then gives a row per
-child instance of the top, which is joined to the inventory **by instance name**.
+instance down to the sub-tops' children (``-hierarchical_depth 2``: the top holds its devices and the
+memory as sub-tops, ``plans/ip_packaging_routes.md`` Stage 0), which is joined to the inventory **by
+hierarchical path** (:attr:`~waveflow.build.system_top.RtlInstance.path`).
 
 Three numbers come out, and they add up exactly:
 
 * **per instance** -- each inventory instance's row, measured in the design it belongs to (Vivado's
   default ``-flatten_hierarchy rebuilt`` optimises across boundaries and rebuilds the hierarchy for
   reporting, so this is the design one would ship);
-* **integration** -- ``total - Σ instances``: the logic the top itself holds (each multi-view
-  adaptor's inline address decoder, the stream tie-offs) plus whatever optimisation moved across an
-  instance boundary.  Negative is legal and not clamped;
+* **integration** -- ``total - Σ instances``: the logic the top and its sub-tops hold themselves
+  (each multi-view adaptor's inline address decoder, the stream tie-offs) plus whatever optimisation
+  moved across an instance boundary.  Negative is legal and not clamped;
 * **the total**.
 
 An instance whose hierarchy synthesis dissolved has no row; it is priced by the primitives under
-its name prefix instead (:func:`attribute`), so it is still its own and not glue.  An instance that can
+its path prefix instead (:func:`attribute`), so it is still its own and not glue.  An instance that can
 be priced neither way **raises** (:class:`UnmappedInstanceError`).  ``keep_hierarchy`` keeps every
 instance's row at a QoR cost (markov: +25% LUT, +30% FF), so it is off by default.  The run is cached under the system's identity -- the inventory's
 identities, the top's text, every kernel source's digest, the part, the clock and ``impl`` -- so a
@@ -66,7 +68,8 @@ class SystemSynth:
     keep_hierarchy: bool = False
     total: dict = field(default_factory=dict)
     instances: dict = field(default_factory=dict)      # inst -> counters
-    unclaimed: dict = field(default_factory=dict)      # depth-1 rows no inventory instance names
+    #: Rows no inventory instance claims: the top's children and the sub-tops' children, by path.
+    unclaimed: dict = field(default_factory=dict)
     #: Instances with no row of their own (synthesis dissolved their hierarchy), priced instead by the
     #: primitives under their name prefix (``u_mem_mem/*``).
     recovered: list = field(default_factory=list)
@@ -174,7 +177,7 @@ def synth_tcl(top: str, *, part: str, period_ns: float, xci: str, sources: list[
         "set t1 [clock milliseconds]",
         'puts "WF_CLOCK [get_property PERIOD [get_clocks -of_objects [get_ports ap_clk]]]"',
         "report_utilization -file util_synth.rpt",
-        "report_utilization -hierarchical -hierarchical_depth 1 -file util_hier_synth.rpt",
+        "report_utilization -hierarchical -hierarchical_depth 2 -file util_hier_synth.rpt",
         "wf_slack synth",
         "wf_prims synth {" + " ".join(insts) + "}",
     ]
@@ -183,7 +186,7 @@ def synth_tcl(top: str, *, part: str, period_ns: float, xci: str, sources: list[
             "opt_design", "place_design", "phys_opt_design", "route_design",
             "set t1 [clock milliseconds]",
             "report_utilization -file util_impl.rpt",
-            "report_utilization -hierarchical -hierarchical_depth 1 -file util_hier_impl.rpt",
+            "report_utilization -hierarchical -hierarchical_depth 2 -file util_hier_impl.rpt",
             "wf_slack impl",
             "wf_prims impl {" + " ".join(insts) + "}",
         ]
@@ -232,12 +235,23 @@ def parse_prims(text: str, tag: str) -> dict[str, dict[str, int]]:
     return out
 
 
+def row_paths(hier_rows: list[dict]) -> list[str]:
+    """Each row's hierarchical path below the top (``""`` for the top, ``u_gen_sub/u_gen`` two levels
+    down), from the report's depths."""
+    stack: list[str] = []
+    out = []
+    for r in hier_rows:
+        stack = stack[:r["depth"]] + [r["instance"]]
+        out.append("/".join(stack[1:]))
+    return out
+
+
 def attribute(spec, hier_rows: list[dict],
               prims: "dict[str, dict[str, int]] | None" = None) -> tuple[dict, dict, dict, list]:
     """``(total, {inst: counters}, unclaimed, recovered)`` from a hierarchical report: the top row,
-    one row per inventory instance (by name, among the top's children), the children nobody
-    claimed, and the instances that had no row and were priced from *prims* -- the primitives under
-    their name prefix -- instead.
+    one row per inventory instance (by path: the top's children and its sub-tops' children), the
+    rows at those levels nobody claimed, and the instances that had no row and were priced from
+    *prims* -- the primitives under their path prefix -- instead.
 
     Synthesis can dissolve an instance's hierarchy (markov's BRAM window and memory under
     ``-flatten_hierarchy rebuilt``); its cells keep their names, so they are still its own and
@@ -247,20 +261,25 @@ def attribute(spec, hier_rows: list[dict],
     top_rows = [r for r in hier_rows if r["depth"] == 0]
     if not top_rows:
         raise ValueError("hierarchical report has no top row")
-    children = {r["instance"]: r["counters"] for r in hier_rows if r["depth"] == 1}
+    subs = {s.inst for s in spec.subs}
+    children = {}
+    for path, r in zip(row_paths(hier_rows), hier_rows):
+        parent = path.rpartition("/")[0]
+        if r["depth"] == 1 or (r["depth"] == 2 and parent in subs):
+            children[path] = r["counters"]
     inv = spec.instances()
-    missing = [i.inst for i in inv if i.inst not in children]
+    missing = [i.inst for i in inv if i.path not in children]
     if missing and prims is None:
         raise UnmappedInstanceError(
             f"{spec.top}: inventory instance(s) {missing} have no row in the hierarchical report "
             f"(rows: {sorted(children)}) and no primitive census to price them by name.  A "
             f"dropped instance would land in the integration term and read as expensive glue, "
             f"so this is fatal.")
-    inst = {i.inst: (children[i.inst] if i.inst in children
-                     else prim_counters((prims or {}).get(i.inst, {})))
+    inst = {i.inst: (children[i.path] if i.path in children
+                     else prim_counters((prims or {}).get(i.path, {})))
             for i in inv}
-    names = {i.inst for i in inv}
-    return (top_rows[0]["counters"], inst, {n: c for n, c in children.items() if n not in names},
+    claimed = {i.path for i in inv} | subs
+    return (top_rows[0]["counters"], inst, {n: c for n, c in children.items() if n not in claimed},
             missing)
 
 
@@ -325,7 +344,7 @@ def synth_system(spec, *, top_v: Path, kernel_dirs: dict[str, Path], ip, out_dir
     tcl = work / "synth_system.tcl"
     tcl.write_text(synth_tcl(spec.top, part=part, period_ns=period_ns,
                              xci=(ip_copy / f"{ip.module}.xci").as_posix(), sources=sources,
-                             impl=impl, insts=[i.inst for i in spec.instances()]),
+                             impl=impl, insts=[i.path for i in spec.instances()]),
                    encoding="utf-8")
     with events.span("tool", "vivado", script=tcl.name):
         r = subprocess.run([vivado, "-mode", "batch", "-nojournal", "-log", "vivado.log",
@@ -396,4 +415,4 @@ def system_synth_records(spec, res: SystemSynth, top_text: str, kernel_dirs: dic
 
 
 __all__ = ["INSTANCE_TARGET", "SystemSynth", "UnmappedInstanceError", "attribute", "kernel_files",
-           "synth_system", "synth_tcl", "system_identity", "system_synth_records"]
+           "row_paths", "synth_system", "synth_tcl", "system_identity", "system_synth_records"]

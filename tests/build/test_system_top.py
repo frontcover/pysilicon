@@ -172,23 +172,31 @@ def test_a_probe_that_names_nothing_in_the_top_is_refused():
 # ---------------------------------------------------------------------------------------------
 
 _INST = re.compile(r"^  (\w+) (?:#\((.*)\) )?(u_\w+) \($", re.M)
+_MODULE = re.compile(r"^module (\w+) \(.*?^endmodule$", re.M | re.S)
 
 
-def _rendered_instances(v: str) -> dict[str, tuple[str, dict]]:
-    """``inst -> (module, params)`` read off the rendered Verilog -- here and only here."""
+def _rendered_instances(v: str) -> dict[str, tuple[str, dict, str]]:
+    """``inst -> (module, params, enclosing module)`` read off the rendered Verilog -- here and only
+    here."""
     out = {}
-    for module, params, inst in _INST.findall(v):
-        assert inst not in out, f"instance {inst} rendered twice"
-        out[inst] = (module, {k: int(x) for k, x in re.findall(r"\.(\w+)\((\d+)\)", params or "")})
+    for m in _MODULE.finditer(v):
+        for module, params, inst in _INST.findall(m.group(0)):
+            assert inst not in out, f"instance {inst} rendered twice"
+            out[inst] = (module, {k: int(x) for k, x in re.findall(r"\.(\w+)\((\d+)\)", params or "")},
+                         m.group(1))
     return out
 
 
 @pytest.mark.parametrize("which", ["markov", "per_view", "one_front"])
 def test_the_inventory_is_what_the_top_instantiates(which):
+    """Every inventory instance is rendered once, in the module its ``sub`` names; the only other
+    instances are the sub-tops themselves, each in the system top."""
     _sysm, spec = _markov() if which == "markov" else _fir(which)
     inv = spec.instances()
-    got = {i.inst: (i.module, {} if i.kind != "leaf" else i.params) for i in inv}
-    assert len(got) == len(inv), "instance names must be unique"
+    module_of = {s.inst: s.module for s in spec.subs} | {"": spec.top}
+    got = {i.inst: (i.module, {} if i.kind != "leaf" else i.params, module_of[i.sub]) for i in inv}
+    got |= {s.inst: (s.module, {}, spec.top) for s in spec.subs}
+    assert len(got) == len(inv) + len(spec.subs), "instance names must be unique"
     assert got == _rendered_instances(render_system_top(spec))
     for i in inv:
         assert i.owner is not None, i.inst
@@ -217,6 +225,60 @@ def test_markov_inventory_owners_are_pysim_objects():
     # One configuration, one key: the two adaptors' fronts are the same leaf configuration.
     assert by["u_gen_mm_front"].identity == by["u_chain_mm_front"].identity
     assert by["u_gen_mm_front"].identity != by["u_mem_front"].identity        # LAW 13 vs 12
+
+
+# ---------------------------------------------------------------------------------------------
+# Devices (plans/ip_packaging_routes.md Stage 0): every instance in one device, the memory or the top.
+# ---------------------------------------------------------------------------------------------
+
+def test_markov_falls_into_four_groups_each_instance_once():
+    """Two devices, the memory and the crossbar.  Each bus writer is in the device of the kernel it
+    acts for: the forward writer (and its FIFO) with the sender, the credit writer with the
+    receiver."""
+    sysm, spec = _markov()
+    assert [(s.name, s.kind, s.inst) for s in spec.subs] == [
+        ("gen", "device", "u_gen_sub"), ("chain", "device", "u_chain_sub"),
+        ("mem", "memory", "u_mem_sub")]
+    assert spec.subs[0].owner is sysm.gen and spec.subs[2].owner is sysm.mem
+    groups: dict[str, set] = {}
+    for i in spec.instances():
+        groups.setdefault(i.sub, set()).add(i.inst)
+    assert groups == {
+        "u_gen_sub": {"u_gen", "u_gen_mm_front", "u_gen_qcmd", "u_gen_u_crd", "u_u_fwd_wr",
+                      "u_u_fwd_ff"},
+        "u_chain_sub": {"u_chain", "u_chain_mm_front", "u_chain_qu", "u_chain_qresp", "u_u_crd_wr"},
+        "u_mem_sub": {"u_mem_front", "u_mem_mem", "u_mem"},
+        "": {"u_xbar"},
+    }
+    assert sum(map(len, groups.values())) == len(spec.instances()) == 15
+    by = {i.inst: i for i in spec.instances()}
+    assert by["u_u_fwd_wr"].path == "u_gen_sub/u_u_fwd_wr" and by["u_xbar"].path == "u_xbar"
+    # Every link between the sub-tops is the bus: no stream net crosses one.
+    assert all(n.group for n in spec.nets)
+
+
+@pytest.mark.parametrize("topology", ["per_view", "one_front"])
+def test_mm_fir_is_one_device(topology):
+    _sysm, spec = _fir(topology)
+    assert [(s.name, s.kind) for s in spec.subs] == [("fir", "device")]
+    subs = {i.sub for i in spec.instances() if i.kind != "ip"}
+    assert subs == {"u_fir_sub"}
+    assert [i.inst for i in spec.instances() if not i.sub] == ["u_xbar"]
+
+
+def test_markov_sub_tops_meet_only_at_the_bus():
+    """A device's ports are clock, reset, AXI4 groups (its MI slot, its masters' SI slots), its
+    interrupt lines and its probes -- nothing else crosses."""
+    sysm, spec = _markov()
+    from examples.markov.markov import timing_probes
+    v = render_system_top(spec, timing_probes(sysm))
+    gen = re.search(r"^module markov_top_gen \((.*?)\);", v, re.M | re.S).group(1)
+    names = [d.split()[-1] for d in gen.split(",")]
+    other = [n for n in names if not re.match(r"(ap_clk|ap_rst_n|mi0_axi_|si1_axi_|irq_|probe_)", n)]
+    assert other == []
+    assert "irq_gen_qcmd" in names and "probe_ufwd" in names
+    # A probe on a bus master's SI is computed in the top, not in a device.
+    assert "assign probe_wr1_aw = si1_axi_AWVALID && si1_axi_AWREADY;" in v.split("module markov_top (")[1]
 
 
 @pytest.mark.parametrize("which", ["markov", "per_view"])
