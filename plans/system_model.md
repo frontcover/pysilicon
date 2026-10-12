@@ -395,6 +395,22 @@ Golden checks stay as an optional per-example step: "the destination equals the 
 > - Board-level loss *observability* (status registers a host reads) is design work, a separate
 >   item.
 
+**S3e -- migrate the single-kernel examples (2026-10-12, branch `system-model-migrate`).**  After
+S3a-d the system flow covers a single kernel with no crossbar (mem_copy) and vendor IP in the
+testbench (rf_loopback).  Twelve examples still describe their testbench as a composite `FreeRunMod`
+class (`potential_targets = {SEQUENTIAL_XSI_TB}`).  They fall in two groups:
+
+| group | examples | what the system flow needs first |
+|---|---|---|
+| **1. no new feature** | state_toy, fir_block, interleaver (in-band), rf_relayout, rf_repeat_play, rf_loopback's own DUT gate (`RfPassThroughTB`) | nothing: each becomes an `HwSystem` + a system build + a system gate reproducing its existing gate |
+| **2. hand-written RTL beside the kernel** | bram_access, rf_blk_delay, rf_samp_buf_rx, rf_samp_buf_tx, rf_shot_rx, rf_shot_tx | `rtl_module()` leaves inside the DUT -- a memory joined to the kernel by `BramIF` / `add_rtl_if` -- rendered by the system walk, as `wrapper_gen` renders them today |
+
+Order: group 1, one example per commit, each gated by its existing gate's numbers through the system
+flow.  Then the `rtl_module` support, then group 2.  Then the decision the plan has deferred: whether
+the composite testbench class is retired (its gates replaced by the system-flow ones) or kept as a
+second way in.  Then the flow-steps prose rewrite.  The existing kernel-flow gates stay until that
+decision.
+
 **S4 -- the TB side through hooks.**  D5.  Gate: the harness is byte-identical; `system_tb_spec` names
 no participant type.
 
