@@ -259,8 +259,13 @@ class MemCopySystem(HwSystem):
     is the testbench: the command driver, the completion sink, the memory, and the crossbar that
     models the two ``m_axi`` bundles' contention in pysim.  That crossbar is *outside* the cut, so the
     kernel's two ``m_axi`` bundles are top ports facing the memory model, and its two streams are top
-    ports facing the driver and the sink.  :meth:`run` is :class:`MemCopySim`'s: the scenario, the
-    pysim run and the golden check.
+    ports facing the driver and the sink.
+
+    The testbench contract (``plans/system_model.md`` S3b): :meth:`write_scenario` is
+    :class:`MemCopySim`'s -- the command bursts, the source arena, the golden -- with every participant
+    anchored at the root, the sink included, so pysim records what the RTL records (the sink's
+    ``vectors/s_done``, the memory's ``vectors/out``).  :meth:`run` runs from the scenario written
+    last, or from a fresh one in a temp dir, and applies the golden check.
     """
 
     jobs: tuple = (CopyJob(src_off=16, dst_off=512, n_words=128),)
@@ -270,13 +275,26 @@ class MemCopySystem(HwSystem):
         self.runner = MemCopySim(jobs=tuple(self.jobs), mem_dwidth=int(self.mem_dwidth))
         self.tb = self.runner.tb
         self.sim = self.tb.sim
+        self.clk = self.tb.clk
         #: The width of the top's stream ports and m_axi groups: there is no crossbar to take it from.
         self.data_width = int(self.mem_dwidth)
         self.dut_top = DutTop.of("mem_copy_dut", self.sim, comps=[self.tb.dut])
+        self._root: Path | None = None
 
     def dut(self) -> DutTop:
         """The default DUT: the copy kernel alone."""
         return self.dut_top
 
+    def write_scenario(self, root) -> None:
+        self.runner.write_scenario(root)
+        self.tb.done_sink.root = Path(root)
+        self._root = Path(root)
+
     def run(self) -> "MemCopy":
-        return self.runner.run()
+        if self._root is None:
+            with tempfile.TemporaryDirectory() as tmp:
+                self.write_scenario(tmp)
+                self.sim.run_sim()
+        else:
+            self.sim.run_sim()
+        return self.runner.check()

@@ -1071,7 +1071,7 @@ def field_position(schema, name: str, word_bw: int) -> tuple[int, int, int]:
     raise LoweringError(f"{schema.__name__}.{name}: setting it to 1 set no bit")
 
 
-def system_tb_spec(spec: SystemTopSpec, xbar, participants, probes=()) -> "TbSpec":
+def system_tb_spec(spec: SystemTopSpec, xbar, participants, probes=(), graph=None) -> "TbSpec":
     """The XSI harness for a system top: one model per participant's ``bfm_model()``, each port bound
     to the top port it faces.
 
@@ -1082,6 +1082,13 @@ def system_tb_spec(spec: SystemTopSpec, xbar, participants, probes=()) -> "TbSpe
     first participant's first model is the one whose ``done()`` ends the run (:attr:`TbSpec.stop_on`).
 
     *probes* names the top's ``probe_<name>`` outputs to sample (a ``ProbePin`` each, printed after the run).
+
+    *graph* (the system) binds the rest of the top (``plans/system_model.md`` S3b): each stream port
+    and ``m_axi`` group leaving the top is answered by the testbench participant wired to it, resolved
+    as :func:`~waveflow.build.composite_gen.tb_top_spec` resolves a kernel's boundary -- an AXIS port
+    takes the participant's declared class, an ``m_axi`` group the slave its kind implies, and a
+    ``shared`` model (one memory behind two bundles) is constructed once.  With no host there is no
+    ``done()`` to stop on: the run is the scenario's fixed bound.
     """
     from waveflow.build.composite_gen import (
         BfmInst,
@@ -1127,6 +1134,9 @@ def system_tb_spec(spec: SystemTopSpec, xbar, participants, probes=()) -> "TbSpe
                 local.append(str(hdr))
             models.append(BfmInst(bm.cls, name, first, bm.extra_args, dyn if i == 0 else (),
                                   binds=tuple(binds)))
+    shared: dict = {}
+    if graph is not None:
+        models += _ext_port_models(spec, ns, shared, local)
     for n in probes:
         models.append(BfmInst("ProbePin", f"pr_{n}", f"probe_{n}", (f'"{n}"',),
                               binds=("sim.dut()", f'"probe_{n}"')))
@@ -1137,8 +1147,88 @@ def system_tb_spec(spec: SystemTopSpec, xbar, participants, probes=()) -> "TbSpe
         for bm in bfm_models(part):
             for fname, render in bm.generated_files:
                 extra.setdefault(fname, render())
-    return TbSpec(top_name=spec.top, models=tuple(models), local_headers=tuple(local), stop_on=stop,
-                  extra_files=tuple(extra.items()))
+    return TbSpec(top_name=spec.top, shared=tuple(shared.values()), models=tuple(models),
+                  local_headers=tuple(local), stop_on=stop, extra_files=tuple(extra.items()))
+
+
+def _ext_port_models(spec: SystemTopSpec, ns: str, shared: dict, local: list) -> list:
+    """A model for every stream port and ``m_axi`` group leaving the top: the testbench participant
+    wired to the kernel's endpoint, through the testbench's own interface (a stream, or a crossbar
+    that models contention in pysim).  *shared* collects shared objects (a memory's arena) by name;
+    *local* example-local model headers."""
+    from waveflow.build.composite_gen import (
+        BfmInst,
+        _bfm_port_attrs,
+        _bfm_port_endpoint,
+        _render_dyn_value,
+        bfm_dual_class,
+        bfm_model_header,
+        bfm_models,
+    )
+    from waveflow.hw.hw_module import declares_hook, discover_dyn_params
+
+    def model_for(ep):
+        """``(participant, its model spanning endpoint *ep*)``, or ``(None, None)``."""
+        part = getattr(ep, "comp", None)
+        if part is None or not declares_hook(part, "bfm_model"):
+            return None, None
+        for bm in bfm_models(part):
+            if any(_bfm_port_endpoint(part, a) is ep for a in _bfm_port_attrs(bm)):
+                return part, bm
+        return None, None
+
+    def dyn(part):
+        return tuple((f, _render_dyn_value(v)) for f, v in sorted(discover_dyn_params(part).items()))
+
+    out = []
+    kinds = {}
+    for k in spec.kernels:
+        for p in k.ports:
+            kinds[(k.inst, p.name)] = p.kind
+    for net in spec.nets:
+        if not net.ext:
+            continue
+        iface = net.owner
+        ep = iface.endpoints["master" if net.ext == "in" else "slave"]
+        part, bm = model_for(ep)
+        if part is None:
+            raise LoweringError(f"{spec.top}: stream port {net.name!r} leaves the top, but its other "
+                                f"end ({type(getattr(ep, 'comp', None)).__name__}) declares no "
+                                f"bfm_model() spanning it -- nothing would drive or answer it")
+        kind = "axis_in" if net.ext == "in" else "axis_out"
+        cls = bfm_dual_class(kind, bm.cls)
+        if bm.header is not None:
+            cls = bm.cls
+            hdr = str(bfm_model_header(part, bm))
+            if hdr not in local:
+                local.append(hdr)
+        out.append(BfmInst(cls, net.name, net.name, bm.extra_args, dyn(part),
+                           binds=("sim.dut()", f"{ns}::{net.name}")))
+    for inst, port, prefix in spec.maxi_ext:
+        k = next(k for k in spec.kernels if k.inst == inst)
+        ep = dict(k.endpoints)[port]
+        iface = getattr(ep, "interface", None)
+        found = None
+        for peer in (getattr(iface, "endpoints", {}) or {}).values():
+            if peer is not ep:
+                part, bm = model_for(peer)
+                if part is not None:
+                    found = (part, bm)
+                    break
+        if found is None:
+            raise LoweringError(f"{spec.top}: m_axi group {prefix!r} ({inst}.{port}) leaves the top, "
+                                f"but no testbench participant on its interface declares a "
+                                f"bfm_model() -- nothing would answer it")
+        part, bm = found
+        kind = kinds[(inst, port)]
+        if bm.shared is not None:
+            shared.setdefault(bm.shared, (bm.cls, bm.shared, bm.extra_args, dyn(part)))
+            out.append(BfmInst(bfm_dual_class(kind, None), prefix, prefix, (bm.shared,),
+                               binds=("sim.dut()", f"{ns}::{prefix}")))
+        else:
+            out.append(BfmInst(bfm_dual_class(kind, bm.cls), prefix, prefix, bm.extra_args,
+                               dyn(part), binds=("sim.dut()", f"{ns}::{prefix}")))
+    return out
 
 
 def render_system_ports_h(spec: SystemTopSpec) -> str:
@@ -1167,10 +1257,22 @@ def render_system_ports_h(spec: SystemTopSpec) -> str:
               for _i, _port, p in spec.maxi_ext]
     lines += [f'static const char* const {n} = "{n}";   // AXI-Stream {d}: a net leaving the top'
               for n, d in spec.ext_streams]
-    lines += ["", "// Every input of the top is driven by a model: nothing left to pin.",
-              "static const char* const ZERO_PORTS[] = { nullptr };",
-              "static const int ZERO_PORTS_N = 0;", "", f"}}  // namespace {ns}", "",
-              f"#endif  // {guard}"]
+    from waveflow.build.composite_gen import _MAXI_UNDRIVEN
+
+    kinds = {(k.inst, p.name): p.kind for k in spec.kernels for p in k.ports}
+    zero = [f"{prefix}_{ch}" for inst, port, prefix in spec.maxi_ext
+            for ch in _MAXI_UNDRIVEN.get(kinds[(inst, port)], ())]
+    if zero:
+        lines += ["", "// The inputs of an m_axi group leaving the top that its slave model does not",
+                  "// drive (the other direction's channels).  Absent names are skipped at bind time.",
+                  "static const char* const ZERO_PORTS[] = {"]
+        lines += [f'    "{z}",' for z in zero]
+        lines += ["};", "static const int ZERO_PORTS_N = (int)(sizeof(ZERO_PORTS)/sizeof(ZERO_PORTS[0]));"]
+    else:
+        lines += ["", "// Every input of the top is driven by a model: nothing left to pin.",
+                  "static const char* const ZERO_PORTS[] = { nullptr };",
+                  "static const int ZERO_PORTS_N = 0;"]
+    lines += ["", f"}}  // namespace {ns}", "", f"#endif  // {guard}"]
     return "\n".join(lines) + "\n"
 
 
@@ -1187,16 +1289,25 @@ def render_system_tb(spec: SystemTopSpec, tb, n_max: int = 1_000_000) -> tuple[s
     for h in tb.local_headers:
         files[Path(h).name] = Path(h).read_text(encoding="utf-8")
     files.update(dict(tb.extra_files))
+    if tb.stop_on is not None:
+        body = [f"    h.run_until({int(n_max)});", "    h.close();",
+                f"    return h.{tb.stop_on}.done() ? 0 : 1;"]
+        note = "// Construct the harness, run until the host is done, close.  The models report."
+    else:
+        # No host: nothing knows when it is done.  Run the scenario's bound (vectors/run.json's
+        # n_cycles); the participants dump what they recorded, and Python checks it.
+        body = [f'    h.run(wfbfm::run_param("n_cycles", {int(n_max)}));', "    h.close();",
+                "    return 0;"]
+        note = ("// Construct the harness, run the scenario's cycle bound, close.  The recorders dump; "
+                "Python checks.")
     main = "\n".join([
         f"// {spec.top}_tb.cpp -- GENERATED by waveflow (build/system_top.py::render_system_tb).",
-        "// Construct the harness, run until the host is done, close.  The models report.",
+        note,
         f'#include "{spec.top}_tb_harness.h"',
         "",
         "int main() {",
         f'    {spec.top}_tb::Harness h("{spec.top}.wdb");',
-        f"    h.run_until({int(n_max)});",
-        "    h.close();",
-        f"    return h.{tb.stop_on}.done() ? 0 : 1;",
+        *body,
         "}",
     ]) + "\n"
     return main, files

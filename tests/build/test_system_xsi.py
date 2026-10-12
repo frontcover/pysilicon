@@ -118,3 +118,53 @@ def test_the_bus_and_the_host_are_found_by_role():
     # Take the crossbar out of the DUT: it is then testbench, and the DUT has no bus of its own.
     del s.dut().interfaces[s.xbar.name]
     assert discover(s)[:2] == (None, None)
+
+
+# ---------------------------------------------------------------------------------------------
+# The testbench contract (plans/system_model.md S3b): any participant, not only a host
+# ---------------------------------------------------------------------------------------------
+
+def test_the_harness_binds_every_participant_behind_a_top_port():
+    """mem_copy: no host.  The driver and the sink answer the two stream ports with their declared
+    models; the memory behind both m_axi bundles is ONE shared arena with a read and a write slave;
+    with no host there is no done() -- the run is the scenario's bound."""
+    from examples.mem_copy.mem_copy_sim import MemCopySystem
+    from waveflow.build.system_top import (SystemTopSpec, render_system_ports_h, render_system_tb,
+                                           system_tb_spec)
+
+    s = MemCopySystem()
+    spec = SystemTopSpec.from_system(s)
+    tb = system_tb_spec(spec, None, [], graph=s)
+    assert {m.name: m.cls for m in tb.models} == {
+        "tb_cmd_if": "AxisMaster", "tb_done_if": "AxisSlave",
+        "m0_axi": "AxiMmReadSlave", "m1_axi": "AxiMmWriteSlave"}
+    assert [sh[0] for sh in tb.shared] == ["FlatMemory"] and tb.stop_on is None
+    main, files = render_system_tb(spec, tb)
+    assert 'h.run(wfbfm::run_param("n_cycles"' in main and "return 0;" in main
+    ports_h = render_system_ports_h(spec)
+    assert '"m0_axi_AWREADY"' in ports_h and '"m1_axi_ARREADY"' in ports_h   # the other direction pinned
+    assert "tb_cmd_if" in ports_h and "m1_axi" in ports_h
+
+
+def test_recordings_come_from_the_participants_and_pysim_writes_them(tmp_path):
+    """A system states nothing: the sink's out_bundle and the memory's dump segments are its
+    recordings, and pysim now writes them as the C++ models do."""
+    from examples.mem_copy.mem_copy_sim import MemCopySystem
+
+    s = MemCopySystem()
+    assert s.recordings() == ("vectors/out", "vectors/s_done")
+    s.write_scenario(tmp_path)
+    s.run()
+    for rec in s.recordings():
+        assert {p.name for p in (tmp_path / rec).iterdir()} >= {"words.bin", "bounds.bin", "meta.json"}
+
+
+def test_a_host_system_records_nothing_and_writes_its_scenario_through_the_host(tmp_path):
+    """markov's testbench is its host: its traces go to the host's own directory, so the system has
+    no recordings, and the default write_scenario is the host's."""
+    from examples.markov.markov_build import system
+
+    s = system()
+    assert s.recordings() == ()
+    s.write_scenario(tmp_path)
+    assert s.host.scenario == tmp_path.as_posix() and any(tmp_path.iterdir())

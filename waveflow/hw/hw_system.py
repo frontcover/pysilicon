@@ -15,6 +15,16 @@ the contract here instead of finding it in the consumers:
   (``plans/design_cut.md``);
 * :meth:`run` -- simulate the whole graph in pysim.
 
+And the **testbench contract** (``plans/system_model.md`` S3b), what lets the system flow verify any
+testbench, not only a software host:
+
+* :meth:`write_scenario` -- write every testbench participant's inputs under a root, and anchor them
+  there.  The default is the host's (``SwHost.write_scenario``); a system with no host writes its own.
+* :meth:`recordings` -- the bundles testbench participants record under that root: each sink's
+  ``out_bundle``, each memory's ``dump_segs``.  Derived from the participants' own declarations, so a
+  system states nothing; the flow compares each one, RTL against pysim.
+* :meth:`clock` -- the clock a run's length is counted in.
+
 A system is not an :class:`~waveflow.hw.hw_module.HwModule`: it is never synthesized as a whole, and it
 holds software (the host) and testbench models as well as hardware.
 """
@@ -92,6 +102,53 @@ class HwSystem(ABC):
     @abstractmethod
     def run(self) -> Any:
         """Simulate the whole graph in pysim and return what the system reports."""
+
+    def write_scenario(self, root) -> None:
+        """Write the scenario -- every testbench participant's inputs -- under *root*, and anchor the
+        participants there, so a pysim run and an RTL run started from *root* read the same bytes.
+
+        The default is the software host's (``SwHost.write_scenario``).  A system with no host
+        overrides this: the scenario is the example's (what commands, what memory contents)."""
+        from pathlib import Path
+
+        from waveflow.build.system_xsi import discover
+
+        host = discover(self)[1]
+        if host is None:
+            raise NotImplementedError(f"{type(self).__name__} has no software host to write its "
+                                      f"scenario: override write_scenario(root)")
+        host.scenario = Path(root).as_posix()
+        host.write_scenario(root)
+
+    def recordings(self) -> tuple[str, ...]:
+        """The bundles the testbench records, relative to the scenario root: each participant
+        outside the DUT that declares an ``out_bundle`` (a sink) or ``dump_segs`` (a memory).  The
+        system flow compares each, RTL against pysim.  A software host's traces are not here: they go
+        to its own trace directory and are compared there."""
+        root = self.dut()
+
+        def in_dut(mod) -> bool:
+            while mod is not None:
+                if mod is root:
+                    return True
+                mod = getattr(mod, "parent", None)
+            return False
+
+        out: list[str] = []
+        for o in self.elements():
+            if in_dut(o):
+                continue
+            if getattr(o, "out_bundle", ""):
+                out.append(str(o.out_bundle))
+            out += [str(seg.bundle) for seg in (getattr(o, "dump_segs", None) or ())]
+        return tuple(dict.fromkeys(out))
+
+    def clock(self):
+        """The clock a run's length is counted in: the host's, else the system's ``clk``."""
+        from waveflow.build.system_xsi import discover
+
+        host = discover(self)[1]
+        return host.clk if host is not None else getattr(self, "clk", None)
 
     def cut(self) -> list:
         """The default cut as a list -- each device's kernel and each memory (:func:`dut_members`):

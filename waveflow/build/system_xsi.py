@@ -202,13 +202,15 @@ def load_run(work) -> XsiRun:
 
 
 
-def compare_traces(a: Path, b: Path) -> list[str]:
+def compare_traces(a: Path, b: Path,
+                   files: tuple[str, ...] = ("words.bin", "bounds.bin", "meta.json")) -> list[str]:
     """``"<endpoint>/<file>"`` for every trace file under *a* that is missing or different under *b*
-    (and every endpoint *b* has that *a* lacks)."""
+    (and every endpoint *b* has that *a* lacks).  *files* chooses what is compared: a host's traces
+    whole, a testbench recording on its ``words.bin``."""
     bad = []
     names = sorted({p.name for p in Path(a).iterdir()} | {p.name for p in Path(b).iterdir()})
     for ep in names:
-        for f in ("words.bin", "bounds.bin", "meta.json"):
+        for f in files:
             pa, pb = Path(a) / ep / f, Path(b) / ep / f
             if not (pa.is_file() and pb.is_file() and pa.read_bytes() == pb.read_bytes()):
                 bad.append(f"{ep}/{f}")
