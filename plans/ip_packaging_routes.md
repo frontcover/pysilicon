@@ -7,6 +7,10 @@ been measured and what has only been estimated, so the choice can be made on evi
 stated preference is the per-IP route (B); the first stage below measures what it costs before anything
 is committed to.
 
+**Revised 2026-10-12:** route B's granularity is decided -- **one IP per device**, four for markov
+(see [Granularity: one IP per device](#granularity-one-ip-per-device)) -- and the plan ends with the
+markov docs comparing both routes on measured numbers.
+
 ## The question
 
 A *system* -- several kernels behind memory-mapped adaptors, AMD's crossbar, an on-chip memory
@@ -88,7 +92,8 @@ whose boundary is the host's AXI4 port (`s0_axi`) and the interrupt lines.  The 
 the inventory already groups them -- one IP per owner (an adaptor = its front + its views; a routed
 channel = its writers + its FIFO; the memory = window + RAM); the crossbar as the vendor IP it already
 is.  A composite (a kernel with its device) is a hierarchical IP of those.  A generator emits the block
-design from the pysim graph, as `system_top.py` emits Verilog today.  For markov: about seven cells.
+design from the pysim graph, as `system_top.py` emits Verilog today.  For markov: about seven cells.  *(Revised: one IP per device instead -- four cells for markov; see
+[Granularity: one IP per device](#granularity-one-ip-per-device).)*
 
 **Advantages** (the user's three, checked)
 
@@ -134,11 +139,75 @@ design from the pysim graph, as `system_top.py` emits Verilog today.  For markov
   | per-IP, sequential, ~15 runs (every leaf its own IP) | ~15-20 min | ~1-1.5 min |
   | per-IP, ~7 runs (one IP per pysim object) | ~8-10 min | ~1-1.5 min |
   | per-IP, 4 parallel jobs | ~3-5 min | ~1-1.5 min |
+  | **per device, 4 IPs** (chosen; crossbar ~4 min once per configuration) | ~7-8 min sequential, ~4-5 parallel | ~1-1.5 min |
 
-  Granularity is the main lever, because the overhead is per run.  *(Per-IP synthesis.)*
+  Granularity is the main lever, because the overhead is per run.  *(Per-IP synthesis.)*  All rows are
+  estimates; Stage 1 measures the chosen one.
 - **Caches to keep out of git and invalidate correctly.**  Checkpoints and the IP cache are large,
   path-dependent and Vivado-version-specific (`board_packaging.md` §11 already bars `.runs/`, `.cache/`).
   Invalidation is solved by keying on identity, as the out-of-context library does.
+
+## Granularity: one IP per device
+
+**Decided (2026-10-12):** route B packages one IP per **device**, not one per pysim object.  A device
+is what `build_mm_device` already assembles around a kernel, plus the bus masters that kernel needs:
+
+- **a device IP** = the kernel (its csynth Verilog) + its memory-mapped views + its AXI front + **the
+  bus writers that act for that kernel**;
+- **the memory** = its window + the RAM, one IP;
+- **the crossbar** = AMD's IP, configured, as it already is.
+
+**Where a bus writer goes.**  A routed credit link (`MmCreditStreamIF`) has two writers, and each goes
+in the device of the kernel it acts for -- not with the crossbar:
+
+- the **forward writer** carries the sender's data into the receiver's queue: it is the *sender's* bus
+  master, so it joins the sender's device, beside the sender's `CreditIn` view;
+- the **credit writer** returns credit into the sender's `CreditIn`: it is the *receiver's* bus master,
+  so it joins the receiver's device.
+
+Bundling the writers with the crossbar was considered and rejected.  The crossbar is the most expensive
+IP to synthesize (~4 min out of context) and the writers change whenever a link's parameters change
+(width, credit window, depth) -- exactly the knobs a design-space search sweeps, so every link change
+would pay the crossbar's synthesis.  And in a block design the interconnect may be Vivado's own
+(SmartConnect), which cannot absorb custom logic.
+
+**markov at this granularity: four IPs.**
+
+| IP | contents | boundary |
+|---|---|---|
+| generator device | `MarkovGen` + `qcmd` (queue in) + `u_crd` (credit in) + the front + the forward writer | AXI-MM slave, AXI-MM master, interrupts |
+| chain device | `MarkovChain` (its memory writer included) + `qu` (queue in) + `qresp` (queue out) + the front + the credit writer | AXI-MM slave, AXI-MM master(s), interrupts |
+| memory | the window + `bram_t2p` | AXI-MM slave |
+| crossbar | `axi_crossbar` | AXI-MM |
+
+**Why this grouping.**
+
+- **Every link between IPs is standard AXI-MM or an interrupt line.**  The kernel-to-view streams, the
+  credit-stream pairs and the FIFOs -- the links this plan's Route B costs listed as needing custom
+  interface definitions -- all end up *inside* a device.  For the memory-mapped wiring, no custom bus
+  definitions are needed at all.
+- **Tie-offs inside a device prune inside its own synthesis** (an unused view, an idle port).  The
+  memory is still its own IP, so its port-B tie-off still needs Stage 2's parameter.
+- **It is the unit everything else wants.**  The host sees a device through its AXI port, so a device's
+  unit harness (verification and timing) drives it the same way; it is what goes on the board alone;
+  and it is the natural unit for a sub-agent to own (`plans/multi_agent_flows.md`).  A sending
+  kernel's whole side of a link -- its stream, the forward writer, its credit counter -- is in one IP
+  and is tested end to end there.
+- **Four fixed overheads instead of about seven**, and the crossbar's is paid once per configuration.
+
+**What it gives up.**  Reuse below the device: two identical adaptors in two devices synthesize twice.
+And a per-instance split inside a device (kernel vs adaptor) is no longer a separate synthesis -- it is
+recovered within the device's run by the cell-name census `system_resources.md` already uses.
+
+**Identity.**  A device IP's identity is the digest of everything in it: the kernel's csynth Verilog,
+each leaf's source and parameters, each writer's parameters.  A kernel's csynth stays cached under the
+kernel's own identity, so a change to a view's depth re-runs the device's out-of-context synthesis but
+not the kernel's csynth.
+
+**Open: the direct wiring.**  markov also runs with the two kernels joined directly (`link="direct"`): a
+`CreditStreamIF` between them, no bus.  At device granularity that link crosses two IPs and needs a
+credit-stream interface definition -- or the two kernels form one IP when joined directly.  Decide when
+a direct-wired system is packaged; the memory-mapped wiring does not need it.
 
 ## Choosing per purpose, not once
 
@@ -160,21 +229,40 @@ synthesized globally for the shipped bitstream.
 
 Each stage is evidence for the next; stop at any rung if the numbers say so.
 
-**Stage 1 -- measure the per-IP cost, no packaging.**  An `ooc_link` mode for `system_synth`: each
-pysim object's instances synthesized out of context (the leaf library already does the leaves; add the
-kernels' csynth Verilog), the checkpoints linked into the generated top, `opt_design`, report.  On
-markov, record: total area and the gap to global; wall clock cold and after a one-block change; per-IP
-times.  Also gives each kernel its out-of-context Vivado number, which splits the open +90% into csynth's
-estimate error and context.  Gate: the `ooc_link` total equals the sum of its parts plus a link term
-that is measured, not assumed.
+**Stage 0 -- devices from the inventory.**  A grouping derived, not hand-listed: from
+`SystemTopSpec.instances()` and each instance's `owner`, map every RTL instance to its device, the
+memory or the crossbar, by the rules in [Granularity](#granularity-one-ip-per-device) (a bus writer to
+the kernel it acts for).  Then render each device as a **sub-top** of the system top, so route A's
+global synthesis, XSI and route B's per-device synthesis all read the same device modules -- one
+realization of the graph, not two.  Gates: markov's fifteen instances fall into the four groups, each
+exactly once (and mm_fir's, both topologies); the system top re-rendered with device sub-tops runs
+markov's XSI gate unchanged (1870 cycles, traces identical) and its global synthesis total moves by no
+more than noise.
+
+**Stage 1 -- measure the per-device cost, no packaging.**  An `ooc_link` mode for `system_synth`: each
+device sub-top, the memory and the crossbar synthesized out of context (the leaf library already does
+the leaves; add the kernels' csynth Verilog), the checkpoints linked into the system top,
+`opt_design`, report.  Each out-of-context result files under its identity, so a repeat is a cache hit.
+On markov, record, from the runs' own timing events (`waveflow.events`):
+
+- area: the `ooc_link` total, the sum of the four parts, the link term, and the gap to global;
+- wall clock: cold, sequential and parallel; after a change to one device (a view depth); after a change
+  to one kernel's source (its csynth plus its device);
+- per-IP synthesis times, and each kernel's out-of-context Vivado number -- which splits the open +90%
+  into csynth's estimate error and context.
+
+Gate: the `ooc_link` total equals the sum of its parts plus a link term that is measured, not assumed;
+unchanged devices show no synthesis span in a one-device rebuild.
 
 **Stage 2 -- tie-offs as parameters.**  Add parameters for the tie-offs the inventory can see
 (`bram_t2p` port B, unused crossbar slots), carried in each leaf's identity.  Gate: markov's memory is
 one RAMB36 out of context; the composed BRAM equals the measured.
 
-**Stage 3 -- package.**  `ExportIpStep` (from `board_packaging.md` S0) for kernels; an IP per owner for
-the hand-written leaves; interface definitions for the non-AXI links.  Gate: rung 3 of
-`board_packaging.md` (VLNV and ports) for each of markov's IPs.
+**Stage 3 -- package.**  `ipx::package_project` per device sub-top (its kernel's csynth Verilog and its
+leaves' sources), the memory as one IP, the crossbar's `.xci` as is.  At device granularity the
+memory-mapped wiring needs no custom interface definitions (every inter-IP link is AXI-MM or an
+interrupt); the direct wiring's credit stream is the open case.  Gate: rung 3 of `board_packaging.md`
+(VLNV and ports) for each of markov's four IPs.
 
 **Stage 4 -- the block-design generator.**  From the system spec, `create_bd_cell` /
 `connect_bd_intf_net` for each IP and link; `validate_bd_design` (rung 4) as the gate.  The XSI top and
@@ -183,12 +271,34 @@ the block design rendered from one spec.
 **Stage 5 -- choose the default.**  With stages 1-4 measured, decide which synthesis mode a system's
 bitstream uses by default, and record why.
 
+**Stage 6 -- the markov docs: both routes, measured.**  `docs/examples/markov/synth.md` already shows
+route A (csynth of the four tops, the crossbar and the top, the system's resources).  Add the
+comparison, on markov's own numbers from Stages 1-2:
+
+- the four-IP grouping, as a table and a figure, and why each bus writer sits where it does;
+- resources: global (A) against per-device (B) -- the sum of parts, the link term, the gap, per
+  resource -- and what the gap is (cross-boundary optimization and tie-offs, named);
+- synthesis time: cold, and after a one-device change, for both routes;
+- what each route is for (the [purpose table](#choosing-per-purpose-not-once)).
+
+Conditions, so the page stays true:
+
+- **reproducible:** both routes run from `markov_build.py` (a `--route global|per_device` option on the
+  synthesis steps), and every number on the page comes from a run's timing events and synthesis
+  records, never typed in;
+- **the part named:** the numbers are for the stand-in part (xc7z020), not the board's; say so;
+- **one page, not a new chapter:** a section of `synth.md` (or one sibling page), linked from
+  markov's build page, so markov's reading order is unchanged.
+
+Gate: the page's numbers regenerate from the build (a docs figure step, as markov's figures do), and
+the docs snippet harness passes.
+
 ## Open
 
 - **The composed-vs-measured gap** (+90% LUT on markov): Stage 1 separates its two causes.
-- **Granularity.**  One IP per pysim object is the proposal; a kernel together with its device (adaptor
-  + views) as one IP is the coarser alternative -- fewer runs, fewer interface definitions, and still
-  testable on the board through its AXI port.
+- **Granularity** -- decided: one IP per device
+  ([above](#granularity-one-ip-per-device)).  Still open within it: the direct wiring's credit stream
+  between devices.
 - **The part.**  Everything above is on xc7z020 (what the kernels are csynth'd for); the board is the
   RFSoC 4x2 (`xczu48dr`), which this machine's Vivado cannot synthesize.  `board_packaging.md` S0's
   `Board` should supply the part to both plans; measurements use a stand-in where the license requires
@@ -205,3 +315,7 @@ bitstream uses by default, and record why.
   is what Stage 4 revisits for systems.  Its §9.4 claimed `bram_t2p.v` infers block RAM; that was
   false until PR #250.
 - `plans/rfsoc_4x2_bringup.md` -- the board and the clean-clone acceptance test any bitstream must pass.
+- `plans/incremental_xsi.md` -- the device sub-tops of Stage 0 must keep XSI's content stamps valid; a
+  device's unit harness runs on an `XsiSnapshot` of its sub-top.
+- `plans/multi_agent_flows.md` -- the device as the unit a sub-agent owns: its harness, its IP, its
+  calibration.
