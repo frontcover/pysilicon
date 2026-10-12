@@ -476,7 +476,8 @@ class Rfdc(HwModule):
             adc_rate = self.words_per_cycle(self.rx_streams[0], self.rx_samp_rate)
             group = tuple(f"rx_stream_{i}" for i in range(int(self.n_rx)))
             models.append(BfmModel("RfdcAdcMaster", ports=(group, "rx_rf"),
-                                   extra_args=(self._fmt_literal(), repr(adc_rate))))
+                                   extra_args=(self._fmt_literal(), repr(adc_rate)),
+                                   reports_counters=True))
         if int(self.n_tx) > 0:
             dac_rate = self.words_per_cycle(self.tx_streams[0], self.tx_samp_rate)
             # blk_comps is one block's worth -- the unit the RF edge moves.  The DAC needs it to
@@ -495,7 +496,8 @@ class Rfdc(HwModule):
             group = tuple(f"tx_stream_{i}" for i in range(int(self.n_tx)))
             models.append(BfmModel("RfdcDacSlave", ports=(group, "tx_rf"),
                                    extra_args=(self._fmt_literal(), repr(dac_rate),
-                                               str(blk_comps))))
+                                               str(blk_comps)),
+                                   reports_counters=True))
         return tuple(models)
 
     # -- the two conversion paths ----------------------------------------------------------------

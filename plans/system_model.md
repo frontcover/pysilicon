@@ -376,11 +376,24 @@ Golden checks stay as an optional per-example step: "the destination equals the 
 >   data-carrying periods, 63 collected blocks.
 > - New gates `test_rf_loopback_system_xsi.py` (2); `WANT_XSI_GATES` 178.
 >
-> **Not reproduced: the loss counters** (`ADC_DROPPED`, `DAC_BLOCKS_ZERO_FILLED`, ...).  The kernel
-> gate prints them from a **hand-written main** that reads fields off the model objects, and the
-> system flow's main is generated.  A third decision: how an example adds its own report to a
-> generated system run.  Either the models print their counters in `post_sim` (one format, every
-> run), or an `HwSystem` hook supplies the main.
+> **The loss counters: a recording the models write (decided with the user, 2026-10-12).**
+> - The counters are the testbench models' own bookkeeping, not RTL registers: the converter
+>   straddles the cut, and its drop and underrun counts are the fabric boundary seen from the RF
+>   side.  A register view read by a host was considered and rejected for this.  The DUT cannot see a
+>   dropped word, and modelling the RFDC IP's status interface needs a bus, a slave-side model and a
+>   host, all to pass a gate.
+> - **Done:** a model declares it keeps counters (`BfmModel` / `ChannelModel.reports_counters`).
+>   The ADC and DAC models, the RF channels, the source and the sink declare it.  Their C++ writes
+>   the counters as JSON in `post_sim` when `counters_out` is set (`BurstBundle::write_counters`).
+> - The **system** harness alone sets `counters_out` to `vectors/counters/<model>.json`, so the
+>   kernel flow's harness is unchanged.  `HwSystem.recordings()` adds that directory, and
+>   `compared_recordings()` never includes it, since each backend counts in its own units.
+> - `rf_loopback_system_build.check_counters` asserts the kernel gate's counter claims in Python:
+>   ADC 450 + 62 = 512 with drops > 0; DAC 64 periods, 57 zero-fill; 2 words in flight; RF edges
+>   drop 0.  The hand-written main is not needed.
+> - Documented on the example's RTL page, "The same gate, through the system flow".
+> - Board-level loss *observability* (status registers a host reads) is design work, a separate
+>   item.
 
 **S4 -- the TB side through hooks.**  D5.  Gate: the harness is byte-identical; `system_tb_spec` names
 no participant type.

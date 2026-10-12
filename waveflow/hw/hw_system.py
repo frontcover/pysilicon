@@ -138,12 +138,18 @@ class HwSystem(ABC):
             return False
 
         out: list[str] = []
+        counts = False
         for o in self.elements():
             if in_dut(o):
                 continue
             if getattr(o, "out_bundle", ""):
                 out.append(str(o.out_bundle))
             out += [str(seg.bundle) for seg in (getattr(o, "dump_segs", None) or ())]
+            counts = counts or _reports_counters(o)
+        if counts:
+            from waveflow.build.system_top import COUNTERS_DIR
+
+            out.append(COUNTERS_DIR)
         return tuple(dict.fromkeys(out))
 
     def compared_recordings(self) -> tuple[str, ...]:
@@ -159,7 +165,11 @@ class HwSystem(ABC):
                 mod = getattr(mod, "parent", None)
             return False
 
-        skip: set[str] = set()
+        from waveflow.build.system_top import COUNTERS_DIR
+
+        # Model counters are each backend's own bookkeeping, in its own units (an RTL converter
+        # counts words, pysim's edge counts blocks): never compared exactly, always the example's.
+        skip: set[str] = {COUNTERS_DIR}
         for o in self.elements():
             if in_dut(o) or getattr(o, "recording_check", "exact") == "exact":
                 continue
@@ -183,6 +193,23 @@ class HwSystem(ABC):
     def elements(self) -> "list[SimObj]":
         """Every module and interface of the graph, in the order they were created."""
         return list(self.sim._sim_objs)
+
+
+def _reports_counters(obj) -> bool:
+    """Does testbench element *obj* -- a participant, or an interface realized as a channel --
+    declare a C++ model that keeps counters (``BfmModel`` / ``ChannelModel.reports_counters``)?"""
+    from waveflow.hw.hw_module import declares_hook
+
+    try:
+        if declares_hook(obj, "bfm_model"):
+            from waveflow.build.composite_gen import bfm_models
+
+            return any(bm.reports_counters for bm in bfm_models(obj))
+        if declares_hook(obj, "xsi_model"):
+            return bool(getattr(obj.xsi_model(), "reports_counters", False))
+    except Exception:                  # an element whose model cannot be resolved records nothing
+        return False
+    return False
 
 
 __all__ = ["DutTop", "HwSystem", "dut_members"]

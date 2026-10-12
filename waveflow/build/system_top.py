@@ -1180,6 +1180,8 @@ def _ext_port_models(spec: SystemTopSpec, ns: str, shared: dict, local: list, gr
         bfm_model_header,
         bfm_models,
     )
+    from dataclasses import replace
+
     from waveflow.hw.hw_module import declares_hook, discover_dyn_params
     from waveflow.hw.interface import Interface
 
@@ -1242,6 +1244,7 @@ def _ext_port_models(spec: SystemTopSpec, ns: str, shared: dict, local: list, gr
     out: list = []
     claimed: set = set()
     emitted: set = set()
+    counting: set = set()          # names of models that keep counters (BfmModel.reports_counters)
     for net in ext_nets:
         iface = net.owner
         ep = iface.endpoints["master" if net.ext == "in" else "slave"]
@@ -1262,6 +1265,8 @@ def _ext_port_models(spec: SystemTopSpec, ns: str, shared: dict, local: list, gr
                 local.append(hdr)
         out.append(BfmInst(cls, net.name, prefix or net.name, bm.extra_args, dyn_of(part),
                            channel=chan, binds=binds))
+        if bm.reports_counters:
+            counting.add(net.name)
         emitted.add(key)
         claimed.update(id(_bfm_port_endpoint(part, a)) for a in _bfm_port_attrs(bm))
     for inst, port, prefix in spec.maxi_ext:
@@ -1283,8 +1288,26 @@ def _ext_port_models(spec: SystemTopSpec, ns: str, shared: dict, local: list, gr
         else:
             out.append(BfmInst(bfm_dual_class(kind, bm.cls), prefix, prefix, bm.extra_args,
                                dyn_of(part), binds=("sim.dut()", f"{ns}::{prefix}")))
+            if bm.reports_counters:
+                counting.add(prefix)
     channels, peers = _emit_behavioral_edges(edges, model_of_ep, claimed, dyn_of)
-    return out + peers, channels
+    counting |= {e.chan for e in edges if e.model.reports_counters}
+    counting |= {f"{e.chan}_{side}" for e in edges for side, ep in e.sides.items()
+                 if id(ep) not in claimed and model_of_ep[id(ep)][1].reports_counters}
+
+    def count(x):
+        """A model that keeps counters writes them where the run gathers them."""
+        if x.name not in counting:
+            return x
+        path = f'"{COUNTERS_DIR}/{x.name}.json"'
+        return replace(x, dyn_params=tuple(x.dyn_params) + (("counters_out", path),))
+
+    return [count(m) for m in out + peers], [count(c) for c in channels]
+
+
+#: Where a system run's testbench models write their counters (``BfmModel.reports_counters``): a
+#: directory of ``<model>.json`` files, gathered as one recording and checked by the example.
+COUNTERS_DIR = "vectors/counters"
 
 
 def render_system_ports_h(spec: SystemTopSpec) -> str:

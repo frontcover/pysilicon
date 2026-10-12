@@ -186,9 +186,13 @@ def test_the_system_harness_for_rf_loopback_is_the_kernel_flows_model_for_model(
     s = RfLoopbackSystem()
     spec = SystemTopSpec.from_system(s, top="rf_loopback_system")
     sys_tb, ker_tb = system_tb_spec(spec, None, [], graph=s), tb_top_spec(make_xsi_tb())
-    key = lambda m: (m.cls, m.args, m.dyn_params, m.channel)                        # noqa: E731
+    # The one deliberate difference: the system harness points each counting model at the run's
+    # counters directory (its own test below).  Everything else is the kernel flow's.
+    def dyn(x):
+        return tuple(d for d in x.dyn_params if d[0] != "counters_out")
+    key = lambda m: (m.cls, m.args, dyn(m), m.channel)                              # noqa: E731
     assert sorted(map(key, sys_tb.models)) == sorted(map(key, ker_tb.models))
-    chan = lambda c: (c.cls, c.name, c.args, c.dyn_params)                          # noqa: E731
+    chan = lambda c: (c.cls, c.name, c.args, dyn(c))                                # noqa: E731
     assert sorted(map(chan, sys_tb.channels)) == sorted(map(chan, ker_tb.channels))
     assert {m.cls for m in sys_tb.models if m.channel and m.binds[0] == "sim.dut()"} == {
         "RfdcAdcMaster", "RfdcDacSlave"}                          # each spans the cut
@@ -199,6 +203,26 @@ def test_a_recording_its_participant_marks_example_is_gathered_not_compared():
     from examples.rf_loopback.rf_loopback import RfLoopbackSystem
 
     rf = RfLoopbackSystem()
-    assert rf.recordings() == ("vectors/rf_out",) and rf.compared_recordings() == ()
+    assert rf.recordings() == ("vectors/rf_out", "vectors/counters") and rf.compared_recordings() == ()
     mc = MemCopySystem()
     assert mc.compared_recordings() == mc.recordings()          # exact by default
+
+
+def test_counting_models_write_where_the_system_run_gathers_and_the_kernel_flow_is_unchanged():
+    """A model declaring reports_counters is pointed at vectors/counters/<model>.json by the SYSTEM
+    harness only; the kernel flow's harness sets nothing new.  The directory is a recording the
+    example checks, never compared against pysim."""
+    from examples.rf_loopback.rf_loopback import RfLoopbackSystem
+    from examples.rf_loopback.rf_loopback_xsi import make_xsi_tb
+    from waveflow.build.composite_gen import render_tb_harness, tb_top_spec
+    from waveflow.build.system_top import SystemTopSpec, render_system_tb, system_tb_spec
+
+    s = RfLoopbackSystem()
+    spec = SystemTopSpec.from_system(s, top="rf_loopback_system")
+    _main, files = render_system_tb(spec, system_tb_spec(spec, None, [], graph=s))
+    wired = [ln.strip() for ln in files["rf_loopback_system_tb_harness.h"].splitlines()
+             if "counters_out" in ln]
+    assert len(wired) == 6 and all("vectors/counters/" in ln for ln in wired)
+    assert "counters_out" not in render_tb_harness(tb_top_spec(make_xsi_tb()))
+    assert "vectors/counters" in s.recordings()
+    assert "vectors/counters" not in s.compared_recordings()

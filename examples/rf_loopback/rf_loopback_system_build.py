@@ -66,7 +66,47 @@ def check_xsi(work: Path) -> dict:
         assert not np.any(got[k]), f"block {k} is inside the startup transient: zero-fill"
     assert len(data) == WANT_DATA_BLOCKS_OUT, f"{len(data)} grid periods carried data"
     assert np.array_equal(data[0], sent[0]), "the first data block is not the first sent block"
-    return {"sink_blocks": len(got), "data_blocks": len(data)}
+    counters = check_counters(work)
+    return {"sink_blocks": len(got), "data_blocks": len(data), "adc_dropped": counters["adc_dropped"]}
+
+
+#: Words the ADC produces over the scenario: 8 blocks of 64 words.
+WANT_ADC_WORDS = XSI_NBLK * (XSI_BLKSIZE // 4)
+#: Grid periods the DAC emits over the run, and how many of them carry zero-fill.
+WANT_DAC_BLOCKS_OUT = 64
+WANT_DAC_ZERO_FILLED = WANT_DAC_BLOCKS_OUT - WANT_DATA_BLOCKS_OUT
+
+
+def check_counters(work: Path) -> dict:
+    """The counter half of the kernel flow's gate, read from the counters the RTL run's models wrote
+    (``vectors/counters/<model>.json``) instead of from a hand-written main:
+
+    * the ADC accounts for every word it produced (sent + dropped), and **drops some** -- this
+      read-then-write relay cannot keep up while the DAC paces its writes, and a converter cannot
+      be told to wait (the kernel gate's ``WANT_ADC_DROPPED_IS_STRUCTURAL``);
+    * the DAC emits on its grid for the whole run, and every period without a surviving data block
+      is zero-fill;
+    * what the fabric accepted but the DAC never took is under one block (still inside the DUT);
+    * the RF edges themselves lose nothing: the loss is at the fabric boundary.
+    """
+    import json
+
+    def read(name: str) -> dict:
+        return json.loads((Path(work) / "xsi_run" / "vectors" / "counters" / f"{name}.json")
+                          .read_text(encoding="utf-8"))
+
+    adc, dac = read("xsi_tb_adc_axis"), read("xsi_tb_dac_axis")
+    adc_ch, dac_ch = read("xsi_tb_adc_if"), read("xsi_tb_dac_if")
+    src = read("xsi_tb_adc_if_tx")
+    assert adc["words_sent"] + adc["dropped"] == WANT_ADC_WORDS, f"ADC accounting: {adc}"
+    assert adc["dropped"] > 0, f"the relay is expected to drop (pattern A): {adc}"
+    assert dac["blocks_out"] == WANT_DAC_BLOCKS_OUT, f"DAC: {dac}"
+    assert dac["blocks_zero_filled"] == WANT_DAC_ZERO_FILLED, f"DAC zero-fill: {dac}"
+    in_flight = (WANT_ADC_WORDS - adc["dropped"]) - dac["words_recv"]
+    assert 0 <= in_flight < XSI_BLKSIZE // 4, f"{in_flight} words unaccounted between ADC and DAC"
+    assert adc_ch["dropped"] == 0 and dac_ch["dropped"] == 0, f"an RF edge dropped: {adc_ch} {dac_ch}"
+    assert src["blocks_out"] == XSI_NBLK and adc_ch["transferred"] == XSI_NBLK
+    return {"adc_dropped": adc["dropped"], "in_flight": in_flight}
 
 
 if __name__ == "__main__":
