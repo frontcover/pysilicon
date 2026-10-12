@@ -411,6 +411,56 @@ the composite testbench class is retired (its gates replaced by the system-flow 
 second way in.  Then the flow-steps prose rewrite.  The existing kernel-flow gates stay until that
 decision.
 
+> **Built (2026-10-12): all twelve, both groups.**  Each example has an `HwSystem` beside its
+> testbench class (the graph is the testbench's, the cut is a `DutTop` holding the DUT alone), a
+> `<example>_system_build.py`, and `tests/examples/test_<example>_system_xsi.py` reproducing its
+> kernel gate's numbers through `add_system_steps` (`WANT_XSI_GATES` 179 → 227):
+>
+> | example | system gate reproduces |
+> |---|---|
+> | state_toy | 1..5 per lane |
+> | fir_block | every block bit-exact across a reload and the carry |
+> | interleaver (in-band) | twelve jobs, the last at 1300 |
+> | rf_relayout | the identity, the 64th word at 68 |
+> | rf_repeat_play | 15296 samples, 25-slot lead-in, one 64-slot hole, 15143 fed |
+> | rf_loopback DUT gate | bit-exact relay, the last word at 1066 |
+> | bram_access | the golden, the last read word at 568 |
+> | rf_blk_delay | zero loss both ends, skew 0, responses at 3827 / 4211, 234 DAC blocks |
+> | rf_samp_buf_rx / _tx | the windows, 15442 / the ramp, 5191, 40 DAC blocks |
+> | rf_shot_rx (2 builds) | no gap, alternating halves, 516 words at 2205, the address is the phase |
+> | rf_shot_tx (2 builds x 2 streams) | passes, phase, block shape, startup, verdicts at 273/502 (271/500) |
+>
+> What it took in the framework:
+>
+> - **`rtl_module` support in the system walk.**  A kernel that declares `add_rtl_mod` is instantiated
+>   as its wrapper (`wrapper_gen`): `KernelRtl.wrapper` / `.rtl_leaves` / `.csynth_module`, the
+>   wrapper rendered into the top's (and its sub-top's) file, `instances()` listing the csynth'd
+>   kernel and the hand-written module at their path through it.  markov / mm_fir byte-identical.
+> - **The kernel's spec is elaborated with the instance's own `HwParam` values**, not the class
+>   defaults -- a wrapper's memories are sized from them (rf_shot_rx: 256 csynth'd, 512 default).
+> - Counters that kernel gates read from a hand-written main's stdout come from the converter
+>   models' counter recordings instead (S3d's mechanism); a scenario a hand-written main selected by
+>   renaming bundles (rf_shot_tx's loop stream) is a system of its own.
+>
+> **The comparison found a defect.**  rf_shot_tx's loader never assigned `ShotTxResp::_rsvd`
+> ("reserved, must be zero"); the RTL drove bit 40 set on every response.  The kernel gates decode
+> through the schema and could not see it; the system flow's word-for-word compare of the response
+> recording did.  Fixed (one assignment), both builds re-csynth'd, every kernel-gate number unchanged.
+>
+> **Not carried over:** the kernel gates' waveform claims (bram_access's, rf_shot_rx/tx's port
+> overlap, write range, read-during-write scan) read a wrapper's nets off a VCD of the kernel flow's
+> traced run.  The system flow does not trace a run yet; those claims stay with the kernel gates.
+> Recordings pysim cannot match by construction are marked `recording_check = "example"`: the RF
+> sinks (loss below a block, a different LT transient, a time horizon against a cycle bound) and
+> rf_blk_delay's responses (pysim bounds the relay at `N_BLK`, the RTL relays `SRC_NBLK`).
+>
+> **Open: the retire decision.**  Each example now has two RTL gates for one design -- the kernel
+> flow's (a composite `*TB` class + `tb_top_spec` + generated main, some with hand-written counter
+> mains) and the system flow's.  Retiring the first means: the system gates take over the cycle
+> numbers; the VCD claims need tracing in the system flow first (or move to a traced system run);
+> the composite-TB generation (`tb_top_spec`, `render_tb_main`, `*_counters` mains) goes; the TB
+> classes stay as graphs the systems build on.
+
 **S4 -- the TB side through hooks.**  D5.  Gate: the harness is byte-identical; `system_tb_spec` names
 no participant type.
 
