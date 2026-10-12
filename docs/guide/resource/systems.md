@@ -96,6 +96,15 @@ published library of the same name, so the next estimate sees what the build jus
 Instances plus integration equal the total exactly -- integration is *defined* as the remainder, and
 negative is legal.
 
+{: .note }
+> These numbers were measured on the flat top. The top now holds each
+> [device and the memory as a sub-top](../build/xsi_system.md#devices), and the step reads the report
+> one level deeper (`-hierarchical_depth 2`), joining each row to the inventory by its path
+> (`u_gen_sub/u_u_fwd_wr`). The same synthesis of the hierarchical top (2026-10-11) gives
+> **6,281 LUT / 7,187 FF / 4 BRAM18** with integration +2 LUT. Vivado's default
+> `-flatten_hierarchy rebuilt` dissolves the sub-tops, so the global result is the flat one to
+> within 0.1%.
+
 **A dissolved instance is still its own.**  Under Vivado's default `-flatten_hierarchy rebuilt`,
 `u_mem_mem` and `u_mem` get no row of their own: synthesis dissolved their hierarchy into the top.
 Their cells keep their names, so the step prices each such instance by the primitives under its name

@@ -11,6 +11,16 @@ is committed to.
 (see [Granularity: one IP per device](#granularity-one-ip-per-device)) -- and the plan ends with the
 markov docs comparing both routes on measured numbers.
 
+**Revised 2026-10-11:** a [Docs](#docs) section places each new page with its stage, and lists five
+existing build steps (and one index link) documented nowhere, to close independently.
+
+**Paused after Stage 0 (2026-10-11).**  Stage 0 and Docs 0 are done.  Stages 1-4 wait on
+`plans/system_model.md`.  A system today has no class stating its contract: `discover()` finds it by
+searching for one crossbar and one `SwHost`, and the walk is crossbar-centric.  That plan gives the
+system a `System` base, the cut as a per-build partition into DUT and TB, realization hooks for
+interfaces, and a generic walk that builds `SystemTopSpec`.  Per-device synthesis and packaging then
+build on that instead of on `discover()`.
+
 ## The question
 
 A *system* -- several kernels behind memory-mapped adaptors, AMD's crossbar, an on-chip memory
@@ -239,6 +249,21 @@ exactly once (and mm_fir's, both topologies); the system top re-rendered with de
 markov's XSI gate unchanged (1870 cycles, traces identical) and its global synthesis total moves by no
 more than noise.
 
+> **Done (2026-10-11, branch `ip-packaging-routes`).**  `system_top_spec` places every kernel, net and
+> slot (`_group`); `SystemTopSpec.subs` lists the sub-tops, and `RtlInstance.sub` / `.path` place each
+> instance.  `render_system_top` emits one module per sub-top (`<top>_<name>`, instance
+> `u_<name>_sub`) and then the top.  A sub-top's ports are named for the nets they carry, so instance
+> and net names are unchanged.  Probes on device nets are computed in the device; probes on SI channels
+> are computed in the top.  Gates:
+> - markov: 15 instances fall into `u_gen_sub` (6), `u_chain_sub` (5), `u_mem_sub` (3) and the top
+>   (`u_xbar`), each exactly once; mm_fir (both adaptor shapes) is one device;
+> - no stream net crosses a sub-top in either system (`tests/build/test_system_top.py`);
+> - XSI: all 13 markov / mm_fir gates pass on the hierarchical tops (1870, 618, 611; traces identical);
+> - global synthesis (xc7z020, 10 ns): **6,281 LUT / 7,187 FF / 4 BRAM18** against the flat top's
+>   6,287 / 7,187 / 4 (−0.1% LUT).  `system_synth` now reads `-hierarchical_depth 2` and joins rows by
+>   path.  `synth_design` took 173 s against 116 s, but the machine was loaded (the fast test suite ran
+>   alongside), so that is not a measurement.
+
 **Stage 1 -- measure the per-device cost, no packaging.**  An `ooc_link` mode for `system_synth`: each
 device sub-top, the memory and the crossbar synthesized out of context (the leaf library already does
 the leaves; add the kernels' csynth Verilog), the checkpoints linked into the system top,
@@ -292,6 +317,49 @@ Conditions, so the page stays true:
 
 Gate: the page's numbers regenerate from the build (a docs figure step, as markov's figures do), and
 the docs snippet harness passes.
+
+## Docs
+
+The guide splits this route the way it already splits the XSI one: the concept under `flows/`, the
+mechanics under `build/`, the numbers under `resource/`, markov's measurements under its example.  Each
+page lands with the stage that builds what it describes -- never ahead of it.
+
+**Docs 0 -- close the existing gaps (independent; can land before Stage 0).**  An audit of the 48
+`*Step` classes in `waveflow/` (2026-10-11) found 31 documented by class name and the ten in
+`system_dag.py` documented by DAG step name in `build/xsi_system.md` (right: users reach them through
+`add_system_steps`).  Five are documented nowhere, and the build index misses one section:
+
+- **`SvSimStep`** (`waveflow/build/svsim_steps.py`) -- the SystemVerilog-testbench rung (xvlog / xelab
+  / xsim on a hand-written SV testbench, no HLS), named nowhere in `docs/`.  No example uses it (only
+  `tests/build/test_svsim_steps.py`), so a section of `build/xsi.md` (it shares the terms defined
+  there), not a page or an RTL-rung row.
+- **`GenWrapperStep`** (`waveflow/build/rtl_steps.py`) -- the other half of `GenRtlStep`, the wrapper
+  joining the kernel to its hand-written RTL; used by `bram_access` and five RF examples.  A section of
+  `comp_codegen/rtl_module.md`, beside `GenRtlStep`.  *(The audit first credited these six examples
+  to `SvSimStep`, from a combined search.)*
+- **`MemLockStep`, `RfSampBufStep`, `RfTxStreamStep`** (`waveflow/build/streamutils.py`) -- header
+  codegen steps; the RF guide documents the modules, not the steps.  Rows in `build/codegen.md`'s step
+  list beside `MemMgrStep`, linked from the RF pages that use them.
+- **The resource steps are unreachable from the build index.**  `SystemSynthStep`, `LeafResourcesStep`,
+  `KernelResourcesStep`, `ResourceReportStep` are documented in `resource/systems.md`, but
+  `build/index.md`'s topic list never links it.  Add the link (Stage 1's `ooc_link` needs it too).
+
+Gate: every public `*Step` class is named in `docs/` -- a test that greps the class list against the
+docs (system-DAG inner steps exempt by their DAG names), so the next new step cannot go undocumented.
+
+**Docs for the new route, by stage:**
+
+| stage | page | what |
+|---|---|---|
+| 0 | `build/xsi_system.md`, its `system_rtl` section | the device sub-tops: how instances group into devices (a bus writer to the kernel it acts for), and that XSI, global synthesis and per-device synthesis read the same modules |
+| 1 | `resource/systems.md`, a new section beside "The system synthesis" | `system_synth`'s `ooc_link` mode: per-device out-of-context runs, the link, the link term, the cache by identity; linked from `build/index.md` |
+| 2 | `resource/systems.md`, same section | tie-offs as leaf parameters, and that they enter the leaf's identity |
+| 3-4 | **new `build/ipi.md`** ("IP packaging and block design"), a peer of `xsi_system.md` | the packaging steps (`export_design` per kernel, `ipx::package_project` per device and memory, the crossbar's `.xci`), the block-design generator, `validate_bd_design` and the VLNV / port gates, the steps an `add_*_steps` helper puts on the DAG; a fourth row in `build/index.md`'s RTL-rung table (system -> bitstream), marked a realization, not a verification rung |
+| 4-5 | `flows/bitstream_ipi.md` -- **un-hidden and rewritten** (now a `nav_exclude` stub that presumes route B) | the concept: the two routes; packaging and synthesis mode as independent choices; the device as the unit; the [purpose table](#choosing-per-purpose-not-once).  Framed as what follows either simulation flow, not a third flow; `flows/index.md`'s "A third path" paragraph points to it.  Links down to `build/ipi.md` and `resource/systems.md` for mechanics and numbers |
+| 6 | `docs/examples/markov/synth.md` | markov's measured comparison (Stage 6 above) |
+
+Gate per page: the docs snippet harness passes, and `waveflow kb` finds the page for "IP packaging",
+"block design" and "out of context".
 
 ## Open
 
