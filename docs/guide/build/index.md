@@ -43,7 +43,8 @@ That fork is two realizations of one flow, not two separate flows.
 - [Python Simulation Pattern](./python.md) — recipe for writing a step that runs a SimPy simulation and produces in-memory or file artifacts.
 - [Vitis Pattern](./vitis.md) — recipe for invoking Vitis HLS C-sim / C-synth and parsing the resulting reports.
 - [Authoring `run.tcl`](./tcl.md) — the Vitis script shared by both single-kernel and composite flows.
-- [XSI Build Rung](./xsi.md) — what XSI/`xvlog`/`xelab`/BFM mean and how the composite RTL rung runs end-to-end.
+- [XSI Build Rung](./xsi.md) — what XSI/`xvlog`/`xelab`/BFM mean and how the composite RTL rung runs end-to-end;
+  also `SvSimStep`, for a hand-written SystemVerilog testbench with no HLS in it.
 - [XSI System Simulation](./xsi_system.md) — a whole memory-mapped system at RTL, from the pysim
   system object: the generated top, the host as a hooked module, and the trace conformance gate.
 - [Software Threads](./sw_threads.md) — the host as threads, with one API in Python (SimPy) and C++
@@ -55,6 +56,16 @@ That fork is two realizations of one flow, not two separate flows.
 - [Timing Events](./timing_events.md) — where a build's wall clock goes: every step, nested step,
   toolchain run, XSI phase and MCP call as a timing span; `--timing`, `analyze_events`, and what
   each fidelity costs.
+
+Steps documented outside this section:
+
+- [System resources](../resource/systems.md) — the steps `add_system_steps` adds after the RTL:
+  `kernel_resources`, `system_synth` (`SystemSynthStep`, one Vivado synthesis of the system top),
+  `leaf_resources` (`LeafResourcesStep`) and `resource_report` (`ResourceReportStep`).
+- [A module realized as Verilog](../comp_codegen/rtl_module.md#the-two-build-steps) — `GenRtlStep`
+  and `GenWrapperStep`, for a kernel beside hand-written RTL.
+- [Code Generation Steps](./codegen.md#framework-task-body-headers) — the steps that copy the
+  framework's hand-written task bodies (`MemStreamStep`, the RF buffer steps, `MemLockStep`).
 
 ## Quick example
 
