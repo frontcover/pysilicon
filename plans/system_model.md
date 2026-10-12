@@ -212,6 +212,12 @@ streams) through `system_rtl` and XSI.
 **S4 -- the TB side through hooks.**  D5.  Gate: the harness is byte-identical; `system_tb_spec` names
 no participant type.
 
+> **Built (2026-10-12, before S2/S3: it was independent and small).**  `BfmModel.generated_files`:
+> `(file name, render)` pairs a model needs generated beside the harness, rendered when the harness
+> is.  `SwHost.bfm_model()` declares its `<Host>_endpoints.h` there, and `system_tb_spec` collects
+> every model's files instead of `isinstance(p, SwHost)`.  Gate: the harness for markov and both
+> mm_fir shapes, with and without probes (30 files, 61,873 bytes), is byte-identical; a test checks
+> that `system_tb_spec`'s source names no participant type.
 
 **S5 -- cuts other than the default.**  A build passes a DUT sub-tree: one device as the DUT, its
 neighbours as TB.  This is the unit harness's first need, and the per-device synthesis's.  Gate: one

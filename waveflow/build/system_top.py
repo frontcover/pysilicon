@@ -983,7 +983,6 @@ def system_tb_spec(spec: SystemTopSpec, xbar, participants, probes=()) -> "TbSpe
         bfm_models,
         resolve_bfm_model,
     )
-    from waveflow.build.sw_host_gen import endpoints_header, render_host_endpoints_h
     from waveflow.hw.hw_module import discover_dyn_params
     from waveflow.hw.irq import IrqIFSink
 
@@ -1022,11 +1021,14 @@ def system_tb_spec(spec: SystemTopSpec, xbar, participants, probes=()) -> "TbSpe
         models.append(BfmInst("ProbePin", f"pr_{n}", f"probe_{n}", (f'"{n}"',),
                               binds=("sim.dut()", f'"probe_{n}"')))
     stop = models[0].name if participants else None
-    from waveflow.sw import SwHost
-    extra = tuple((endpoints_header(p), render_host_endpoints_h(p))
-                  for p in participants if isinstance(p, SwHost))
+    # Files a model declares it needs generated beside the harness (a host's endpoints header).
+    extra: dict[str, str] = {}
+    for part in participants:
+        for bm in bfm_models(part):
+            for fname, render in bm.generated_files:
+                extra.setdefault(fname, render())
     return TbSpec(top_name=spec.top, models=tuple(models), local_headers=tuple(local), stop_on=stop,
-                  extra_files=extra)
+                  extra_files=tuple(extra.items()))
 
 
 def render_system_ports_h(spec: SystemTopSpec) -> str:

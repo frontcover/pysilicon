@@ -83,3 +83,19 @@ def test_a_system_without_its_cut_cannot_be_built():
     with pytest.raises(TypeError, match="dut"):
         NoCut()
 
+
+def test_the_host_declares_its_generated_header_and_the_harness_names_no_participant_type():
+    """system_model S4: a SwHost's endpoints header is part of what its bfm_model() declares, so
+    system_tb_spec treats every participant alike -- it imports no participant type."""
+    import inspect
+
+    from examples.markov.markov_build import system
+    from waveflow.build import system_top
+
+    s = system()
+    (bm,) = [s.host.bfm_model()]
+    ((fname, render),) = bm.generated_files
+    assert fname == "MarkovHost_endpoints.h"
+    assert "MarkovHost_endpoints" in render()                  # rendered on demand, from the wired host
+    src = inspect.getsource(system_top.system_tb_spec)
+    assert "SwHost" not in src and "isinstance(p" not in src
