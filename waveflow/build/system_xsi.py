@@ -56,9 +56,9 @@ class XsiRun:
 
 
 def discover(sysm):
-    """``(xbar, host, inside)`` of a :class:`~waveflow.simulation.system.System`: its bus, the
+    """``(xbar, host, inside)`` of a :class:`~waveflow.hw.hw_system.HwSystem`: its bus, the
     testbench participant that drives it, and its default cut
-    (:meth:`~waveflow.simulation.system.System.cut`).
+    (:meth:`~waveflow.hw.hw_system.HwSystem.cut`).
 
     Each is found by **role**, not by type (``plans/system_model.md`` D1):
 
@@ -68,11 +68,11 @@ def discover(sysm):
       DUT tree -- the testbench side of the cut.  Its realization is its own ``bfm_model()``.
 
     A system top needs exactly one of each, today."""
-    from waveflow.simulation.system import System
+    from waveflow.hw.hw_system import HwSystem
 
-    if not isinstance(sysm, System):
-        raise LoweringError(f"{type(sysm).__name__} is not a waveflow System: a system flow takes a "
-                            f"subclass of waveflow.simulation.system.System, which builds its graph on "
+    if not isinstance(sysm, HwSystem):
+        raise LoweringError(f"{type(sysm).__name__} is not a waveflow HwSystem: a system flow takes a "
+                            f"subclass of waveflow.hw.hw_system.HwSystem, which builds its graph on "
                             f"self.sim and implements dut() (the default cut) and run()")
     root = sysm.dut()
     buses = [i for i in root.interfaces.values() if callable(getattr(i, "rtl_config", None))]

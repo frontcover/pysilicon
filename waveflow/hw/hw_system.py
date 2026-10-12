@@ -1,4 +1,4 @@
-"""system.py — the :class:`System` base class: a design and its environment, as one object.
+"""hw_system.py — the :class:`HwSystem` base class: a design and its environment, as one object.
 
 ``plans/system_model.md`` S0.  Every system flow -- XSI simulation (``run_system_xsi``,
 ``add_system_steps``), the system top (``SystemTopSpec.from_system``), synthesis and the resource
@@ -60,13 +60,13 @@ def dut_members(root: HwModule) -> list:
     return [c.kernel if isinstance(c, MmSlaveDevice) else c for c in root.sub_comps.values()]
 
 
-class System(ABC):
+class HwSystem(ABC):
     """A design and its environment: the element graph, simulated by :meth:`run`, cut per build.
 
     A subclass builds the graph on ``self.sim`` and implements :meth:`dut` and :meth:`run`::
 
         @dataclass
-        class MarkovSystem(System):
+        class MarkovSystem(HwSystem):
             jobs: list
 
             def __post_init__(self):
@@ -103,4 +103,4 @@ class System(ABC):
         return list(self.sim._sim_objs)
 
 
-__all__ = ["DutTop", "System", "dut_members"]
+__all__ = ["DutTop", "HwSystem", "dut_members"]

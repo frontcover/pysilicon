@@ -45,7 +45,7 @@ def test_compare_traces_names_what_differs(tmp_path):
 
 
 # ---------------------------------------------------------------------------------------------
-# The System contract (plans/system_model.md S0)
+# The HwSystem contract (plans/system_model.md S0)
 # ---------------------------------------------------------------------------------------------
 
 def test_a_system_declares_its_cut():
@@ -54,10 +54,10 @@ def test_a_system_declares_its_cut():
     on: the cut the old derivation from the crossbar's slaves gave, so the top is unchanged."""
     from examples.markov.markov_build import system
     from examples.mm_fir.mm_fir_build import system as fir_system
-    from waveflow.simulation.system import DutTop, System
+    from waveflow.hw.hw_system import DutTop, HwSystem
 
     s, f = system(), fir_system("per_view")
-    assert isinstance(s, System) and isinstance(f, System)
+    assert isinstance(s, HwSystem) and isinstance(f, HwSystem)
     assert isinstance(s.dut(), DutTop)
     assert list(s.dut().sub_comps.values()) == [s.gen_dev, s.chain_dev, s.mem]
     assert s.xbar in s.dut().interfaces.values()
@@ -69,14 +69,14 @@ def test_a_class_that_is_not_a_system_is_refused_by_name():
     class Loose:
         sim = None
 
-    with pytest.raises(LoweringError, match=r"not a waveflow System.*dut\(\).*run\(\)"):
+    with pytest.raises(LoweringError, match=r"not a waveflow HwSystem.*dut\(\).*run\(\)"):
         discover(Loose())
 
 
 def test_a_system_without_its_cut_cannot_be_built():
-    from waveflow.simulation.system import System
+    from waveflow.hw.hw_system import HwSystem
 
-    class NoCut(System):
+    class NoCut(HwSystem):
         def run(self):
             return None
 

@@ -103,7 +103,7 @@ file list and the harness and invokes the same `run.bat` / `run.sh`.
 
 ## A system's steps {#a-systems-steps}
 
-A system is described in [Systems and the cut](./concurrent_system.md): a `System` whose `dut()` is a
+A system is described in [Systems and the cut](./concurrent_system.md): a `HwSystem` whose `dut()` is a
 tree of devices, a memory and the crossbar, with the host as the testbench. One call,
 `add_system_steps(dag, sysm)`, puts its whole flow on a build DAG. Each step is one line here and
 documented in [XSI system simulation](../build/xsi_system.md#running-it):

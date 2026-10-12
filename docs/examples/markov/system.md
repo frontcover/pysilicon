@@ -225,13 +225,13 @@ and the class says it is a system and which part of it is synthesized:
 
 ```python
 @dataclass
-class MarkovSystem(System):
+class MarkovSystem(HwSystem):
     ...
     def dut(self) -> DutTop:
         return self.dut_top
 ```
 
-[`System`](../../guide/build/xsi_system.md#the-spec) is the contract every system flow takes: a
+[`HwSystem`](../../guide/build/xsi_system.md#the-spec) is the contract every system flow takes: a
 `sim`, a `run()`, and `dut()`, the **default DUT**. Here that is a tree: the two devices and the memory
 are its children, and the crossbar and the routed credit stream are the links between them. Binding
 the credit stream in Step 5 already put each of its bus writers in the device of the kernel it acts
@@ -262,7 +262,7 @@ golden; running both wirings and their results are [Python simulation](pysim.md)
    `assign_address_ranges` — then `place` the link, then the interrupt lines, then the host's endpoints
    from `BoundMemSlaveAdaptor` by view name.
 5. Declare the DUT: a `DutTop` of the devices and memories, with the links between them; `dut()`
-   returns it, and the class derives from `System`.
+   returns it, and the class derives from `HwSystem`.
 6. Run until the host's `done` event.
 
 The same object is the input to the RTL simulation: the system top is walked from this graph and the

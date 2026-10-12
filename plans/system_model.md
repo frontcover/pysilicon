@@ -1,4 +1,4 @@
-# Plan: the system model — a `System` class, the cut as a partition, every element realized by its own hook
+# Plan: the system model — a `HwSystem` class, the cut as a partition, every element realized by its own hook
 
 **Status:** discussion, 2026-10-11.  Nothing built.  Written after `plans/ip_packaging_routes.md`
 Stage 0 (PR #252) gave the system top a device hierarchy, and before that plan's Stages 1-4 build
@@ -66,12 +66,12 @@ believes or that the system flows have shown.
 
 ## Design
 
-### D1. A `System` base class that states the contract
+### D1. A `HwSystem` base class that states the contract
 
-`waveflow/simulation/system.py`:
+`waveflow/hw/hw_system.py`:
 
 ```python
-class System(ABC):
+class HwSystem(ABC):
     """A design and its environment: the element graph, simulated by run(), cut per build."""
     sim: Simulation
     def dut(self) -> HwModule: ...              # the default DUT: the root of the synthesizable tree (S1; a list in S0)
@@ -86,7 +86,7 @@ class System(ABC):
 - The crossbar and the host stop being looked up.  If a flow needs the host, it is found by role: the
   TB participants with a bus master facing the DUT.
 
-The two existing systems derive from it.  `discover()` becomes a thin shim over `System`, then goes.
+The two existing systems derive from it.  `discover()` becomes a thin shim over `HwSystem`, then goes.
 
 ### D2. The DUT as a real module tree
 
@@ -145,7 +145,7 @@ what `SwHost.bfm_model()` declares, so the harness generator has no participant 
 
 ### D6. Simulation is the system's; verification is the flow's
 
-`run()` belongs to `System`: it simulates the graph.  The `pysim` step, the scenario file and the trace
+`run()` belongs to `HwSystem`: it simulates the graph.  The `pysim` step, the scenario file and the trace
 `compare` are verification choices of the XSI flow (pysim as the oracle), not part of what a system is.
 
 ## What changes for an author
@@ -154,7 +154,7 @@ Before (markov, today): a dataclass that builds a `Simulation`, devices, a cross
 binds them; the framework finds the crossbar and host by searching.
 
 After: the same construction, but
-- the class derives from `System`;
+- the class derives from `HwSystem`;
 - the devices, memory and crossbar are added to a DUT composite, and `dut()` returns it;
 - nothing else.  Device composites, writer placement and realizations come from the framework.
 
@@ -163,17 +163,17 @@ After: the same construction, but
 Each stage keeps the 13 markov / mm_fir XSI gates (1870, 618, 611; traces identical) and, where the
 Verilog can stay byte-identical, asserts that it does.
 
-**S0 -- `System` and its contract.**  Add the base class; `MarkovSystem` and `MmFirSystem` derive
+**S0 -- `HwSystem` and its contract.**  Add the base class; `MarkovSystem` and `MmFirSystem` derive
 from it and implement `dut()` (returning today's cut as a flat composite, if that is the smaller step)
 and `run()`.  `discover()` delegates to the system.  Gate: no behaviour change; generated Verilog
 byte-identical; a test that a class missing `dut()` fails with a message naming the contract.
 
-> **Built (2026-10-11, branch `system-model-s0`).**  `waveflow/simulation/system.py`, not `hw/`: a
-> system owns the `Simulation` and holds software as well as hardware.  `System` is an ABC with
+> **Built (2026-10-11, branch `system-model-s0`).**  `waveflow/hw/hw_system.py`, not `hw/`: a
+> system owns the `Simulation` and holds software as well as hardware.  `HwSystem` is an ABC with
 > abstract `dut()` and `run()`, and `elements()` over the graph.  In S0 `dut()` returns the cut as a
 > **list** (markov `[gen, chain, mem]`, mm_fir `[fir]`).  A flat composite would re-parent the
 > modules, which is S1's calibration-key question, so the tree root waits for S1.  `discover()`
-> refuses a non-`System` by naming the contract and takes the cut from `dut()`.  It still finds the
+> refuses a non-`HwSystem` by naming the contract and takes the cut from `dut()`.  It still finds the
 > crossbar and the host by type, until S3/S4.
 
 **S1 -- devices as composites.**  `build_mm_device` returns a composite `HwModule`; `MmCreditStreamIF`
@@ -188,8 +188,8 @@ Stage 0's grouping exactly; Verilog byte-identical; **calibration keys unchanged
 >   ancestor of the endpoint's kernel.  The ancestor climb is needed because `MarkovChain`'s `s_u`
 >   belongs to its child `chain_core`.  A kernel in no device leaves its writer unplaced, since any
 >   other composite would take the writer as a task.
-> - `DutTop` (`waveflow/simulation/system.py`) is the root.  `DutTop.of(name, sim, comps=, ifs=)`
->   builds it.  `System.dut()` returns it and `System.cut()` flattens it for `inside=` (each device's
+> - `DutTop` (`waveflow/hw/hw_system.py`) is the root.  `DutTop.of(name, sim, comps=, ifs=)`
+>   builds it.  `HwSystem.dut()` returns it and `HwSystem.cut()` flattens it for `inside=` (each device's
 >   kernel, then each memory).
 > - `system_top._group` reads kernels' and writers' devices off the tree.  The stream-feeding rule
 >   remains only as the fallback for a writer in no device.
@@ -261,7 +261,11 @@ PS software; for the RFDC it is the RFDC IP, a cell of the block design wired to
 AXI-Stream ports.  `ip_packaging_routes.md` Stage 4 (the block-design generator) has to place those
 testbench-side vendor IPs as block-design cells, not only the DUT's devices.
 
-**The revised S3 work:**
+**The revised S3 work, in order** (branch `system-model-s3`, after PR #253 merged S0-S2, S4-S6):
+0. **Rename `System` → `HwSystem`**, moved to `waveflow/hw/hw_system.py` beside `hw_module.py`.
+   The object is not XSI-specific: pysim runs it, synthesis reads its DUT, packaging will build
+   from it.  So `XsiSystem` would be too narrow, and `System` stays free for a larger scope (SALSA's
+   boards and tiles).  Done first, while there are two subclasses.  *(Built.)*
 1. **The walk without a bus.**  `system_top_spec` takes the DUT tree; the crossbar, when present, is
    one link realized through `rtl_config`.  A DUT port not on the bus becomes a top port of its own
    kind (AXIS, `m_axi`, BRAM), as `composite_top_spec` already derives a single kernel's boundary.
@@ -271,14 +275,22 @@ testbench-side vendor IPs as block-design cells, not only the DUT's devices.
 3. **Discovery by role, generalized.**  `discover()` stops requiring exactly one bus and one host:
    zero or one bus; the testbench is every participant outside the DUT tree, each realized by its
    `bfm_model()`.
+4. **mem_copy, then an RF example, as `HwSystem`s** (the gates below).
+5. **The docs, once there is one mechanism.**
+   - `flows/concurrent_layers.md` rewritten around `HwSystem` at both scales, in DUT / testbench
+     vocabulary.  "RTL top" becomes "the DUT's Verilog", and the "XSI simulation top" is retired.
+   - A kernel-scale figure there: mem_copy as a system with no crossbar, in `system_cut.tex`'s
+     colours.  The colours are the three kinds of module (blue kernel, green RTL, tan BFM) plus
+     purple for an interface realized as vendor IP.
+   - The flow-steps diagram redrawn from the `HwSystem` and recoloured to match.
 
 **Gates:**
 - markov and mm_fir unchanged: Verilog and harness byte-identical, the 18 XSI gates;
-- **mem_copy as a `System` with no crossbar**: its `dut()` is the kernel, and its testbench is the
+- **mem_copy as a `HwSystem` with no crossbar**: its `dut()` is the kernel, and its testbench is the
   stream driver, the sink and the memory BFM.  It passes its existing gate (2908 cycles, bit-exact)
   through the system flow.  This is also the first step of folding the single-kernel mechanism into
-  `System` (Open);
-- **an RF example as a `System`**, the RFDC in the testbench through its `bfm_model()`, passing its
+  `HwSystem` (Open);
+- **an RF example as a `HwSystem`**, the RFDC in the testbench through its `bfm_model()`, passing its
   existing gate.  This checks the vendor-IP-outside case.
 
 **S4 -- the TB side through hooks.**  D5.  Gate: the harness is byte-identical; `system_tb_spec` names
@@ -310,15 +322,15 @@ markov device through `system_rtl` with its neighbours as BFMs (the RTL builds; 
 > BFMs).  That is S3's generic walk, or `unit_harness.md`'s first stage.  The standalone sub-top is
 > also what `ip_packaging_routes.md` Stage 1 (per-device out-of-context synthesis) builds on.
 
-**S6 -- docs.**  `build/xsi_system.md` opens with `System` (what a system must provide, D1), then the
+**S6 -- docs.**  `build/xsi_system.md` opens with `HwSystem` (what a system must provide, D1), then the
 cut, then `SystemTopSpec` as the result of the walk.  A guide page on writing a system replaces "read
 `discover`".  `flows/index.md`'s two flows are the cut drawn two ways.
 
 > **Built (2026-10-12), except the last sentence:**
-> - `xsi_system.md` opens with "The system: `System`": the contract table (`sim`, `dut()`, `run()`,
+> - `xsi_system.md` opens with "The system: `HwSystem`": the contract table (`sim`, `dut()`, `run()`,
 >   `cut()`, `elements()`), the DUT as a tree of devices, markov's class as the example, and DUT and
->   testbench as roles.  Then `SystemTopSpec`, whose "Constructing it" now takes `System.cut()`.
-> - The page summary and `api:` name `System` / `DutTop` / `MmSlaveDevice`.
+>   testbench as roles.  Then `SystemTopSpec`, whose "Constructing it" now takes `HwSystem.cut()`.
+> - The page summary and `api:` name `HwSystem` / `DutTop` / `MmSlaveDevice`.
 > - The markov example's system page has "Declaring the DUT" (S1).
 >
 > Not done: recasting `flows/index.md`'s two flows as "the cut drawn two ways".  The sequential and
@@ -328,7 +340,7 @@ cut, then `SystemTopSpec` as the result of the walk.  A guide page on writing a 
 
 - **Two mechanisms for one idea (found 2026-10-12, writing the flows docs).**  A single-kernel XSI
   testbench is a composite `FreeRunMod` (`MemCopyTB`, `potential_targets = {sequential_xsi_tb}`),
-  whose children the cut splits into the RTL top and the BFMs.  A system is a `System` whose `dut()`
+  whose children the cut splits into the RTL top and the BFMs.  A system is a `HwSystem` whose `dut()`
   is a tree.  They are the same idea at two scales, and a single-kernel testbench is a system with no
   crossbar: exactly S3's missing gate.  Folding the first into the second would leave the flows guide
   one mechanism to teach.  `flows/concurrent_system.md` ("Two scales, two mechanisms today")
@@ -356,5 +368,5 @@ cut, then `SystemTopSpec` as the result of the walk.  A guide page on writing a 
   and the generic walk (D4): per-device synthesis and packaging name tree nodes.
 - `plans/unit_harness.md` -- needs S5 (a device as the DUT, neighbours as TB).
 - `plans/system_dag.md`, `plans/host_runtime.md`, `plans/xsi_system_top.md` -- `add_system_steps`,
-  `run_system_xsi` and the system top take a `System` instead of "anything with `.sim`".
+  `run_system_xsi` and the system top take a `HwSystem` instead of "anything with `.sim`".
 - `plans/offchip_memory.md` -- its exclusion from the default cut becomes "not in `dut()`".

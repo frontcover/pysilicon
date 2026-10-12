@@ -3,8 +3,8 @@ title: XSI System Simulation
 parent: Build System
 nav_order: 6.5
 audience: python
-api: [System, DutTop, MmSlaveDevice, SystemTopSpec, SystemTopSpec.from_system, SystemTopSpec.render_verilog, system_top_spec, SubTop, RtlInstance, render_system_top, add_system_steps, run_system_xsi]
-summary: "Simulating a whole memory-mapped system at RTL -- several csynth'd kernels behind their adaptors, AMD's crossbar, an on-chip memory, and a host -- from the pysim system object, with nothing restated. A system is a subclass of System: its sim, run(), and dut(), a DutTop tree of devices (each kernel with its views and the bus writers acting for it) and memories, which is the default cut. SystemTopSpec is the RTL top as data, walked from it; each device is a sub-top that renders and elaborates alone. add_system_steps(dag, sysm) puts csynth (one step per HLS top, fresh while its source stamp matches; build or check), the crossbar IP and the Verilog top (system_rtl), the scenario, pysim, the RTL run and the trace comparison on a BuildDag, and run_system_xsi(sysm) is the same as one call. It walks the graph to the Verilog top (crossbar slots, adaptors, stream nets, credit-link writers, interrupt outputs, tie-offs), generates the harness around the host's C++ twin (its threads on generated endpoints), runs it, and checks the host against pysim: both run one scenario file, every host endpoint records what crossed it, and the traces must be byte-identical; the cycle count is an exact gate of its own. Worked on mm_fir (618 / 611) and markov (1870)."
+api: [HwSystem, DutTop, MmSlaveDevice, SystemTopSpec, SystemTopSpec.from_system, SystemTopSpec.render_verilog, system_top_spec, SubTop, RtlInstance, render_system_top, add_system_steps, run_system_xsi]
+summary: "Simulating a whole memory-mapped system at RTL -- several csynth'd kernels behind their adaptors, AMD's crossbar, an on-chip memory, and a host -- from the pysim system object, with nothing restated. A system is a subclass of HwSystem: its sim, run(), and dut(), a DutTop tree of devices (each kernel with its views and the bus writers acting for it) and memories, which is the default cut. SystemTopSpec is the RTL top as data, walked from it; each device is a sub-top that renders and elaborates alone. add_system_steps(dag, sysm) puts csynth (one step per HLS top, fresh while its source stamp matches; build or check), the crossbar IP and the Verilog top (system_rtl), the scenario, pysim, the RTL run and the trace comparison on a BuildDag, and run_system_xsi(sysm) is the same as one call. It walks the graph to the Verilog top (crossbar slots, adaptors, stream nets, credit-link writers, interrupt outputs, tie-offs), generates the harness around the host's C++ twin (its threads on generated endpoints), runs it, and checks the host against pysim: both run one scenario file, every host endpoint records what crossed it, and the traces must be byte-identical; the cycle count is an exact gate of its own. Worked on mm_fir (618 / 611) and markov (1870)."
 ---
 
 # XSI system simulation
@@ -29,10 +29,10 @@ The two worked cases are [mm_fir](../../examples/mm_fir/rtlsim.md) (one kernel, 
 three queues, two adaptor shapes) and [markov](../../examples/markov/rtlsim.md) (two kernels joined by a
 routed credit stream, four bus masters, a shared BRAM).
 
-## The system: `System` {#the-system}
+## The system: `HwSystem` {#the-system}
 
 Every system flow takes a **system object**: an instance of a subclass of
-[`System`](../../../waveflow/simulation/system.py) (`waveflow.simulation.system`). The class states
+[`HwSystem`](../../../waveflow/hw/hw_system.py) (`waveflow.hw.hw_system`). The class states
 what every downstream step relies on, so a system that compiles against it is one the flows accept:
 
 | member | what it is | markov's |
@@ -44,7 +44,7 @@ what every downstream step relies on, so a system that compiles against it is on
 | `elements()` | every module and interface of the graph | |
 
 `dut()` and `run()` are abstract, so a subclass missing either cannot be instantiated, and a flow
-given an object that is not a `System` refuses it by naming this contract.
+given an object that is not a `HwSystem` refuses it by naming this contract.
 
 **The DUT is a tree.** `build_mm_device` returns each kernel's **device**, a composite module
 (`MmSlaveDevice`) holding the kernel, its views and its adaptor. Binding a routed credit stream adds
@@ -52,10 +52,10 @@ each of its bus writers to the device of the kernel it acts for. `DutTop` holds 
 on-chip memories, and the interfaces between them:
 
 ```python
-from waveflow.simulation.system import DutTop, System
+from waveflow.hw.hw_system import DutTop, HwSystem
 
 @dataclass
-class MarkovSystem(System):
+class MarkovSystem(HwSystem):
     jobs: list
 
     def __post_init__(self):
@@ -111,7 +111,7 @@ sysm = MarkovSystem(jobs=jobs, link="mm")
 spec = SystemTopSpec.from_system(sysm, top="markov_top")
 ```
 
-`from_system` takes the system's default cut, [`System.cut()`](#the-system): the kernels and
+`from_system` takes the system's default cut, [`HwSystem.cut()`](#the-system): the kernels and
 memories of its DUT tree, the same cut [`add_system_steps`](#running-it) takes. It finds the bus and
 the host by their **roles**: the bus is the DUT tree's link that realizes as bus IP (the crossbar's
 `rtl_config`), and the host is the bus master on it whose owner is outside the DUT. The underlying walk is the function `system_top_spec(xbar, inside, ...)`,
@@ -224,7 +224,7 @@ arrangement one level down: `composite_top_spec` returns its `TopSpec`.
 
 The top is not flat. Every instance is in one of three places, and each **device** and each **memory**
 is rendered as its own Verilog module (a *sub-top*) that the system top instantiates. The places are the
-system's own DUT tree (`System.dut()`): `build_mm_device` returns each device as a composite holding its
+system's own DUT tree (`HwSystem.dut()`): `build_mm_device` returns each device as a composite holding its
 kernel, views and adaptor, so the walk reads a kernel's device off the tree rather than inferring it.
 
 | place | holds | in markov |
