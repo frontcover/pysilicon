@@ -59,7 +59,7 @@ memory, bus masters and interrupts reach it through adaptors (`MemRStream` / `Me
 The flow works at two scales. **One kernel** is a single Vitis top, a leaf or a composite of tasks,
 driven at RTL by BFMs on its ports; `mem_copy` is the worked case. **A system** is several kernels
 reached over a bus, each with its memory-mapped device, plus an on-chip memory, AMD's crossbar and a
-host program; markov and mm_fir are the worked cases. A system is a `System`: its DUT is a tree of
+host program; markov and mm_fir are the worked cases. A system is a `HwSystem`: its DUT is a tree of
 **devices**, its testbench is everything else, and the Verilog top (a `SystemTopSpec`) is derived
 from it. [Systems and the cut](./concurrent_system.md) has the picture.
 

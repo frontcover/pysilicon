@@ -126,8 +126,10 @@ os.environ.setdefault("WAVEFLOW_EVENTS", "off")
 #: traced snapshot coexists with the untraced one.  167 -> 168 (Stage 4): one mem_copy testbench serves
 #: every workload, its arena and cycle bound read from vectors/run.json.
 #: 168 -> 173 on 2026-10-12 (plans/system_model.md S5): each markov / mm_fir sub-top elaborates
-#: alone (test_markov_xsi.py x3, test_mm_fir_xsi.py x2).
-WANT_XSI_GATES = 173
+#: alone (test_markov_xsi.py x3, test_mm_fir_xsi.py x2).  173 -> 174 (S3a): mem_copy's system top,
+#: no crossbar, elaborates (test_xsi_bfm.py).  174 -> 176 (S3c): mem_copy through the system flow --
+#: recordings match pysim, golden at 2908 (test_mem_copy_system_xsi.py).
+WANT_XSI_GATES = 176
 
 #: Filled in at collection; module state because a pytest run is one process and the hooks that
 #: write and read it are plain functions.

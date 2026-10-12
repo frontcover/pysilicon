@@ -59,7 +59,7 @@ from waveflow.hw.mm_device import CreditIn, QueueIn, QueueOut, build_mm_device
 from waveflow.hw.mm_host import BoundMemSlaveAdaptor, BusReader, MemSlaveLayout
 from waveflow.hw.reverse_stream import CreditStreamIF, CreditStreamSlaveIF, FramedCreditStreamMasterIF
 from waveflow.simulation.simulation import Simulation
-from waveflow.simulation.system import DutTop, System
+from waveflow.hw.hw_system import DutTop, HwSystem
 from waveflow.sw import SwHost, SwSemaphore
 
 DW = 64
@@ -441,7 +441,7 @@ class MarkovHost(SwHost):
 
 
 @dataclass
-class MarkovSystem(System):
+class MarkovSystem(HwSystem):
     """Everything wired.  ``link="mm"``: host, generator writer, chain credit writer and chain memory
     master on one crossbar, with the two kernels' views and the memory as slaves.  ``link="direct"``:
     a ``CreditStreamIF`` between the kernels and plain streams to the host."""

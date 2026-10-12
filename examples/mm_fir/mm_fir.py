@@ -64,7 +64,7 @@ from waveflow.hw.mm_host import (
     MemSlaveLayout,
 )
 from waveflow.simulation.simulation import Simulation
-from waveflow.simulation.system import DutTop, System
+from waveflow.hw.hw_system import DutTop, HwSystem
 from waveflow.sw import SwHost
 
 DW = 64
@@ -528,7 +528,7 @@ class FirHost(SwHost):
 
 
 @dataclass
-class MmFirSystem(System):
+class MmFirSystem(HwSystem):
     """Everything wired: the host, the kernel, and between them either the bus or nothing.
 
     ``link="mm"`` (default): host -> crossbar -> {register bank, queue in, queue out} <-> kernel,

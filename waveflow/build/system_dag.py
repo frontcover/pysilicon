@@ -283,8 +283,8 @@ class _SystemStep(BuildStep):
 
 @dataclass(kw_only=True)
 class ScenarioStep(_SystemStep):
-    """``scenario``: the host writes its scenario bundle (``SwHost.write_scenario``) -- the one file the
-    pysim run and the XSI run both read."""
+    """``scenario``: the system writes its scenario (``HwSystem.write_scenario``: the host's bundle by
+    default) -- what the pysim run and the XSI run both read."""
 
     description = "The host's scenario bundle: the one file pysim and the RTL run both read."
     step_name: ClassVar[str] = "scenario"
@@ -295,9 +295,7 @@ class ScenarioStep(_SystemStep):
 
     def run(self, config: BuildConfig, **_: Any) -> dict[str, Any]:
         path = self.work_dir(config) / "scenario"
-        host = _host(self.sysm)
-        host.scenario = path.as_posix()
-        host.write_scenario(path)
+        self.sysm.write_scenario(path)
         return {self.a("scenario"): path}
 
 
@@ -327,12 +325,22 @@ class PysimStep(_SystemStep):
         traces = work / "pysim_traces"
         shutil.rmtree(traces, ignore_errors=True)        # a stale trace would describe another run
         host = _host(self.sysm)
-        host.scenario = Path(inputs[self.a("scenario")]).as_posix()
-        host.trace_dir = traces.as_posix()
-        self.sysm.run()
+        if host is not None:
+            host.scenario = Path(inputs[self.a("scenario")]).as_posix()
+            host.trace_dir = traces.as_posix()
+            self.sysm.run()
+        else:
+            # No host: the testbench's participants record into the scenario root.  Run from a
+            # fresh copy of it, then gather each recording as a trace.
+            run_root = work / "pysim_run"
+            shutil.rmtree(run_root, ignore_errors=True)
+            self.sysm.write_scenario(run_root)
+            self.sysm.run()
+            gather_recordings(self.sysm, run_root, traces)
         report = work / "pysim.json"
-        report.write_text(json.dumps({"cycles": self.sysm.sim.env.now / host.clk.period}, indent=2)
-                          + "\n", encoding="utf-8")
+        clk = self.sysm.clock()
+        cycles = self.sysm.sim.env.now / clk.period if clk is not None else None
+        report.write_text(json.dumps({"cycles": cycles}, indent=2) + "\n", encoding="utf-8")
         return {self.a("pysim_traces"): traces, self.a("pysim"): report}
 
 
@@ -362,12 +370,30 @@ class CompareStep(_SystemStep):
 
         out = self.work_dir(config) / "compare.json"
         out.unlink(missing_ok=True)                      # a previous verdict must not outlive this run
+        # A host's traces are compared whole.  A sink's or a memory's recording is compared on its
+        # words: framing at RTL is whatever TLAST the DUT drives, which is not the pysim sink's.
+        host = _host(self.sysm) is not None
         bad = compare_traces(Path(inputs[self.a(self.traces_from)]),
-                             Path(inputs[self.a("pysim_traces")]))
+                             Path(inputs[self.a("pysim_traces")]),
+                             files=("words.bin", "bounds.bin", "meta.json") if host
+                             else ("words.bin",))
         out.write_text(json.dumps({"trace_mismatches": bad}, indent=2) + "\n", encoding="utf-8")
         if bad:
-            raise RuntimeError(f"the host's RTL traces differ from pysim's: {bad}")
+            raise RuntimeError(f"the testbench's RTL traces differ from pysim's: {bad}")
         return {self.a("compare"): out}
+
+
+def gather_recordings(sysm, run_root: Path, traces: Path) -> None:
+    """Copy each of *sysm*'s recordings (``HwSystem.recordings``) from *run_root* into *traces*, one
+    directory per recording named by its last path part (``vectors/s_done`` -> ``s_done``) -- the
+    layout ``compare`` reads."""
+    import shutil
+
+    traces.mkdir(parents=True, exist_ok=True)
+    for rec in sysm.recordings():
+        src = Path(run_root) / rec
+        if src.is_dir():
+            shutil.copytree(src, traces / Path(rec).name, dirs_exist_ok=True)
 
 
 
@@ -452,7 +478,8 @@ class SystemRtlStep(_SystemStep):
         super().__post_init__()
         self.xbar, self.host, cut = discover(self.sysm)
         self.inside = list(self.inside) if self.inside is not None else cut
-        self.spec = system_top_spec(self.xbar, self.inside, top=self.top, xbar_name=self.xbar_name)
+        self.spec = system_top_spec(self.xbar, self.inside, top=self.top, xbar_name=self.xbar_name,
+                                    data_width=getattr(self.sysm, "data_width", None))
 
     @property
     def tops(self) -> tuple[str, ...]:
@@ -473,7 +500,8 @@ class SystemRtlStep(_SystemStep):
     def inner_dag(self) -> BuildDag:
         """The inner DAG: the crossbar IP, then the system top."""
         dag = BuildDag()
-        dag.add(XbarIpStep(name="xbar_ip", owner=self))
+        if self.spec.xbar is not None:                  # no crossbar inside the DUT: no IP to make
+            dag.add(XbarIpStep(name="xbar_ip", owner=self))
         dag.add(SystemTopStep(name="system_top", owner=self))
         return dag
 
@@ -487,7 +515,7 @@ class SystemRtlStep(_SystemStep):
         bad = [f"{n}: {r.message}" for n, r in results.items() if not r.success]
         if bad:
             raise RuntimeError("; ".join(bad))
-        ip = results["xbar_ip"].artifacts["xbar_ip"]
+        ip = results["xbar_ip"].artifacts["xbar_ip"] if "xbar_ip" in results else None
         root = Path(config.root_dir)
         rtl = [f for m in self.spec.modules for f in sorted((root / rtl_rel(m)).glob("*.v"))]
         manifest = self.work_dir(config) / "rtl.json"
@@ -495,9 +523,10 @@ class SystemRtlStep(_SystemStep):
             "top": self.spec.top,
             # The top last, by its bare name: the workspace compiles it from beside the .f.
             "rtl_files": [Path(f).as_posix()
-                          for f in [*ip.sim_files, *self.spec.leaf_sources(), *rtl]]
+                          for f in [*(ip.sim_files if ip else ()), *self.spec.leaf_sources(),
+                                    *rtl]]
                          + [f"{self.spec.top}.v"],
-            "include_dirs": [Path(d).as_posix() for d in ip.include_dirs],
+            "include_dirs": [Path(d).as_posix() for d in (ip.include_dirs if ip else ())],
         }, indent=1) + "\n", encoding="utf-8")
         return {self.a("rtl"): manifest}
 
@@ -515,8 +544,10 @@ class HarnessStep(_Inner):
         from waveflow.build.system_top import render_system_tb, system_tb_spec
 
         o, r = self.owner, self.owner.rtl
-        r.host.scenario, r.host.trace_dir = Path(scenario).as_posix(), o.traces(config).as_posix()
-        tb = system_tb_spec(r.spec, r.xbar, [r.host], probes=list(r.probes or ()))
+        if r.host is not None:
+            r.host.scenario, r.host.trace_dir = Path(scenario).as_posix(), o.traces(config).as_posix()
+        tb = system_tb_spec(r.spec, r.xbar, [r.host] if r.host is not None else [],
+                            probes=list(r.probes or ()), graph=o.sysm)
         return {"harness": render_system_tb(r.spec, tb)}
 
 
@@ -549,7 +580,16 @@ class XsiRunStep(_Inner):
         ws.prepare(rtl_files=m["rtl_files"], include_dirs=m["include_dirs"],
                    tb_name=f"{m['top']}_tb", tb_cpp=main, extra_files=dict(tb_files),
                    tb_include_dirs=tb_inc)
-        out = ws.run(timeout=o.timeout)
+        if o.rtl.host is not None:
+            out = ws.run(timeout=o.timeout)
+        else:
+            # The testbench's participants read and write vectors/: give the run a fresh scenario
+            # copy as its vectors directory, then gather what they recorded.
+            run_root = o.work_dir(config) / "xsi_run"
+            shutil.rmtree(run_root, ignore_errors=True)
+            o.sysm.write_scenario(run_root)
+            out = ws.run(timeout=o.timeout, vectors_dir=run_root / "vectors")
+            gather_recordings(o.sysm, run_root, traces)
         run = XsiRun(output=out, workspace=ws.work_dir, scenario=Path(scenario), traces=traces)
         parse_output(out, run)
         report = write_report(run, ws.work_dir / "report.json")
