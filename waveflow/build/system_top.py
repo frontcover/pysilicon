@@ -295,6 +295,30 @@ class SystemTopSpec:
     #: The devices and the memory, each rendered as its own module (:class:`SubTop`).
     subs: tuple[SubTop, ...] = ()
 
+    @classmethod
+    def from_system(cls, sysm, *, inside=None, top: str | None = None,
+                    xbar_name: str | None = None, id_width: int | None = None) -> "SystemTopSpec":
+        """The RTL top of the pysim system *sysm* (not yet run).
+
+        Finds the system's one crossbar, and cuts at *inside* -- the modules synthesized into the top:
+        kernels and on-chip memories.  The default cut is what ``add_system_steps`` takes: each kernel
+        whose device is a crossbar slave, then each memory on the crossbar.  *top* defaults to the
+        system class in snake case (``MarkovSystem`` -> ``markov_system``), *xbar_name* to
+        ``xbar_<top>``, *id_width* to enough bits to route every crossbar master.  The walk itself is
+        :func:`system_top_spec`, which takes the crossbar directly."""
+        from waveflow.build.system_dag import snake
+        from waveflow.build.system_xsi import discover
+
+        xbar, _host, cut = discover(sysm)
+        return system_top_spec(xbar, cut if inside is None else list(inside),
+                               top=top or snake(type(sysm).__name__), xbar_name=xbar_name,
+                               id_width=id_width)
+
+    def render_verilog(self, probes: dict | None = None) -> str:
+        """The Verilog of this top: each sub-top's module, then the system top
+        (:func:`render_system_top`).  *probes* (``{name: beat(...)}``) adds timing-probe outputs."""
+        return render_system_top(self, probes)
+
     def sub_inst(self, group: str) -> str:
         """The instance name of sub-top *group* ("" -> "": the system top)."""
         return next(s.inst for s in self.subs if s.name == group) if group else ""

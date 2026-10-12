@@ -3,7 +3,7 @@ title: XSI System Simulation
 parent: Build System
 nav_order: 6.5
 audience: python
-api: [system_top_spec, SystemTopSpec, SubTop, RtlInstance, render_system_top, add_system_steps, run_system_xsi]
+api: [SystemTopSpec, SystemTopSpec.from_system, SystemTopSpec.render_verilog, system_top_spec, SubTop, RtlInstance, render_system_top, add_system_steps, run_system_xsi]
 summary: "Simulating a whole memory-mapped system at RTL -- several csynth'd kernels behind their adaptors, AMD's crossbar, an on-chip memory, and a host -- from the pysim system object, with nothing restated: add_system_steps(dag, sysm) puts csynth (one step per HLS top, fresh while its source stamp matches; build or check), the crossbar IP and the Verilog top (system_rtl), the scenario, pysim, the RTL run and the trace comparison on a BuildDag, and run_system_xsi(sysm) is the same as one call. It walks the graph to the Verilog top (crossbar slots, adaptors, stream nets, credit-link writers, interrupt outputs, tie-offs), generates the harness around the host's C++ twin (its threads on generated endpoints), runs it, and checks the host against pysim: both run one scenario file, every host endpoint records what crossed it, and the traces must be byte-identical; the cycle count is an exact gate of its own. Worked on mm_fir (618 / 611) and markov (1870)."
 ---
 
@@ -18,7 +18,7 @@ so the RTL simulation is derived from it rather than written:
 
 | piece | comes from | framework call |
 |---|---|---|
-| the Verilog top | a walk of the pysim graph, cut at a set of modules | `system_top_spec`, `render_system_top` |
+| the Verilog top | a walk of the pysim graph, cut at a set of modules | [`SystemTopSpec.from_system`, `.render_verilog()`](#the-spec) |
 | the crossbar IP | the pysim crossbar's ranges | `generate_axi_xbar(spec.xbar, ...)` |
 | the host's C++ | its threads, in a header beside the example ([Software threads](sw_threads.md)) | (hand-written, once) |
 | the host's endpoints | the wired host: each endpoint's view, address and interrupt | `render_host_endpoints_h` |
@@ -29,22 +29,58 @@ The two worked cases are [mm_fir](../../examples/mm_fir/rtlsim.md) (one kernel, 
 three queues, two adaptor shapes) and [markov](../../examples/markov/rtlsim.md) (two kernels joined by a
 routed credit stream, four bus masters, a shared BRAM).
 
-## The cut is a set
+## The system top: `SystemTopSpec` {#the-spec}
+
+### What it is
+
+A **`SystemTopSpec`** is the RTL top of a system, as data. It is a frozen dataclass in
+[`waveflow/build/system_top.py`](../../../waveflow/build/system_top.py), derived from the pysim system
+by walking its graph. It is the middle of three layers, each derived from the one before:
+
+| layer | what it is | markov's |
+|---|---|---|
+| the pysim system | the Python object you write and simulate: kernels, interfaces, crossbar, host | `MarkovSystem` |
+| **the spec** | the RTL top as data: every instance, slot, net and port, cut at a set of modules | `SystemTopSpec`, top `markov_top` |
+| the Verilog | text rendered from the spec | `markov_top.v` |
+
+Everything about the top is decided when the spec is built, and the spec can be queried before
+anything is rendered or synthesized. The Verilog is then a pure function of it.
+
+### Constructing it
+
+From the system object, not yet run:
 
 ```python
-from waveflow.build.system_top import system_top_spec, render_system_top
+from waveflow.build.system_top import SystemTopSpec
 
 sysm = MarkovSystem(jobs=jobs, link="mm")
-spec = system_top_spec(sysm.xbar, [sysm.gen, sysm.chain, sysm.mem], top="markov_top")
-verilog = render_system_top(spec)
+spec = SystemTopSpec.from_system(sysm, top="markov_top")
 ```
 
-`inside` names what is synthesized into the top: the kernels and any on-chip memory. Everything that
-belongs to them comes along — each kernel's device (the views and adaptor `build_mm_device` built), and
-the two bus writers of a routed credit stream between two inside kernels. Everything else on the graph
-is a BFM beside the top, and **an endpoint bound to nothing inside the set becomes a top port**: the
-host's bus master becomes an AXI4 slave group `s<k>_axi`, and an interrupt line whose sink is outside
-becomes an output `irq_<view>`.
+`from_system` finds the system's one crossbar and takes the default cut, the same one
+[`add_system_steps`](#running-it) takes: each kernel whose device is a crossbar slave, then each
+memory on the crossbar. The underlying walk is the function `system_top_spec(xbar, inside, ...)`,
+which takes the crossbar directly. `from_system` calls it, and code that already holds the crossbar
+can call it too.
+
+### Parameters
+
+| parameter | default | meaning |
+|---|---|---|
+| `sysm` | (required) | the pysim system object, not yet run. It must hold one crossbar and one software host |
+| `inside` | the default cut, above | the modules synthesized into the top: kernels (`FreeRunMod`s with a csynth'd module) and on-chip memories (`MemoryMod`). See [the cut](#the-cut) |
+| `top` | the system class in snake case (`MarkovSystem` → `markov_system`) | the Verilog module name of the system top; the sub-tops are named `<top>_<device>` |
+| `xbar_name` | `xbar_<top>` | the crossbar IP's module name |
+| `id_width` | enough bits to route every crossbar master | the crossbar's AXI ID width |
+
+#### The cut is a set {#the-cut}
+
+`inside` names what is synthesized into the top. Everything that belongs to those modules comes
+along: each kernel's device (the views and adaptor `build_mm_device` built), and the two bus writers
+of a routed credit stream between two inside kernels. Everything else on the graph is a BFM beside
+the top, and **an endpoint bound to nothing inside the set becomes a top port**: the host's bus master
+becomes an AXI4 slave group `s<k>_axi`, and an interrupt line whose sink is outside becomes an output
+`irq_<view>`.
 
 What the walk emits, element by element:
 
@@ -66,23 +102,25 @@ the crossbar lacks tied low or left open; a Vitis master's one-bit IDs against t
 a stream input nothing drives (`TLAST` low, `TKEEP`/`TSTRB` all ones); padded crossbar slots answering
 nothing.
 
-### The spec: `SystemTopSpec` {#the-spec}
+### Generating the Verilog
 
-`system_top_spec` does not return Verilog. It returns a **`SystemTopSpec`**, a frozen dataclass that
-describes the RTL top the system becomes. The spec is one of three layers, each derived from the one
-before:
+```python
+verilog = spec.render_verilog()                          # one string: the whole <top>.v
+verilog = spec.render_verilog(probes=timing_probes(sysm)) # with timing-probe outputs
+```
 
-| layer | what it is | markov's |
-|---|---|---|
-| the pysim system | the Python object you write and simulate: kernels, interfaces, crossbar, host | `MarkovSystem` |
-| **the spec** | the RTL top as data, walked from the system and cut at `inside` | `SystemTopSpec`, top `markov_top` |
-| the Verilog | text rendered from the spec | `markov_top.v` |
+The text is one file holding a module per [device and memory](#devices) (the sub-tops), then the system
+top that instantiates them beside the crossbar. *probes* maps a name to a probe on a pysim endpoint
+(`beat(sysm.gen.s_cmd)`, `last(...)`, `stall(...)`). Each becomes an output `probe_<name>` of the
+top, computed in the module that holds its net. `render_verilog` is the method form of the function
+`render_system_top(spec, probes)`. On a build DAG the `system_top` step writes this text to
+`<work>/<top>.v` ([system_rtl](#system-rtl)).
 
-The spec can be queried **before anything is rendered or built**:
+### Reading it
 
 | field / method | answers |
 |---|---|
-| `kernels` | each csynth'd module in the top (`KernelRtl`): its module name, instance, ports (from the same `TopSpec` its csynth top was built from), and the pysim module it realizes |
+| `kernels` | each csynth'd module in the top (`KernelRtl`): its module name, instance, ports, and the pysim module it realizes |
 | `modules` | the csynth'd modules, each once: whose RTL a workspace compiles |
 | `si`, `host_axi` | each crossbar master slot. A master outside the cut (the host) is a top port `s<k>_axi`; one inside is a wire `si<k>_axi` |
 | `mi` | each crossbar slave slot (`MiSlot`): a view, an adaptor's views, the memory, or a padded stub |
@@ -94,9 +132,6 @@ The spec can be queried **before anything is rendered or built**:
 | `probe_expr(p)`, `probe_home(p)` | a timing probe named by a pysim endpoint, resolved to a Verilog expression and to the module it is computed in |
 
 ```python
-from waveflow.build.system_top import system_top_spec
-
-spec = system_top_spec(sysm.xbar, [sysm.gen, sysm.chain, sysm.mem], top="markov_top")
 spec.modules        # ('markov_gen', 'markov_chain', 'mm_queue_writer_64_128', 'mm_credit_writer_64')
 [s.inst for s in spec.subs]                  # ['u_gen_sub', 'u_chain_sub', 'u_mem_sub']
 len(spec.instances())                        # 15
@@ -106,7 +141,7 @@ len(spec.instances())                        # 15
 
 | consumer | reads the spec for |
 |---|---|
-| `render_system_top` | the Verilog itself |
+| `render_verilog` / `render_system_top` | the Verilog itself |
 | `system_tb_spec`, `render_system_tb` | the XSI harness: which host model binds to which top port |
 | `system_synth` ([Systems](../resource/systems.md)) | joining Vivado's per-instance report to the inventory, by path |
 | `estimate_system` | pricing each instance from the record store |

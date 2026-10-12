@@ -308,3 +308,17 @@ def test_a_leaf_identity_moves_with_its_source_not_its_line_endings(tmp_path):
     assert identify_rtl("leaf", {"W": 8}, [src]) == a
     src.write_bytes(b"module leaf; wire x;\nendmodule\n")              # an edit
     assert identify_rtl("leaf", {"W": 8}, [src]).key != a.key
+
+
+def test_from_system_is_the_walk_with_add_system_steps_defaults():
+    """``SystemTopSpec.from_system(sysm)`` finds the crossbar and the default cut itself, and
+    ``render_verilog`` is ``render_system_top``: the object form and the function form agree."""
+    from waveflow.build.system_top import SystemTopSpec
+
+    sysm, spec = _markov()
+    obj = SystemTopSpec.from_system(sysm, top="markov_top")
+    assert obj == spec
+    assert obj.render_verilog() == render_system_top(spec)
+    assert SystemTopSpec.from_system(sysm).top == "markov_system"        # the class, snake case
+    only = SystemTopSpec.from_system(sysm, inside=[sysm.gen, sysm.chain, sysm.mem], top="t")
+    assert [s.name for s in only.subs] == ["gen", "chain", "mem"]
