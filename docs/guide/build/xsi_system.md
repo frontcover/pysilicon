@@ -112,8 +112,9 @@ spec = SystemTopSpec.from_system(sysm, top="markov_top")
 ```
 
 `from_system` takes the system's default cut, [`System.cut()`](#the-system): the kernels and
-memories of its DUT tree, the same cut [`add_system_steps`](#running-it) takes. It finds the system's
-crossbar among its elements. The underlying walk is the function `system_top_spec(xbar, inside, ...)`,
+memories of its DUT tree, the same cut [`add_system_steps`](#running-it) takes. It finds the bus and
+the host by their **roles**: the bus is the DUT tree's link that realizes as bus IP (the crossbar's
+`rtl_config`), and the host is the bus master on it whose owner is outside the DUT. The underlying walk is the function `system_top_spec(xbar, inside, ...)`,
 which takes the crossbar directly. `from_system` calls it, and code that already holds the crossbar
 can call it too.
 

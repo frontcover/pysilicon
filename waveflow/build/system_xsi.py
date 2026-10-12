@@ -56,27 +56,50 @@ class XsiRun:
 
 
 def discover(sysm):
-    """``(xbar, host, inside)`` of a :class:`~waveflow.simulation.system.System`: its one crossbar,
-    its one software host, and its default cut (:meth:`~waveflow.simulation.system.System.cut`).
+    """``(xbar, host, inside)`` of a :class:`~waveflow.simulation.system.System`: its bus, the
+    testbench participant that drives it, and its default cut
+    (:meth:`~waveflow.simulation.system.System.cut`).
 
-    The cut is the system's own declaration.  The crossbar and the host are still found by type
-    among the graph's elements; ``plans/system_model.md`` S3/S4 replace that with a walk that asks
-    each element how it is realized."""
-    from waveflow.hw.memif import AXIMMCrossBarIF
+    Each is found by **role**, not by type (``plans/system_model.md`` D1):
+
+    * the **bus** is the DUT's link that realizes as bus IP -- the interface of the DUT tree that
+      declares an ``rtl_config`` (S2), today the crossbar;
+    * the **host** is the participant with a bus master on that bus whose owner is **outside** the
+      DUT tree -- the testbench side of the cut.  Its realization is its own ``bfm_model()``.
+
+    A system top needs exactly one of each, today."""
     from waveflow.simulation.system import System
-    from waveflow.sw import SwHost
 
     if not isinstance(sysm, System):
         raise LoweringError(f"{type(sysm).__name__} is not a waveflow System: a system flow takes a "
                             f"subclass of waveflow.simulation.system.System, which builds its graph on "
                             f"self.sim and implements dut() (the default cut) and run()")
-    objs = sysm.elements()
-    xbars = [o for o in objs if isinstance(o, AXIMMCrossBarIF)]
-    hosts = [o for o in objs if isinstance(o, SwHost)]
-    if len(xbars) != 1 or len(hosts) != 1:
-        raise LoweringError(f"{type(sysm).__name__}: a bus system has one crossbar and one software host; "
-                            f"found {len(xbars)} crossbar(s) and {len(hosts)} host(s)")
-    return xbars[0], hosts[0], sysm.cut()
+    root = sysm.dut()
+    buses = [i for i in root.interfaces.values() if callable(getattr(i, "rtl_config", None))]
+    if len(buses) != 1:
+        raise LoweringError(f"{type(sysm).__name__}: a bus system's DUT links its devices through one "
+                            f"crossbar (an interface realized as bus IP, rtl_config); its DUT "
+                            f"'{root.name}' has {len(buses)}")
+    bus = buses[0]
+
+    def in_dut(mod) -> bool:
+        while mod is not None:
+            if mod is root:
+                return True
+            mod = getattr(mod, "parent", None)
+        return False
+
+    hosts: list = []
+    for name, ep in bus.endpoints.items():
+        owner = getattr(ep, "comp", None)
+        if name.startswith("master_") and owner is not None and not in_dut(owner) \
+                and all(owner is not h for h in hosts):
+            hosts.append(owner)
+    if len(hosts) != 1:
+        raise LoweringError(f"{type(sysm).__name__}: a system top is driven by one testbench bus "
+                            f"master (a host outside the DUT on '{bus.name}'); found "
+                            f"{[getattr(h, 'name', h) for h in hosts]}")
+    return bus, hosts[0], sysm.cut()
 
 
 def elaborate_sub_top(spec, name: str, *, root: Path, work_dir: Path) -> Path:

@@ -99,3 +99,21 @@ def test_the_host_declares_its_generated_header_and_the_harness_names_no_partici
     assert "MarkovHost_endpoints" in render()                  # rendered on demand, from the wired host
     src = inspect.getsource(system_top.system_tb_spec)
     assert "SwHost" not in src and "isinstance(p" not in src
+
+
+def test_the_bus_and_the_host_are_found_by_role():
+    """system_model D1: the bus is the DUT tree's link that realizes as bus IP; the host is the
+    bus master outside the DUT.  discover() names neither type."""
+    import inspect
+
+    from examples.markov.markov_build import system
+
+    s = system()
+    xbar, host, _cut = discover(s)
+    assert xbar is s.xbar and host is s.host
+    src = inspect.getsource(discover)
+    assert "AXIMMCrossBarIF" not in src and "SwHost" not in src
+    # Take the crossbar out of the DUT: the system no longer has a bus to build a top around.
+    del s.dut().interfaces[s.xbar.name]
+    with pytest.raises(LoweringError, match="one crossbar"):
+        discover(s)

@@ -221,6 +221,21 @@ onto them.  Gate: Verilog byte-identical.
 byte-identical, plus one new system with **no crossbar** (two kernels joined by a stream, host on
 streams) through `system_rtl` and XSI.
 
+> **First step built (2026-10-12): the bus and the host are found by role** (D1).  `discover()` no
+> longer filters elements by `AXIMMCrossBarIF` / `SwHost`:
+> - the bus is the one link of the DUT tree that declares `rtl_config` (S2);
+> - the host is the bus master on it whose owner is outside the DUT tree (the walk climbs `parent`).
+>
+> No module in the system flow (`system_*.py`, `sw_host_gen.py`, `mm_device.py`) tests for either
+> type now.  Gate: Verilog and harness byte-identical; a test removes the crossbar from the DUT and
+> sees the refusal.
+>
+> **Not built: the generic walk itself.**  `system_top_spec` still starts from the bus and lays out SI
+> and MI slots as a crossbar does.  The gate, a system with no crossbar, needs a software host that
+> talks over plain streams under XSI.  `SwHost`'s C++ twin today has generated endpoints for bus views
+> and interrupts only; a stream endpoint in the fiber runtime is a design question (blocking
+> semantics, which BFM drives the top's AXIS port) to settle with the user first.
+
 **S4 -- the TB side through hooks.**  D5.  Gate: the harness is byte-identical; `system_tb_spec` names
 no participant type.
 
