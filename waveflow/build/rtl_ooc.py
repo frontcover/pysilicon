@@ -41,6 +41,9 @@ class OocSynth:
     wns_ns: float | None = None
     tool: str = ""
     seconds: float = 0.0
+    #: The synthesized netlist (``design.dcp``) when the run was asked to keep one -- what a link
+    #: step reads into the cell this module fills (``system_ooc``).  Empty otherwise.
+    checkpoint: str = ""
 
     def to_json(self) -> dict:
         return asdict(self)
@@ -58,7 +61,8 @@ def clock_port(source: str | Path, module: str) -> str:
     raise ValueError(f"{module}: no ap_clk / clk / aclk input in {source}")
 
 
-def ooc_tcl(module: str, params: dict, sources: list[str], *, part: str) -> str:
+def ooc_tcl(module: str, params: dict, sources: list[str], *, part: str,
+            checkpoint: bool = False) -> str:
     gen = " ".join(f"-generic {k}={v}" for k, v in params.items())
     lines = [
         f"create_project -in_memory -part {part}",
@@ -70,6 +74,7 @@ def ooc_tcl(module: str, params: dict, sources: list[str], *, part: str) -> str:
         "report_utilization -file util_synth.rpt",
         "set s [get_timing_paths -quiet -max_paths 1 -nworst 1 -setup]",
         'if {[llength $s]} { puts "WF_WNS_synth [get_property SLACK $s]" }',
+        *(["write_checkpoint -force design.dcp"] if checkpoint else []),
         'puts "WF_SECONDS [expr {($t1 - $t0) / 1000.0}]"',
         'puts "WF_VERSION [version -short]"',
         'puts "WF_DONE 1"',
@@ -79,10 +84,12 @@ def ooc_tcl(module: str, params: dict, sources: list[str], *, part: str) -> str:
 
 def synth_rtl_ooc(module: str, params: dict, sources, *, part: str, period_ns: float,
                   out_dir: str | Path, identity=None, vivado: str | None = None,
-                  force: bool = False) -> OocSynth:
+                  force: bool = False, checkpoint: bool = False) -> OocSynth:
     """Synthesize Verilog *module* with *params* from *sources* out of context on *part*, cached under
     ``out_dir/<key>_<part>_<period>ns/result.json`` (*identity* defaults to
-    :func:`~waveflow.calib.module_key.identify_rtl` of the three)."""
+    :func:`~waveflow.calib.module_key.identify_rtl` of the three).  *checkpoint* also keeps the
+    netlist (``design.dcp`` beside the result; :attr:`OocSynth.checkpoint`); a cached result without
+    one is re-run when one is asked for."""
     from waveflow import events
     from waveflow.calib.module_key import identify_rtl
     from waveflow.utils.vivado_report import parse_markers, parse_utilization
@@ -91,7 +98,8 @@ def synth_rtl_ooc(module: str, params: dict, sources, *, part: str, period_ns: f
     ident = identity or identify_rtl(module, params, sources)
     work = Path(out_dir) / f"{ident.key}_{part}_{period_ns:g}ns"
     stamp = work / "result.json"
-    if stamp.exists() and not force:
+    dcp = work / "design.dcp"
+    if stamp.exists() and not force and (dcp.exists() or not checkpoint):
         return OocSynth(**json.loads(stamp.read_text(encoding="utf-8")))
     if vivado is None:
         from waveflow.toolchain.toolchain import find_vivado_path
@@ -105,8 +113,8 @@ def synth_rtl_ooc(module: str, params: dict, sources, *, part: str, period_ns: f
     (work / "clocks.xdc").write_text(f"create_clock -period {period_ns:g} -name {clk} "
                                      f"[get_ports {clk}]\n", encoding="utf-8")
     tcl = work / "synth_ooc.tcl"
-    tcl.write_text(ooc_tcl(module, params, [s.resolve().as_posix() for s in sources], part=part),
-                   encoding="utf-8")
+    tcl.write_text(ooc_tcl(module, params, [s.resolve().as_posix() for s in sources], part=part,
+                           checkpoint=checkpoint), encoding="utf-8")
     with events.span("tool", "vivado", script=tcl.name):
         r = subprocess.run([vivado, "-mode", "batch", "-nojournal", "-log", "vivado.log",
                             "-source", tcl.name], cwd=str(work), capture_output=True, text=True,
@@ -121,7 +129,8 @@ def synth_rtl_ooc(module: str, params: dict, sources, *, part: str, period_ns: f
                    counters=parse_utilization((work / "util_synth.rpt").read_text(encoding="utf-8")),
                    wns_ns=float(mk["WNS_synth"]) if mk.get("WNS_synth") else None,
                    tool=f"vivado {mk.get('VERSION', '')}".strip(),
-                   seconds=float(mk.get("SECONDS") or 0.0))
+                   seconds=float(mk.get("SECONDS") or 0.0),
+                   checkpoint=dcp.resolve().as_posix() if checkpoint else "")
     stamp.write_text(json.dumps(res.to_json(), indent=2), encoding="utf-8")
     return res
 

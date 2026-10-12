@@ -4,7 +4,7 @@ parent: Resource Analysis Tools
 nav_order: 4
 has_children: false
 audience: python
-api: [estimate_system, SystemEstimate, synth_system, SystemSynth, KernelResourcesStep, SystemSynthStep, LeafResourcesStep, ResourceReportStep, measure_instances]
+api: [estimate_system, SystemEstimate, synth_system, SystemSynth, synth_ooc_link, OocLink, KernelResourcesStep, SystemSynthStep, LeafResourcesStep, ResourceReportStep, measure_instances]
 summary: "A system's resources: every RTL instance of its top -- the Vitis kernels, the hand-written leaves its interfaces bring, the vendor IP -- priced from its own measurement and grouped by the pysim object it realizes, plus the system integration term, with the measured total of a whole-top synthesis beside the prediction. The composite-kernel decomposition, one level up."
 ---
 # Systems
@@ -133,6 +133,51 @@ synthesis:
 
 So *how* a number was obtained (an exact lookup) and *what* it measures (an HLS estimate) are separate
 columns of the report.
+
+## Per device: synthesized apart and linked {#per-device}
+
+The system synthesis above is **global**: one run that optimizes across every boundary. A block
+design of packaged IPs is synthesized another way by default: each IP on its own, then linked. The
+param `synth_route="per_device"` on `system_synth` does that (`markov_build.py --through system_synth
+--route per_device`, [`system_ooc.synth_ooc_link`](../../../waveflow/build/system_ooc.py)):
+
+1. each [device and the memory](../build/xsi_system.md#devices), rendered as a module of its own,
+   synthesized out of context with its netlist kept;
+2. the top (the crossbar and the glue) synthesized against a black box per device;
+3. the netlists linked (`link_design`, each part scoped to its cell), then `opt_design`.
+
+Each part and the top are cached by the content of everything they read. A change to one device
+re-synthesizes that device and re-links, and nothing else.
+
+On markov (xc7z020, 10 ns):
+
+| | LUT | FF | BRAM18 |
+|---|---:|---:|---:|
+| gen device, alone | 2,299 | 2,560 | 2 |
+| chain device, alone | 3,028 | 3,934 | 0 |
+| memory, alone | 103 | 39 | 2 |
+| top (crossbar and glue), alone | 1,292 | 808 | 0 |
+| link term | −472 | −242 | 0 |
+| **linked** | **6,250** | **7,099** | **4** |
+| global synthesis + `opt_design` | 6,228 | 7,091 | 4 |
+
+The parts plus the link term equal the linked total exactly. The link term is measured, not assumed,
+and it is mostly the crossbar's: 1,292 LUT out of context, against 849 in context. Against the global
+synthesis with the same `opt_design`, synthesizing apart costs 22 LUT (0.35%) and 8 FF. The memory
+needs one RAMB36 even alone, because its idle port B is tied off inside its own module.
+
+The time is what changes:
+
+| rebuild | wall clock |
+|---|---:|
+| global synthesis + `opt_design` | 144 s |
+| per device, cold | about 330 s |
+| per device, one device changed | 103 s |
+| per device, nothing changed | 31 s (the link only) |
+
+So route A, global synthesis, is the cheapest cold build. The per-device route makes each part's
+number its own and an incremental change cheap. [plans/ip_packaging_routes.md](../../../plans/ip_packaging_routes.md)
+weighs the two.
 
 ## The estimate
 

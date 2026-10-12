@@ -677,10 +677,18 @@ class SystemSynthStep(_SystemStep):
     default); the crossbar IP is generated for that part beside the simulation one.  With a platform
     selected the records are filed into it.  *impl* also places and routes (closure in the records).
 
-    Produces ``<work>/system_synth.json`` (the :class:`~waveflow.build.system_synth.SystemSynth`)."""
+    Produces ``<work>/system_synth.json`` (the :class:`~waveflow.build.system_synth.SystemSynth`).
+
+    The param ``synth_route`` chooses how (``plans/ip_packaging_routes.md``): ``"global"`` (the
+    default) is the one synthesis above; ``"per_device"`` synthesizes each device and the memory out
+    of context, the top against black boxes, and links them
+    (:func:`~waveflow.build.system_ooc.synth_ooc_link`) -- each part cached by content, so a change
+    to one device re-synthesizes that device only.  That route writes the
+    :class:`~waveflow.build.system_ooc.OocLink` instead and files no records yet."""
 
     description = "The system top synthesized in Vivado; every instance attributed (opt-in, minutes)."
     step_name: ClassVar[str] = "system_synth"
+    params: ClassVar[dict] = {"synth_route": "global"}
 
     rtl: "SystemRtlStep"
     impl: bool = False
@@ -701,7 +709,7 @@ class SystemSynthStep(_SystemStep):
         root = Path(config.root_dir)
         return {m: root / rtl_rel(m) for m in self.rtl.spec.modules}
 
-    def run(self, config: BuildConfig, **_: Any) -> dict[str, Any]:
+    def run(self, config: BuildConfig, synth_route: str = "global", **_: Any) -> dict[str, Any]:
         import dataclasses
         import json
 
@@ -714,6 +722,21 @@ class SystemSynthStep(_SystemStep):
         ip = generate_axi_xbar(dataclasses.replace(spec.xbar, part=part), self.rtl.ip_dir(config))
         top_v = work / f"{spec.top}.v"
         kdirs = self.kernel_dirs(config)
+        if synth_route not in ("global", "per_device"):
+            raise ValueError(f"synth_route must be 'global' or 'per_device', got {synth_route!r}")
+        if synth_route == "per_device":
+            from waveflow.build.system_ooc import synth_ooc_link
+
+            link = synth_ooc_link(spec, kernel_dirs=kdirs, ip=ip, part=part, period_ns=period,
+                                  out_dir=work.parent / "ooc_link")
+            out = work / "system_synth.json"
+            out.write_text(json.dumps({"route": "per_device", **link.to_json()}, indent=2) + "\n",
+                           encoding="utf-8")
+            reran = [n for n, c in link.part_cached.items() if not c]
+            print(f"  {spec.top} per device: parts {sorted(link.parts)} (re-synthesized: "
+                  f"{reran or 'none'}; top {'cached' if link.top_cached else 'synthesized'}) "
+                  f"-> linked {link.linked}, link term {link.link_term}")
+            return {self.a("system_synth"): out}
         res = synth_system(spec, top_v=top_v, kernel_dirs=kdirs, ip=ip,
                            out_dir=work.parent / "system_synth", part=part, period_ns=period,
                            impl=self.impl, keep_hierarchy=self.keep_hierarchy)

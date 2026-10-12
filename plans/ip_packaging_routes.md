@@ -279,6 +279,61 @@ On markov, record, from the runs' own timing events (`waveflow.events`):
 Gate: the `ooc_link` total equals the sum of its parts plus a link term that is measured, not assumed;
 unchanged devices show no synthesis span in a one-device rebuild.
 
+> **Built and measured (2026-10-12, branch `ip-packaging-s1`, on `system-model-s0`).**
+> `waveflow/build/system_ooc.py::synth_ooc_link` runs three kinds of job:
+> 1. **Each sub-top**, rendered alone (`system_model.md` S5a), out of context with its netlist kept
+>    (`synth_rtl_ooc(checkpoint=True)`, cached by content).
+> 2. **The top**: the crossbar and the glue, against `(* black_box *)` stubs.  It is cached by its
+>    black-box text and the crossbar's configuration.
+> 3. **The link**: `add_files` + `SCOPED_TO_CELLS` + `link_design`, then `opt_design`.
+>    `read_checkpoint -cell` into the design `synth_design` left open is refused ("no structural
+>    source files"), so the link is its own Vivado project.
+>
+> `SystemSynthStep` has a param `synth_route` (`global` | `per_device`), and markov's CLI has
+> `--route`.  The per-device route writes the `OocLink` and files no store records yet.
+>
+> **Area** (markov, xc7z020, 10 ns, Vivado 2025.1):
+>
+> | | LUT | FF | BRAM18 |
+> |---|---:|---:|---:|
+> | gen device, OOC | 2,299 | 2,560 | 2 |
+> | chain device, OOC | 3,028 | 3,934 | 0 |
+> | memory, OOC | 103 | 39 | 2 |
+> | top: crossbar + glue, OOC | 1,292 | 808 | 0 |
+> | sum of parts | 6,722 | 7,341 | 4 |
+> | link term (`link_design` + `opt_design`) | −472 | −242 | 0 |
+> | **linked** | **6,250** | **7,099** | **4** |
+> | global synthesis (route A) | 6,281 | 7,187 | 4 |
+> | global + `opt_design` (like for like) | 6,228 | 7,091 | 4 |
+>
+> - **Losing cross-boundary optimization costs +22 LUT (+0.35%) and +8 FF (+0.1%)** against global +
+>   `opt_design`.  The plan's estimate was "a few hundred LUT (~5%)", with `KEEP_HIERARCHY`'s +25% as
+>   the upper bound.
+> - **The memory's tie-off prunes inside its own sub-top.**  It is one RAMB36 out of context, because
+>   port B's idle wires are in the memory's module.  So Stage 2's tie-off parameter is not needed at
+>   device granularity, for the memory at least.  (The leaf-level OOC run needed two RAMB36 only
+>   because the leaf alone had both ports live.)
+> - **The link term is mostly the crossbar's.**  It is 1,292 LUT out of context and 849 in context
+>   (PR #250), a 443 LUT difference, close to the −472 LUT link term.  The parts' own numbers barely
+>   move when linked.
+>
+> **Wall clock** (sequential, one machine):
+>
+> | | seconds |
+> |---|---:|
+> | global synthesis + `opt_design` | 144 |
+> | per device, cold | about 330: gen 110, chain 81, memory 50, top ~70, link ~30 |
+> | per device, nothing changed | **31**: the link only, no part or top re-synthesized |
+> | per device, one device changed (gen's `qcmd` queue 16 → 32 deep) | **103**: gen re-synthesized (53 s), chain, memory and top cached |
+>
+> Gates: the linked total is the parts plus a measured link term; a one-device change re-runs that
+> device only (`part_cached` and `top_cached` in the result).  Not yet done from this stage's list:
+> - parallel part runs (each part is independent, so it is a scheduler question);
+> - the kernels' own OOC numbers, which split the old +90% composed estimate into csynth error and
+>   context.  The old figure compared csynth *estimates* with Vivado; the per-device parts here are
+>   all Vivado and land within 8% before linking;
+> - records in the store for the per-device route.
+
 **Stage 2 -- tie-offs as parameters.**  Add parameters for the tie-offs the inventory can see
 (`bram_t2p` port B, unused crossbar slots), carried in each leaf's identity.  Gate: markov's memory is
 one RAMB36 out of context; the composed BRAM equals the measured.
