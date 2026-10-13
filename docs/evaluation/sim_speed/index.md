@@ -45,16 +45,17 @@ the first block measured is memcpy, which has no arithmetic at all.
 | block | untimed model | Waveflow pysim | RTL (XSI) | notes |
 |---|---|---|---|---|
 | [memcpy](memcpy.md), per copy | 0.5 us | 0.4 ms (25 events) | -- | no compute: the per-transaction cost, flat in the copy length |
-| [SSR FFT](fft.md) `L = 1024`, per frame | 1.87 ms | 2.29 ms flat; 4.44 ms per task | 131 ms | plus ~131 s csynth and a 24.5 s XSI build per design point |
+| [SSR FFT](fft.md) `L = 1024`, per frame | 1.87 ms (vectorized numpy) | 2.29 ms flat; 4.44 ms per task | 131 ms | plus ~131 s csynth and a 24.5 s XSI build per design point |
 
 Measured 2026-10-13 on one Windows 11 machine (Intel 13th-generation-class CPU, Python 3.14),
 nothing else running, best of several runs.
 
-**Against an optimized model** the picture changes, and it should be read that way. The FFT's
-untimed model is not optimized; compiled as typed loops it would take an estimated ~0.05 ms a frame.
-The pysim would call the same compiled arithmetic and keep its measured overhead, ~0.05 + 0.42 =
-~0.47 ms flat: about 9 times the optimized model, still about 280 times faster than RTL. The
-estimate and its basis are on [the FFT page](fft.md#with-an-optimized-model-an-estimate-not-yet-measured).
+**Against a compiled model** the picture changes, and it should be read that way. The FFT's untimed
+model is vectorized numpy -- a fair baseline, and what most system engineers write -- but not
+compiled. Rewritten as typed loops and compiled, which is real work, it would take an estimated
+~0.05 ms a frame. The pysim would call the same compiled arithmetic and keep its measured overhead,
+~0.05 + 0.42 = ~0.47 ms flat: about 9 times the compiled model, still about 280 times faster than RTL.
+The estimate and its basis are on [the FFT page](fft.md#with-a-compiled-model-an-estimate-not-yet-measured).
 
 ## How it is measured
 
@@ -72,9 +73,9 @@ estimate and its basis are on [the FFT page](fft.md#with-an-optimized-model-an-e
 
 - **The cost per event**, about 16 us against SimPy's 0.6 us: mostly building and parsing small
   messages, and interface code. See [memcpy](memcpy.md#where-the-time-goes).
-- **The untimed models themselves.** The FFT's bit-exact model does about a thousand int64
-  operations per sample, because it reproduces the vendor library step by step. An optimized model
-  would lower the untimed baseline *and* the pysim. See [the FFT](fft.md#future-work).
+- **The untimed models themselves.** The FFT's bit-exact model is vectorized numpy, but does about
+  a thousand int64 operations per sample, because it reproduces the vendor library step by step. A
+  compiled model would lower the untimed baseline *and* the pysim. See [the FFT](fft.md#future-work).
 - **Fine-grained designs.** A design that moves many small messages pays the per-transaction cost
   many times; memcpy's 0.4 ms per copy is about 800 times a numpy copy.
 
