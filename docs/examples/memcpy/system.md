@@ -39,7 +39,7 @@ each facing the memory model.
 ## `MemCopySystem`
 
 The system is a short class in `examples/mem_copy/mem_copy_sim.py`. It derives from
-[`GraphSystem`](../../guide/build/xsi_system.md), so it states only the four things that are its own:
+[`GraphSystem`](../../guide/build/xsi_system.md#graph-system), so it states only the four things that are its own:
 
 ```python
 @dataclass
