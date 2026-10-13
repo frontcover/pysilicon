@@ -37,9 +37,6 @@ check it once the converter model was faithful.**
 """
 from __future__ import annotations
 
-import re
-import shutil
-import subprocess
 import tempfile
 from pathlib import Path
 
@@ -54,16 +51,12 @@ from examples.rf_loopback.rf_loopback_xsi import (
 )
 from examples.rf_loopback import rf_loopback_system_build as sysb
 from tests.examples._system_run import WORK, compared_clean, recorded_names, system_run
-from waveflow.build.trace_steps import XSI_RUNNER, rtl_staleness, xsi_runner_cmd
 
 ROOT = Path(__file__).resolve().parents[2] / "examples" / "rf_loopback"
-XSI = ROOT / "xsi"
-#: Where the single-channel system run's testbench read and recorded.  The two-channel and the
-#: interleaved-I/Q runs below are still the kernel flow's, in ``XSI`` (``plans/system_model.md`` S3f).
+#: Where the single-channel system run's testbench read and recorded.  Every RTL run here is a
+#: system run (``examples/rf_loopback/rf_loopback_system_build.py``), one per variant.
 VECTORS = WORK / sysb.TOP / "xsi_run" / "vectors"
 PROJ = ROOT / f"{TOP}_proj" / "solution1" / "syn" / "verilog"
-#: The two-channel DUT's RTL — a separate top, so the one-channel project is untouched by it.
-PROJ_2CH = ROOT / "rf_pass_through_2ch_proj" / "solution1" / "syn" / "verilog"
 
 #: What the ADC produces, and what the fabric actually takes.  8 blocks x 64 words.
 WANT_ADC_WORDS = XSI_NBLK * (XSI_BLKSIZE // 4)
@@ -446,36 +439,19 @@ def test_the_two_channel_tile_runs_at_rtl_as_two_independent_lanes():
        from one channel's ROW rather than from the whole block: dividing by ``n_ch * blksize`` would
        have halved the grid rate and every one of these numbers would be different.
     """
-    _require((XSI / XSI_RUNNER).exists(), f"{XSI / XSI_RUNNER}")
-    _require(PROJ_2CH.is_dir(),
-             f"no csynth RTL at {PROJ_2CH} — run rf_loopback_xsi.py's 2-channel build")
-
-    from waveflow.build.composite_gen import render_rtl_f
     from examples.rf_loopback.rf_loopback_xsi import (
         OUT_BUNDLE_2CH,
-        TOP_2CH,
         XSI_NCH,
-        generate_tb_2ch,
         make_sim_2ch,
     )
 
-    # `*_proj/` is gitignored build output, and a gate that compares a cycle count against RTL it
-    # did not produce reports "a real behaviour change" when the truth is a stale artifact. See
-    # rtl_staleness().  Below the import because TOP_2CH is defined in the module it names.
-    _require(rtl_staleness(ROOT, TOP_2CH) is None, rtl_staleness(ROOT, TOP_2CH) or "")
-
-    generate_tb_2ch(ROOT)
-    (XSI / f"rtl_{TOP_2CH}.f").write_text(
-        render_rtl_f(TOP_2CH, ROOT, stamp_sources=False), encoding="utf-8")
-    shutil.rmtree(XSI / "xsim.dir" / TOP_2CH, ignore_errors=True)
-    shutil.rmtree(XSI / OUT_BUNDLE_2CH, ignore_errors=True)   # never pass on last run's output
-
-    r = subprocess.run(xsi_runner_cmd(TOP_2CH, "rf_loopback_2ch_counters"), cwd=str(XSI),
-                       capture_output=True, text=True, timeout=1800)
-    out = (r.stdout or "") + (r.stderr or "")
-    assert "XSI_EXITCODE=0" in out, f"the 2-channel loopback did not complete cleanly:\n{out[-3000:]}"
-    counters = {k: int(v) for k, v in re.findall(r"^(\w+)=(\d+)$", out, re.M)
-                if k not in ("XSI_EXITCODE",)}
+    # The system run (``rf_loopback_system_build``, variant "2ch"): the counters the models
+    # record, under the names the old hand-written main printed.
+    work = system_run(sysb.build_dag(work_dir=WORK, variant="2ch"), sysb.HERE,
+                      sysb.TOPS["2ch"])
+    assert compared_clean(work)
+    counters = sysb.counters(work, "2ch")
+    run_dir = work / "xsi_run"
 
     # --- 1) ONE model per direction, spanning both ports ----------------------------------------
     assert counters["ADC_N_CH"] == counters["DAC_N_CH"] == XSI_NCH, (
@@ -515,7 +491,7 @@ def test_the_two_channel_tile_runs_at_rtl_as_two_independent_lanes():
     # --- 4) Each lane carried ITS OWN samples -----------------------------------------------------
     from waveflow.simulation.rf_tb import read_rf_bundle
 
-    got = read_rf_bundle(XSI / OUT_BUNDLE_2CH, XSI_NCH, XSI_BLKSIZE)
+    got = read_rf_bundle(run_dir / OUT_BUNDLE_2CH, XSI_NCH, XSI_BLKSIZE)
     assert got, "the run dumped no RF output bundle"
     assert got[0].shape == (XSI_NCH, XSI_BLKSIZE)
     sim = make_sim_2ch()
@@ -607,33 +583,19 @@ def test_interleaved_iq_runs_at_rtl_through_the_unchanged_real_dut():
        independently — a converter that dropped Q would return blocks of the right shape and length.
     4. **The accounting is the real run's**, at matched utilisation.
     """
-    _require((XSI / XSI_RUNNER).exists(), f"{XSI / XSI_RUNNER}")
-    _require(PROJ.is_dir(), f"no csynth RTL at {PROJ} — run rf_dut_build.py --through csynth")
-    # `*_proj/` is gitignored build output, and a gate that compares a cycle count against RTL it
-    # did not produce reports "a real behaviour change" when the truth is a stale artifact. See
-    # rtl_staleness().
-    _require(rtl_staleness(ROOT, TOP) is None, rtl_staleness(ROOT, TOP) or "")
-
-    from waveflow.build.composite_gen import render_rtl_f
     from examples.rf_loopback.rf_loopback_xsi import (
         OUT_BUNDLE_IQ,
         XSI_IQ_WORD,
-        generate_tb_iq,
         make_sim_iq,
     )
 
-    generate_tb_iq(ROOT)
-    (XSI / f"rtl_{TOP}.f").write_text(
-        render_rtl_f(TOP, ROOT, stamp_sources=False), encoding="utf-8")
-    shutil.rmtree(XSI / "xsim.dir" / TOP, ignore_errors=True)
-    shutil.rmtree(XSI / OUT_BUNDLE_IQ, ignore_errors=True)   # never pass on last run's output
-
-    r = subprocess.run(xsi_runner_cmd(TOP, "rf_loopback_iq_counters"), cwd=str(XSI),
-                       capture_output=True, text=True, timeout=1800)
-    out = (r.stdout or "") + (r.stderr or "")
-    assert "XSI_EXITCODE=0" in out, f"the I/Q loopback did not complete cleanly:\n{out[-3000:]}"
-    counters = {k: int(v) for k, v in re.findall(r"^(\w+)=(\d+)$", out, re.M)
-                if k not in ("XSI_EXITCODE",)}
+    # The system run (``rf_loopback_system_build``, variant "iq"): the counters the models
+    # record, under the names the old hand-written main printed.
+    work = system_run(sysb.build_dag(work_dir=WORK, variant="iq"), sysb.HERE,
+                      sysb.TOPS["iq"])
+    assert compared_clean(work)
+    counters = sysb.counters(work, "iq")
+    run_dir = work / "xsi_run"
 
     # --- 1) The I/Q rules reached the models --------------------------------------------------
     assert counters["FMT_IQ_MODE"] == 1, (
@@ -660,8 +622,8 @@ def test_interleaved_iq_runs_at_rtl_through_the_unchanged_real_dut():
     # reads it back with a reader that REQUIRES the key. Before the writer emitted it a missing key
     # was read as real -- which for a complex capture is not an error, just twice as many plausible
     # samples.
-    assert read_burst_meta(XSI / OUT_BUNDLE_IQ)[RF_ELEMENT_KEY] == RF_ELEMENT_COMPLEX
-    got = read_rf_bundle(XSI / OUT_BUNDLE_IQ, 1, XSI_BLKSIZE, complex_samp=True)
+    assert read_burst_meta(run_dir / OUT_BUNDLE_IQ)[RF_ELEMENT_KEY] == RF_ELEMENT_COMPLEX
+    got = read_rf_bundle(run_dir / OUT_BUNDLE_IQ, 1, XSI_BLKSIZE, complex_samp=True)
     assert got and all(b.dtype == np.complex128 for b in got)
     assert len(got) == WANT_IQ_SINK_BLOCKS
 

@@ -85,7 +85,7 @@ SAMP_RATE = 256e6
 #: windows — short enough that an xsim run is a minute.
 N_BLK = 40
 
-#: Fixed run bound for the generated XSI main — a testbench constant, not a latency.
+#: Fixed run bound for the XSI run — a testbench constant, not a latency.
 #: ``N_BLK * BLK_WORDS`` words at 0.256 words/cycle, plus a tail for the last window to land.
 XSI_N_CYCLES = 2800
 
@@ -173,7 +173,7 @@ class RfShotRxTB(FreeRunMod):
     #: ``0`` is the design; anything else makes it lose samples on purpose — see
     #: :attr:`~waveflow.hw.rf_shot_rx.PingPongWindow.stall_blocks`.
     stall_blocks: int = 0
-    #: Fixed run bound for the generated XSI main — a testbench constant, not a latency.
+    #: Fixed run bound for the XSI run — a testbench constant, not a latency.
     n_cycles: int = XSI_N_CYCLES
     #: Which of the two builds this graph wraps — :class:`~waveflow.hw.rf_shot_rx.RfShotRx` or
     #: :class:`RfShotRxAbs`.  ONE testbench graph for both, because a second graph would be a second

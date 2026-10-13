@@ -83,6 +83,23 @@ kernel. The tree is also the unit structure everything after simulation uses: ea
 [Building the markov system](../../examples/markov/system.md) walks one system from its modules to
 its DUT tree.
 
+### A system around one graph: `GraphSystem` {#graph-system}
+
+Most systems with a single kernel already have their graph: a composite holding the kernel and the
+testbench participants around it. `GraphSystem` is the `HwSystem` for that case. A subclass states
+only what is its own, and the base derives the rest:
+
+| a subclass states | the base derives |
+|---|---|
+| `graph()`: build and return the graph | `sim`, from the graph |
+| `dut_modules(g)`: the modules inside the default cut | `dut()`, a `DutTop` of them; `clk`, the DUT's clock; `data_width`, its widest boundary port |
+| `write_inputs(root)`: the scenario's inputs | `write_scenario`: the inputs, then `vectors/run.json` (the graph's `n_cycles`), then every participant that reads or records a bundle anchored at *root* |
+| `check()` (optional): the golden on a pysim run | `run()`: pysim, to the graph's `run_until` when it has one, then `check()` |
+
+A recording that pysim cannot match by construction is marked on its participant in `graph()`
+(`recording_check = "example"`), and the example checks it instead of `compare`.
+[The mem_copy system](../../examples/memcpy/system.md) is the worked example.
+
 ## The system top: `SystemTopSpec` {#the-spec}
 
 ### What it is
@@ -344,15 +361,29 @@ toolchain: `--through pysim` is the whole software side, with no Vivado.
 
 The system at RTL under a testbench, itself an inner DAG:
 
-1. `harness` -- the host's C++ and its generated endpoints, bound to the top's ports
-   (`render_system_tb`), pointed at the scenario and the trace directory;
-2. `xsi_run` -- `xvlog` / `xelab` build the RTL that `rtl.json` lists and `g++` the testbench, the run,
-   and the host's report parsed into `<work>/report.json`; the traces in `<work>/traces/`.
+1. `harness`: each testbench participant's C++ twin (and a host's generated endpoints) bound to the
+   top's ports (`system_tb_spec`, `render_system_tb`);
+2. `xsi_run`: `xvlog` / `xelab` build the RTL that `rtl.json` lists, `g++` builds the testbench, and
+   the run executes. With a host, its report is parsed into `<work>/report.json` and its traces land
+   in `<work>/traces/`. Without one, the run starts from a fresh copy of the scenario
+   (`<work>/xsi_run/`), and what the participants recorded is gathered into `<work>/traces/`.
+
+**Tracing** (`add_system_steps(..., trace=True)`). The run also elaborates a second top whose
+`$dumpvars` dumps each kernel's scope at level 1 inside the system top: the kernel's ports, and for a
+wrapped kernel the wrapper's wires to its memories. It writes `<work>/<top>_trace.vcd`, and
+`<work>/hazards.json`, each wrapped kernel's hazard manifest with the `scope` its nets live under.
+`waveflow.utils.bram_trace` resolves names under that scope, so a waveform check reads a system run
+as it read a kernel run. `SystemTopSpec.scope_of(kernel)` gives a kernel's scope for any other
+reader.
 
 ### compare {#compare}
 
-Every host endpoint's trace, RTL against pysim, file for file -> `<work>/compare.json` (the mismatches;
-empty: pass). A mismatch fails the step.
+What the testbench recorded, RTL against pysim -> `<work>/compare.json` (the mismatches; empty:
+pass). With a host, every endpoint's trace is compared file for file. Without one, every recording
+is compared on its words: each sink's `out_bundle`, each memory's `dump_segs`. A participant whose
+recording pysim cannot match by construction says so (`recording_check = "example"`), and the
+example checks it instead. A mismatch fails the step and names the recording, the participant that
+records it, and the first word that differs.
 
 ### Freshness: a hook each step answers late {#freshness}
 

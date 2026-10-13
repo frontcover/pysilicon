@@ -295,7 +295,7 @@ class ReadResp(DataList):
 #: integer literals.
 SCHEMA_CLASSES = [BramStatusField, BramOpField, WriteComputeCmd, WriteResp, ReadCmd, ReadResp]
 
-#: A fixed run bound for the generated XSI main — a testbench constant, not a latency.  The sink
+#: A fixed run bound for the XSI run — a testbench constant, not a latency.  The sink
 #: timestamps the real completion, and ``WANT_CYCLES`` in the XSI test is that measurement.
 XSI_N_CYCLES = 4000
 
@@ -589,7 +589,7 @@ class BramAccessTB(FreeRunMod):
     small: the elaborated design's only pins are AXI-Stream, so the BFM library needs no memory
     model.  **There is no BRAM XSI object anywhere in this repo**, and that is the stronger story: in
     XSI the memory is ``bram_t2p.v`` itself, compiled into the simulation beside the synthesized
-    kernel and named in ``rtl_bram_access_top.f``.  There is no second implementation that could
+    kernel and named on the system top's compile list.  There is no second implementation that could
     disagree with the first — which is ``docs/guide/interface/primitive/bram.md``'s point that a hand-written
     memory is *more* verifiable than an emulated one.
     """

@@ -412,9 +412,9 @@ class SystemTopSpec:
         return ".".join(p for p in (self.top, sub, k.inst) if p)
 
     def trace_scopes(self) -> list[str]:
-        """The scopes a traced run dumps (each at level 1): every wrapped kernel's wrapper -- where a
-        memory's ports are wires -- or, with none, the top itself."""
-        return [self.scope_of(k) for k in self.kernels if k.wrapper is not None] or [self.top]
+        """The scopes a traced run dumps (each at level 1): every kernel's own -- its ports, and for
+        a wrapped kernel the wrapper's wires to its memories -- or, with none, the top itself."""
+        return [self.scope_of(k) for k in self.kernels] or [self.top]
 
     def hazard_manifests(self) -> list[dict]:
         """Each wrapped kernel's hazard manifest, with the ``scope`` its nets are found under in a

@@ -12,8 +12,9 @@ summary: "Step 7: the digital logic becomes hardware. What check says about each
 Step 7, and the first page here that needs a toolchain:
 
 ```bash
-pytest -m vitis tests/examples/test_rf_dut_synth.py     # Vitis HLS
-pytest -m xsi  tests/examples/test_xsi_bfm.py           # Vivado xsim
+pytest -m vitis tests/examples/test_rf_dut_synth.py         # Vitis HLS
+pytest -m xsi  tests/examples/test_rf_dut_system_xsi.py     # the DUT alone, Vivado xsim
+pytest -m xsi  tests/examples/test_rf_loopback_xsi.py       # the loopback, converters included
 ```
 
 ## What `check` says about these modules
@@ -127,8 +128,9 @@ and with two tasks there are now two things that could vanish.
 
 ## The gate
 
-8 bursts × 64 words = 512 words, relayed bit-identically, with the last word landing at cycle
-**1066**.
+The DUT alone first, between a generic stream driver and sink (`RfPassThroughSystem`, run by
+`python -m examples.rf_loopback.rf_dut_system_build`): 8 bursts × 64 words = 512 words, relayed
+bit-identically, with the last word landing at cycle **1066**.
 
 Synthesized for the **RFSoC 4x2** (`xczu48dr-ffvg1517-2-e`) at 250 MHz — the fabric clock every
 number in [the RF guide](../../guide/rf/) is written against.
@@ -150,7 +152,7 @@ before it has received one.
 What changed is *where the stall lands*. Here it lands on a driver that waits, so it is invisible; in
 the loopback it lands on a converter that cannot, which is where the change is measured — the ADC
 went from dropping 72 words to dropping none. Both numbers live in
-`tests/examples/test_xsi_bfm.py` and `tests/examples/test_rf_loopback_xsi.py`.
+`tests/examples/test_rf_dut_system_xsi.py` and `tests/examples/test_rf_loopback_xsi.py`.
 
 > **Correction (2026-08-17): "dropping none" was measured against a DAC that could not refuse.**
 > `RfdcDacSlave` used to drive `TREADY` high unconditionally, so the fabric could run arbitrarily far
@@ -167,9 +169,9 @@ went from dropping 72 words to dropping none. Both numbers live in
 > the same converters. Do not quote 62 as a design constant; it depends on the model's input-FIFO
 > depth, and the gate asserts only the sign.
 
-## The same gate, through the system flow {#system-flow}
+## The loopback, through the system flow {#system-flow}
 
-The loopback also runs through the [system flow](../../guide/flows/concurrent_system.md), as an
+The loopback runs through the [system flow](../../guide/flows/concurrent_system.md), as an
 `HwSystem`:
 
 ```bash
@@ -187,8 +189,13 @@ is **testbench**:
 
 Each converter model **spans the cut**. Its fabric side drives or answers a stream port of the top.
 Its RF side talks over a behavioral edge, a `BlockChannel`, to the RF data source or sink. The
-harness the system flow generates is the one the kernel flow generates, model for model: the same
-classes, arguments, settings and channels.
+harness has one model per participant, each the participant's own declared twin, and one channel
+per RF edge.
+
+The same system runs the other two tiles of `rf_loopback_xsi.py` as variants:
+`RfLoopbackSystem(variant="2ch")` drives a two-channel tile through the two-lane pass-through, and
+`variant="iq"` drives interleaved I/Q through the unchanged one-channel pass-through. Each is its own
+system top and its own run.
 
 Two things are checked by this example rather than compared against pysim, because the two backends
 legitimately disagree. pysim paces the RF side on the edge and cannot see sub-block sample loss (see
@@ -220,8 +227,10 @@ then asserts the kernel gate's counter claims in Python:
 | words the fabric took but the DAC did not are still inside the DUT, under one block | 2 |
 | the RF edges themselves drop nothing; the loss is at the fabric boundary | 0 and 0 |
 
-In the kernel flow the same numbers come from a hand-written main, `xsi/rf_loopback_counters.cpp`,
-that reads the fields off the model objects after the run. The system flow needs no hand-written C++.
+The converter models also record the ports they bound (`n_ch`), each port's counts, and the sample
+format they were built with (`fmt_*`). That is what the two-channel and I/Q gates read to check that
+one model spans every port of its direction and that the I/Q rules reached it. No hand-written C++
+reads anything.
 
 Counters a model keeps are verification instrumentation: they say what the *testbench* saw. A design
 that must report loss on the board needs observability of its own: status registers in a device
@@ -235,5 +244,6 @@ this gate.
 - [Overriding a free-running body](../../guide/comp_codegen/freerunning_override.md) — the
   `kernel_task()` hook.
 
-**Source of truth:** `examples/rf_loopback/rf_dut_build.py`,
-`tests/examples/test_rf_dut_synth.py`, `tests/examples/test_xsi_bfm.py`.
+**Source of truth:** `examples/rf_loopback/rf_dut_build.py`, `rf_dut_system_build.py`,
+`rf_loopback_system_build.py`; `tests/examples/test_rf_dut_synth.py`,
+`tests/examples/test_rf_dut_system_xsi.py`, `tests/examples/test_rf_loopback_xsi.py`.
