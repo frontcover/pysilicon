@@ -22,7 +22,7 @@ from waveflow.hw.hw_freerun import FreeRunMod
 from waveflow.hw.interface import StreamIF
 from waveflow.hw.memif import AXIMMCrossBarIF, assign_address_ranges
 from waveflow.hw.memory import MemoryMod, MemSeg
-from waveflow.hw.hw_system import DutTop, HwSystem
+from waveflow.hw.hw_system import GraphSystem
 from waveflow.simulation.simulation import Simulation
 
 from examples.mem_copy.mem_copy import CopyCmd, CopyJob, MemCopy
@@ -251,9 +251,9 @@ if __name__ == "__main__":
 
 
 @dataclass
-class MemCopySystem(HwSystem):
-    """mem_copy as a **system** (``plans/system_model.md`` S3): the same :class:`MemCopyTB` graph,
-    with the cut stated as a DUT tree rather than implied by a testbench class.
+class MemCopySystem(GraphSystem):
+    """mem_copy as a **system** (``plans/system_model.md`` S3): the :class:`MemCopyTB` graph, with
+    the cut stated as a DUT tree rather than implied by a testbench class.
 
     The DUT is the :class:`MemCopy` kernel alone -- no bus inside it.  Everything else the graph holds
     is the testbench: the command driver, the completion sink, the memory, and the crossbar that
@@ -261,40 +261,24 @@ class MemCopySystem(HwSystem):
     kernel's two ``m_axi`` bundles are top ports facing the memory model, and its two streams are top
     ports facing the driver and the sink.
 
-    The testbench contract (``plans/system_model.md`` S3b): :meth:`write_scenario` is
-    :class:`MemCopySim`'s -- the command bursts, the source arena, the golden -- with every participant
-    anchored at the root, the sink included, so pysim records what the RTL records (the sink's
-    ``vectors/s_done``, the memory's ``vectors/out``).  :meth:`run` runs from the scenario written
-    last, or from a fresh one in a temp dir, and applies the golden check.
+    The scenario is :class:`MemCopySim`'s -- the command bursts, the source arena, the golden, and
+    its ``run.json`` (the arena size beside the bound); :meth:`check` is its golden check.
     """
 
     jobs: tuple = (CopyJob(src_off=16, dst_off=512, n_words=128),)
     mem_dwidth: int = 64
 
-    def __post_init__(self) -> None:
+    def graph(self) -> MemCopyTB:
         self.runner = MemCopySim(jobs=tuple(self.jobs), mem_dwidth=int(self.mem_dwidth))
-        self.tb = self.runner.tb
-        self.sim = self.tb.sim
-        self.clk = self.tb.clk
-        #: The width of the top's stream ports and m_axi groups: there is no crossbar to take it from.
-        self.data_width = int(self.mem_dwidth)
-        self.dut_top = DutTop.of("mem_copy_dut", self.sim, comps=[self.tb.dut])
-        self._root: Path | None = None
+        return self.runner.tb
 
-    def dut(self) -> DutTop:
-        """The default DUT: the copy kernel alone."""
-        return self.dut_top
+    def dut_modules(self, g) -> list:
+        return [g.dut]
 
-    def write_scenario(self, root) -> None:
+    def write_inputs(self, root) -> None:
         self.runner.write_scenario(root)
-        self.tb.done_sink.root = Path(root)
-        self._root = Path(root)
 
-    def run(self) -> "MemCopy":
-        if self._root is None:
-            with tempfile.TemporaryDirectory() as tmp:
-                self.write_scenario(tmp)
-                self.sim.run_sim()
-        else:
-            self.sim.run_sim()
+    def check(self) -> "MemCopy":
         return self.runner.check()
+
+

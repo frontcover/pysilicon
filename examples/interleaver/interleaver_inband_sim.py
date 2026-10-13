@@ -23,13 +23,13 @@ from waveflow.hw.clock import Clock
 from waveflow.hw.codegen_targets import SEQUENTIAL_XSI_TB
 from waveflow.hw.hw_module import HwParam
 from waveflow.hw.hw_freerun import FreeRunMod
-from waveflow.hw.hw_system import DutTop, HwSystem
+from waveflow.hw.hw_system import GraphSystem
 from waveflow.hw.interface import StreamIF
 from waveflow.hw.memif import AXIMMCrossBarIF, assign_address_ranges
 from waveflow.hw.memory import MemoryMod, MemSeg
 from waveflow.simulation.simulation import Simulation
 from waveflow.simulation.stream_tb import StreamDriver, StreamSink
-from waveflow.utils.burst_io import write_burst_bundle, write_run_params
+from waveflow.utils.burst_io import write_burst_bundle
 
 from examples.interleaver.interleaver import InterleaverCmd
 from examples.interleaver.interleaver_inband import InterleaverInband
@@ -182,47 +182,26 @@ class InterleaverInbandSim:
 
 
 @dataclass
-class InterleaverInbandSystem(HwSystem):
-    """The in-band interleaver as a **system** (``plans/system_model.md`` S3e): the same
-    :class:`InterleaverInbandTB` graph, the cut stated as a DUT tree -- the
-    :class:`InterleaverInband` kernel alone.  The contention crossbar is testbench, so both ``m_axi``
-    bundles are top ports facing the memory model, and ``s_cmd`` / ``s_done`` face the driver and the
-    sink.
-
-    The scenario is :class:`InterleaverInbandSim`'s plus the run's bound (``vectors/run.json``), with
-    the sink anchored too so pysim records what the RTL records (``vectors/s_done``, ``vectors/out``)."""
+class InterleaverInbandSystem(GraphSystem):
+    """The in-band interleaver as a **system** (``plans/system_model.md`` S3e): the
+    :class:`InterleaverInbandTB` graph, the cut the :class:`InterleaverInband` kernel alone.  The
+    contention crossbar is testbench, so both ``m_axi`` bundles are top ports facing the memory."""
 
     sizes: tuple = (256,)
     n_cycles: int = 4000
 
-    def __post_init__(self) -> None:
+    def graph(self) -> InterleaverInbandTB:
         self.runner = InterleaverInbandSim(sizes=tuple(self.sizes), name="xsi_tb",
                                            n_cycles=int(self.n_cycles))
-        self.tb = self.runner.tb
-        self.sim = self.tb.sim
-        self.clk = self.tb.clk
-        #: The width of the top's stream ports and m_axi groups: there is no crossbar to take it from.
-        self.data_width = int(self.tb.mem_dwidth)
-        self.dut_top = DutTop.of("interleaver_inband_dut", self.sim, comps=[self.tb.dut])
-        self._root: Path | None = None
+        return self.runner.tb
 
-    def dut(self) -> DutTop:
-        """The default DUT: the interleaver kernel alone."""
-        return self.dut_top
+    def dut_modules(self, g) -> list:
+        return [g.dut]
 
-    def write_scenario(self, root) -> None:
+    def write_inputs(self, root) -> None:
         self.runner.write_scenario(root)
-        write_run_params(Path(root) / "vectors", n_cycles=int(self.n_cycles))
-        self.tb.done_sink.root = Path(root)
-        self._root = Path(root)
 
-    def run(self) -> "InterleaverInband":
-        if self._root is None:
-            with tempfile.TemporaryDirectory() as tmp:
-                self.write_scenario(tmp)
-                self.sim.run_sim()
-        else:
-            self.sim.run_sim()
+    def check(self) -> "InterleaverInband":
         return self.runner.check()
 
 

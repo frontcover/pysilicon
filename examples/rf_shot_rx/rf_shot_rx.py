@@ -38,7 +38,7 @@ from waveflow.build.composite_gen import RFSOC4X2_CLK_HZ
 from waveflow.hw.clock import Clock
 from waveflow.hw.codegen_targets import SEQUENTIAL_XSI_TB
 from waveflow.hw.hw_freerun import FreeRunMod
-from waveflow.hw.hw_system import DutTop, HwSystem
+from waveflow.hw.hw_system import GraphSystem
 from waveflow.hw.interface import StreamIF
 from waveflow.hw.rf_shot_rx import (
     CAP_OK,
@@ -242,54 +242,24 @@ class RfShotRxTB(FreeRunMod):
 
 
 @dataclass
-class RfShotRxSystem(HwSystem):
-    """The ping-pong receiver as a **system** (``plans/system_model.md`` S3e): the same
-    :class:`RfShotRxTB` graph, the cut stated as a DUT tree -- the receiver alone, its memory inside
-    it, so the system top instantiates its **wrapper**.  The RFDC is testbench, its ADC model
-    spanning the cut.  *dut_cls* picks the build (:class:`~waveflow.hw.rf_shot_rx.RfShotRx` or
-    :class:`RfShotRxAbs`), exactly as it does on the testbench.
-
-    The scenario is :func:`write_scenario` plus the run's bound (``vectors/run.json``); pysim runs to
-    the metronome's horizon, since a converter never runs out of events."""
+class RfShotRxSystem(GraphSystem):
+    """The ping-pong receiver as a **system** (``plans/system_model.md`` S3e): the
+    :class:`RfShotRxTB` graph, the cut the receiver alone -- its memory inside it, so the system top
+    instantiates its **wrapper**.  The RFDC is testbench.  *dut_cls* picks the build
+    (:class:`~waveflow.hw.rf_shot_rx.RfShotRx` or :class:`RfShotRxAbs`)."""
 
     dut_cls: type = RfShotRx
     n_cycles: int = XSI_N_CYCLES
 
-    def __post_init__(self) -> None:
-        self.tb = RfShotRxTB(name="xsi_tb", sim=Simulation(), dut_cls=self.dut_cls,
-                             n_cycles=int(self.n_cycles))
-        self.sim = self.tb.sim
-        self.clk = self.tb.axis_clk
-        #: The width of the top's stream ports: there is no crossbar to take it from.
-        self.data_width = int(self.tb.rfdc.axis_bitwidth)
-        self.dut_top = DutTop.of(f"{self.dut_cls.cpp_kernel_name}_dut", self.sim,
-                                 comps=[self.tb.dut])
-        self._root: Path | None = None
+    def graph(self) -> RfShotRxTB:
+        return RfShotRxTB(name="xsi_tb", sim=Simulation(), dut_cls=self.dut_cls,
+                          n_cycles=int(self.n_cycles))
 
-    def dut(self) -> DutTop:
-        """The default DUT: the receiver and its memory, as one wrapper."""
-        return self.dut_top
+    def dut_modules(self, g) -> list:
+        return [g.dut]
 
-    def write_scenario(self, root) -> None:
-        from waveflow.utils.burst_io import write_run_params
-
-        root = Path(root)
+    def write_inputs(self, root) -> None:
         write_scenario(root, n_blk=int(self.tb.n_blk))
-        write_run_params(root / "vectors", n_cycles=int(self.n_cycles))
-        self.tb.source.root = root
-        self.tb.win_snk.root = root
-        self._root = root
-
-    def run(self) -> RfShotRxTB:
-        import tempfile
-
-        if self._root is None:
-            with tempfile.TemporaryDirectory() as tmp:
-                self.write_scenario(tmp)
-                self.sim.run_sim(until=self.tb.run_until)
-        else:
-            self.sim.run_sim(until=self.tb.run_until)
-        return self.tb
 
 
 # ---------------------------------------------------------------------------

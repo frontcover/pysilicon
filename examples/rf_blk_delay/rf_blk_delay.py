@@ -52,7 +52,7 @@ from waveflow.hw.clock import Clock  # noqa: E402
 from waveflow.hw.codegen_targets import COMPOSITE_KERNEL, SEQUENTIAL_XSI_TB  # noqa: E402
 from waveflow.hw.hw_freerun import FreeRunMod  # noqa: E402
 from waveflow.hw.hw_module import HwParam  # noqa: E402
-from waveflow.hw.hw_system import DutTop, HwSystem  # noqa: E402
+from waveflow.hw.hw_system import GraphSystem  # noqa: E402
 from waveflow.hw.interface import StreamIF, StreamIFMaster, StreamIFSlave  # noqa: E402
 from waveflow.hw.mem_stream import KernelTask  # noqa: E402
 from waveflow.hw.rf_samp_buf import (  # noqa: E402
@@ -585,55 +585,28 @@ class RfBlkDelayTB(FreeRunMod):
 
 
 @dataclass
-class RfBlkDelaySystem(HwSystem):
-    """The pattern-B loop as a **system** (``plans/system_model.md`` S3e): the same
-    :class:`RfBlkDelayTB` graph, the cut stated as a DUT tree -- :class:`RfBlkDelayLoop` alone, both
-    buffers' memories inside it, so the system top instantiates its **wrapper**.  The RFDC is
-    testbench, its ADC and DAC models each spanning the cut, as in ``rf_loopback``.
+class RfBlkDelaySystem(GraphSystem):
+    """The pattern-B loop as a **system** (``plans/system_model.md`` S3e): the
+    :class:`RfBlkDelayTB` graph, the cut :class:`RfBlkDelayLoop` alone -- both buffers' memories
+    inside it, so the system top instantiates its **wrapper**.  The RFDC is testbench.
 
-    Every recording here is the example's to check, not compared exactly (``recording_check``): pysim
-    bounds the relay at ``N_BLK`` blocks so its event queue can empty, while the RTL relays for as
-    long as the ADC produces (``SRC_NBLK``) -- the twin being bounded, not the hardware wrong (see
-    ``tests/examples/test_rf_blk_delay_xsi.py``).  The scenario is :func:`write_scenario` plus the
-    run's bound (``vectors/run.json``)."""
+    Every recording is the example's to check (``recording_check``): pysim bounds the relay at
+    ``N_BLK`` blocks so its event queue can empty, while the RTL relays for as long as the ADC
+    produces (``SRC_NBLK``) -- see ``tests/examples/test_rf_blk_delay_xsi.py``."""
 
     n_cycles: int = 60000
 
-    def __post_init__(self) -> None:
-        self.tb = RfBlkDelayTB(name="xsi_tb", sim=Simulation(), n_cycles=int(self.n_cycles))
-        self.sim = self.tb.sim
-        self.clk = self.tb.axis_clk
-        #: The width of the top's stream ports: there is no crossbar to take it from.
-        self.data_width = int(self.tb.rfdc.axis_bitwidth)
-        self.dut_top = DutTop.of("rf_blk_delay_dut", self.sim, comps=[self.tb.loop])
-        for o in (self.tb.sink, self.tb.rxresp_sink, self.tb.txresp_sink):
+    def graph(self) -> RfBlkDelayTB:
+        g = RfBlkDelayTB(name="xsi_tb", sim=Simulation(), n_cycles=int(self.n_cycles))
+        for o in (g.sink, g.rxresp_sink, g.txresp_sink):
             o.recording_check = "example"
-        self._root: Path | None = None
+        return g
 
-    def dut(self) -> DutTop:
-        """The default DUT: the loop -- both buffers and the relay -- as one wrapper."""
-        return self.dut_top
+    def dut_modules(self, g) -> list:
+        return [g.loop]
 
-    def write_scenario(self, root) -> None:
-        from waveflow.utils.burst_io import write_run_params
-
-        root = Path(root)
+    def write_inputs(self, root) -> None:
         write_scenario(root)
-        write_run_params(root / "vectors", n_cycles=int(self.n_cycles))
-        for o in (self.tb.source, self.tb.sink, self.tb.rxresp_sink, self.tb.txresp_sink):
-            o.root = root
-        self._root = root
-
-    def run(self) -> RfBlkDelayTB:
-        import tempfile
-
-        if self._root is None:
-            with tempfile.TemporaryDirectory() as tmp:
-                self.write_scenario(tmp)
-                self.sim.run_sim()
-        else:
-            self.sim.run_sim()
-        return self.tb
 
 
 def write_scenario(root) -> None:

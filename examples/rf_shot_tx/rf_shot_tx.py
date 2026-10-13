@@ -63,7 +63,7 @@ from waveflow.build.composite_gen import RFSOC4X2_CLK_HZ
 from waveflow.hw.clock import Clock
 from waveflow.hw.codegen_targets import SEQUENTIAL_XSI_TB
 from waveflow.hw.hw_freerun import FreeRunMod
-from waveflow.hw.hw_system import DutTop, HwSystem
+from waveflow.hw.hw_system import GraphSystem
 from waveflow.hw.interface import StreamIF
 from waveflow.hw.rf_relayout import to_dense
 from waveflow.hw.rf_sample_if import RFSampIF
@@ -421,59 +421,33 @@ class RfShotTxTB(FreeRunMod):
 
 
 @dataclass
-class RfShotTxSystem(HwSystem):
-    """The shot transmitter as a **system** (``plans/system_model.md`` S3e): the same
-    :class:`RfShotTxTB` graph, the cut stated as a DUT tree -- the transmitter alone, its memory
-    inside it, so the system top instantiates its **wrapper**.  The RFDC is testbench, its DAC model
-    spanning the cut.  *dut_cls* picks the build (:class:`RfShotTx` or :class:`RfShotTxAbs`) and
-    *scenario* the frame stream (``"cmd"``, the finite shots, or ``"cmd_loop"``), each its own run.
+class RfShotTxSystem(GraphSystem):
+    """The shot transmitter as a **system** (``plans/system_model.md`` S3e): the
+    :class:`RfShotTxTB` graph, the cut the transmitter alone -- its memory inside it, so the system
+    top instantiates its **wrapper**.  The RFDC is testbench.  *dut_cls* picks the build
+    (:class:`RfShotTx` or :class:`RfShotTxAbs`) and *scenario* the frame stream (``"cmd"`` or
+    ``"cmd_loop"``), each its own run.
 
     The RF sink's recording is the example's to check (``recording_check``): pysim's player runs
-    ahead of the data by its loosely-timed lead, so the two playouts align only after each backend's
-    own startup transient (``plans/lt_transient.md``).  The scenario is :func:`write_scenario` plus
-    the run's bound (``vectors/run.json``); pysim runs to the metronome's horizon."""
+    ahead by its loosely-timed lead, so the playouts align only after each backend's own startup
+    transient (``plans/lt_transient.md``)."""
 
     dut_cls: type = RfShotTx
     scenario: str = "cmd"
     n_cycles: int = XSI_N_CYCLES
 
-    def __post_init__(self) -> None:
+    def graph(self) -> RfShotTxTB:
         self.frames = dict(SCENARIOS)[self.scenario]
-        self.tb = RfShotTxTB(name="xsi_tb", sim=Simulation(), dut_cls=self.dut_cls,
-                             in_bundle=f"vectors/{self.scenario}", n_cycles=int(self.n_cycles))
-        self.sim = self.tb.sim
-        self.clk = self.tb.axis_clk
-        #: The width of the top's stream ports: there is no crossbar to take it from.
-        self.data_width = int(self.tb.rfdc.axis_bitwidth)
-        self.dut_top = DutTop.of(f"{self.dut_cls.cpp_kernel_name}_dut", self.sim,
-                                 comps=[self.tb.dut])
-        self.tb.sink.recording_check = "example"
-        self._root: Path | None = None
+        g = RfShotTxTB(name="xsi_tb", sim=Simulation(), dut_cls=self.dut_cls,
+                       in_bundle=f"vectors/{self.scenario}", n_cycles=int(self.n_cycles))
+        g.sink.recording_check = "example"
+        return g
 
-    def dut(self) -> DutTop:
-        """The default DUT: the transmitter and its memory, as one wrapper."""
-        return self.dut_top
+    def dut_modules(self, g) -> list:
+        return [g.dut]
 
-    def write_scenario(self, root) -> None:
-        from waveflow.utils.burst_io import write_run_params
-
-        root = Path(root)
+    def write_inputs(self, root) -> None:
         write_scenario(root, self.frames, self.scenario)
-        write_run_params(root / "vectors", n_cycles=int(self.n_cycles))
-        for o in (self.tb.drv, self.tb.resp_snk, self.tb.sink):
-            o.root = root
-        self._root = root
-
-    def run(self) -> RfShotTxTB:
-        import tempfile
-
-        if self._root is None:
-            with tempfile.TemporaryDirectory() as tmp:
-                self.write_scenario(tmp)
-                self.sim.run_sim(until=self.tb.run_until)
-        else:
-            self.sim.run_sim(until=self.tb.run_until)
-        return self.tb
 
 
 # ---------------------------------------------------------------------------

@@ -195,6 +195,134 @@ class HwSystem(ABC):
         return list(self.sim._sim_objs)
 
 
+class GraphSystem(HwSystem):
+    """A system built around one **graph** -- a composite holding the design and its testbench
+    participants -- with every derivable part of the contract derived (``plans/system_model.md``
+    S3f).  A subclass states only what is its own::
+
+        @dataclass
+        class StateAccumSystem(GraphSystem):
+            nvec: int = 5
+
+            def graph(self):
+                return StateAccumTB(name="xsi_tb", sim=Simulation(), nvec=self.nvec)
+
+            def dut_modules(self, g):
+                return [g.dut]
+
+            def write_inputs(self, root):
+                write_scenario(root, self.nvec)
+
+    and, optionally, :meth:`check` (the golden on a pysim run).  The defaults:
+
+    * :meth:`dut` -- a :class:`DutTop` of :meth:`dut_modules`, named for the first one's csynth'd
+      module (or the class's ``dut_name``);
+    * ``clk`` -- the first DUT module's clock; ``data_width`` -- the widest of the DUT's boundary
+      ports (the width of the top's stream ports and ``m_axi`` groups: there is no crossbar to take
+      it from);
+    * :meth:`write_scenario` -- :meth:`write_inputs`, then the run's bound (``vectors/run.json``,
+      :attr:`n_cycles`, beside any run params the inputs wrote), then every testbench participant that reads or records a bundle anchored at
+      the root, so pysim records what the RTL records;
+    * :meth:`run` -- pysim, to the graph's ``run_until`` when it has one (a converter never runs out
+      of events), then :meth:`check`.
+
+    A recording pysim cannot match by construction is marked on its participant in :meth:`graph`
+    (``recording_check = "example"``)."""
+
+    def __post_init__(self) -> None:
+        self.tb = self.graph()
+        self.sim = self.tb.sim
+        mods = list(self.dut_modules(self.tb))
+        first = mods[0]
+        name = getattr(type(first), "cpp_kernel_name", None) or first.name
+        self.dut_top = DutTop.of(getattr(self, "dut_name", None) or f"{name}_dut", self.sim,
+                                 comps=mods)
+        self.clk = first.clk
+        self.data_width = max(_boundary_widths(mods))
+        self._root = None
+
+    # -- what a subclass states ------------------------------------------------------------------
+
+    @abstractmethod
+    def graph(self) -> HwModule:
+        """Build and return the graph: the design and its testbench participants, wired."""
+
+    @abstractmethod
+    def dut_modules(self, graph) -> list:
+        """The modules of *graph* inside the default cut."""
+
+    def write_inputs(self, root) -> None:
+        """Write the scenario's inputs (what the drivers and sources play) under *root*."""
+
+    def check(self) -> Any:
+        """The golden on a finished pysim run; the default returns the graph."""
+        return self.tb
+
+    # -- derived ---------------------------------------------------------------------------------
+
+    @property
+    def n_cycles(self) -> int:
+        """The RTL run's cycle bound: the graph's ``n_cycles``."""
+        return int(self.tb.n_cycles)
+
+    def dut(self) -> DutTop:
+        return self.dut_top
+
+    def write_scenario(self, root) -> None:
+        import json
+        from pathlib import Path
+
+        from waveflow.utils.burst_io import write_run_params
+
+        root = Path(root)
+        run_json = root / "vectors" / "run.json"
+        run_json.unlink(missing_ok=True)          # a previous scenario's bound is not this one's
+        self.write_inputs(root)
+        # The inputs may write run params of their own (a memory's arena size); the bound joins them.
+        params = json.loads(run_json.read_text(encoding="utf-8")) if run_json.is_file() else {}
+        write_run_params(root / "vectors", **{"n_cycles": self.n_cycles, **params})
+        top = self.dut()
+        for o in self.elements():
+            if _inside(o, top):
+                continue
+            if any(getattr(o, a, None) for a in ("in_bundle", "out_bundle", "load_segs",
+                                                  "dump_segs")):
+                o.root = root
+        self._root = root
+
+    def run(self) -> Any:
+        import tempfile
+
+        until = getattr(self.tb, "run_until", None)
+        if self._root is None:
+            with tempfile.TemporaryDirectory() as tmp:
+                self.write_scenario(tmp)
+                self.sim.run_sim(until=until)
+        else:
+            self.sim.run_sim(until=until)
+        return self.check()
+
+
+def _inside(mod, root) -> bool:
+    """Is *mod* in the tree under *root*?"""
+    while mod is not None:
+        if mod is root:
+            return True
+        mod = getattr(mod, "parent", None)
+    return False
+
+
+def _boundary_widths(mods) -> list[int]:
+    """The bit widths of *mods*' boundary endpoints."""
+    from waveflow.build.composite_gen import _unpack_boundary
+
+    out = [int(ep.bitwidth) for m in mods for _n, ep in (_unpack_boundary(e) for e in m.boundary)
+           if getattr(ep, "bitwidth", None)]
+    if not out:
+        raise ValueError(f"no DUT boundary port of {[m.name for m in mods]} states a bit width")
+    return out
+
+
 def _reports_counters(obj) -> bool:
     """Does testbench element *obj* -- a participant, or an interface realized as a channel --
     declare a C++ model that keeps counters (``BfmModel`` / ``ChannelModel.reports_counters``)?"""
@@ -212,4 +340,4 @@ def _reports_counters(obj) -> bool:
     return False
 
 
-__all__ = ["DutTop", "HwSystem", "dut_members"]
+__all__ = ["DutTop", "GraphSystem", "HwSystem", "dut_members"]

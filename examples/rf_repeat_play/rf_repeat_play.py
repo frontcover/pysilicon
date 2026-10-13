@@ -58,7 +58,7 @@ HERE = Path(__file__).resolve().parent
 from waveflow.build.composite_gen import RFSOC4X2_CLK_HZ  # noqa: E402
 from waveflow.hw.rfdc_samp_word import RfdcSampWord, Rfsoc4x2SampWord  # noqa: E402
 from waveflow.hw.clock import Clock  # noqa: E402
-from waveflow.hw.hw_system import DutTop, HwSystem  # noqa: E402
+from waveflow.hw.hw_system import GraphSystem  # noqa: E402
 from waveflow.hw.hw_freerun import FreeRunMod  # noqa: E402
 from waveflow.hw.hw_module import HwModule  # noqa: E402
 from waveflow.hw.interface import StreamIF, StreamIFMaster, StreamIFSlave  # noqa: E402
@@ -666,51 +666,25 @@ def run_circ_pysim(root=None, **kw) -> RfCircPlayTB:
 
 
 @dataclass
-class RfCircPlaySystem(HwSystem):
-    """The circular player as a **system** (``plans/system_model.md`` S3e): the same
-    :class:`RfCircPlayTB` graph, the cut stated as a DUT tree -- :class:`RfRepeatPlay` alone, the
-    scheduler, loader and player inside it.  The RFDC is testbench, as in ``rf_loopback``: its DAC
-    model spans the cut, an AXI-Stream port of the top on one side and the RF edge to the sink on the
-    other; the waveform driver faces the top's ``wave_in``.
+class RfCircPlaySystem(GraphSystem):
+    """The circular player as a **system** (``plans/system_model.md`` S3e): the
+    :class:`RfCircPlayTB` graph, the cut :class:`RfRepeatPlay` alone.  The RFDC is testbench, as in
+    ``rf_loopback``: its DAC model spans the cut.
 
-    The sink's recording is checked by the example, not compared exactly (``recording_check``):
-    pysim runs to the metronome's horizon and the RTL to a cycle bound, so the two playouts differ in
-    length by construction.  The scenario is :func:`write_wave_scenario` plus the run's bound
-    (``vectors/run.json``)."""
+    The sink's recording is the example's to check (``recording_check``): pysim runs to the
+    metronome's horizon and the RTL to a cycle bound, so the two playouts differ in length."""
 
     n_cycles: int = 60000
 
-    def __post_init__(self) -> None:
-        self.tb = RfCircPlayTB(name="xsi_tb", sim=Simulation(), n_cycles=int(self.n_cycles))
-        self.sim = self.tb.sim
-        self.clk = self.tb.axis_clk
-        #: The width of the top's stream ports: there is no crossbar to take it from.
-        self.data_width = int(self.tb.rfdc.axis_bitwidth)
-        self.dut_top = DutTop.of("rf_repeat_play_dut", self.sim, comps=[self.tb.dut])
-        self.tb.sink.recording_check = "example"
-        self._root: Path | None = None
+    def graph(self) -> RfCircPlayTB:
+        g = RfCircPlayTB(name="xsi_tb", sim=Simulation(), n_cycles=int(self.n_cycles))
+        g.sink.recording_check = "example"
+        return g
 
-    def dut(self) -> DutTop:
-        """The default DUT: the transmitter, scheduler included; the converter is testbench."""
-        return self.dut_top
+    def dut_modules(self, g) -> list:
+        return [g.dut]
 
-    def write_scenario(self, root) -> None:
-        from waveflow.utils.burst_io import write_run_params
-
+    def write_inputs(self, root) -> None:
         write_wave_scenario(root, nsamp=int(self.tb.nsamp))
-        write_run_params(Path(root) / "vectors", n_cycles=int(self.n_cycles))
-        self.tb.wave_drv.root = Path(root)
-        self.tb.sink.root = Path(root)
-        self._root = Path(root)
 
-    def run(self) -> RfCircPlayTB:
-        """Run pysim to the metronome's horizon (the player never runs out of events)."""
-        import tempfile
 
-        if self._root is None:
-            with tempfile.TemporaryDirectory() as tmp:
-                self.write_scenario(tmp)
-                self.sim.run_sim(until=self.tb.run_until)
-        else:
-            self.sim.run_sim(until=self.tb.run_until)
-        return self.tb

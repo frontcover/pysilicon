@@ -17,7 +17,6 @@ the scenario is written once as burst bundles that both backends read.
 """
 from __future__ import annotations
 
-import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import ClassVar
@@ -42,14 +41,14 @@ from waveflow.build.streamutils import (  # noqa: E402
     StreamUtilsStep,
     XsiHarnessStep,
 )
-from waveflow.utils.burst_io import write_burst_bundle, write_run_params  # noqa: E402
+from waveflow.utils.burst_io import write_burst_bundle  # noqa: E402
 from waveflow.hw.clock import Clock  # noqa: E402
 from waveflow.hw.codegen_targets import SEQUENTIAL_XSI_TB  # noqa: E402
 from waveflow.hw.dataschema import DataArray, DataSchemaStep, IntField  # noqa: E402
 from waveflow.hw.hw_freerun import FreeRunMod  # noqa: E402
 from waveflow.hw.hw_module import HwParam  # noqa: E402
 from waveflow.hw.hw_state import HwState  # noqa: E402
-from waveflow.hw.hw_system import DutTop, HwSystem  # noqa: E402
+from waveflow.hw.hw_system import GraphSystem  # noqa: E402
 from waveflow.hw.interface import StreamIF, StreamIFMaster, StreamIFSlave  # noqa: E402
 from waveflow.hw.mem_stream import KernelTask  # noqa: E402
 from waveflow.hw.synth import synthesizable  # noqa: E402
@@ -180,46 +179,25 @@ def write_scenario(root, nvec: int = 5) -> None:
 
 
 @dataclass
-class StateAccumSystem(HwSystem):
-    """state_toy as a **system** (``plans/system_model.md`` S3e): the same :class:`StateAccumTB`
-    graph, the cut stated as a DUT tree -- the accumulator alone -- rather than implied by the
-    testbench class.  Its two streams are top ports facing the driver and the sink.
-
-    The scenario is :func:`write_scenario` plus the run's bound (``vectors/run.json``), with the driver
-    and the sink anchored at the root so pysim records what the RTL records (``vectors/m_out``)."""
+class StateAccumSystem(GraphSystem):
+    """state_toy as a **system** (``plans/system_model.md`` S3e): the :class:`StateAccumTB` graph,
+    the cut the accumulator alone -- its two streams top ports facing the driver and the sink."""
 
     nvec: int = 5
     n_cycles: int = 400
 
-    def __post_init__(self) -> None:
-        self.tb = StateAccumTB(name="tb", sim=Simulation(), nvec=int(self.nvec),
-                               n_cycles=int(self.n_cycles))
-        self.sim = self.tb.sim
-        self.clk = self.tb.clk
-        #: The width of the top's stream ports: there is no crossbar to take it from.
-        self.data_width = int(self.tb.mem_dwidth)
-        self.dut_top = DutTop.of("state_accum_dut", self.sim, comps=[self.tb.dut])
-        self._root: Path | None = None
+    def graph(self) -> StateAccumTB:
+        return StateAccumTB(name="tb", sim=Simulation(), nvec=int(self.nvec),
+                            n_cycles=int(self.n_cycles))
 
-    def dut(self) -> DutTop:
-        """The default DUT: the accumulator alone."""
-        return self.dut_top
+    def dut_modules(self, g) -> list:
+        return [g.dut]
 
-    def write_scenario(self, root) -> None:
+    def write_inputs(self, root) -> None:
         write_scenario(root, int(self.nvec))
-        write_run_params(Path(root) / "vectors", n_cycles=int(self.n_cycles))
-        self.tb.driver.root = Path(root)
-        self.tb.sink.root = Path(root)
-        self._root = Path(root)
 
-    def run(self) -> np.ndarray:
-        """Run pysim and return the sink's words, flat, in arrival order."""
-        if self._root is None:
-            with tempfile.TemporaryDirectory() as tmp:
-                self.write_scenario(tmp)
-                self.sim.run_sim()
-        else:
-            self.sim.run_sim()
+    def check(self) -> np.ndarray:
+        """The sink's words, flat, in arrival order."""
         return np.concatenate([np.asarray(b).ravel() for b in self.tb.sink.words]).astype(np.uint64)
 
 

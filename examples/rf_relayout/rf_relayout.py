@@ -43,7 +43,7 @@ from waveflow.build.composite_gen import RFSOC4X2_CLK_HZ  # noqa: E402
 from waveflow.hw.clock import Clock  # noqa: E402
 from waveflow.hw.codegen_targets import SEQUENTIAL_XSI_TB  # noqa: E402
 from waveflow.hw.hw_freerun import FreeRunMod  # noqa: E402
-from waveflow.hw.hw_system import DutTop, HwSystem  # noqa: E402
+from waveflow.hw.hw_system import GraphSystem  # noqa: E402
 from waveflow.hw.interface import StreamIF  # noqa: E402
 from waveflow.hw.rf_relayout import RfRelayout, to_dense  # noqa: E402
 from waveflow.hw.rfdc_samp_word import Rfsoc4x2SampWord, pack  # noqa: E402
@@ -208,50 +208,27 @@ def captured_words(tb: RfRelayoutTB) -> np.ndarray:
 
 
 @dataclass
-class RfRelayoutSystem(HwSystem):
-    """The re-layout as a **system** (``plans/system_model.md`` S3e): the same :class:`RfRelayoutTB`
-    graph, the cut stated as a DUT tree -- the two conversions (:class:`RfRelayout`) alone -- with
-    its two streams top ports facing the driver and the sink.
-
-    The scenario is :func:`write_scenario` plus the run's bound (``vectors/run.json``), with the
-    driver and the sink anchored at the root so pysim records what the RTL records (``vectors/out``)."""
+class RfRelayoutSystem(GraphSystem):
+    """The re-layout as a **system** (``plans/system_model.md`` S3e): the :class:`RfRelayoutTB`
+    graph, the cut the two conversions (:class:`RfRelayout`) alone."""
 
     nword: int = NWORD
     n_cycles: int = XSI_N_CYCLES
 
-    def __post_init__(self) -> None:
-        self.tb = RfRelayoutTB(name="xsi_tb", sim=Simulation(), nword=int(self.nword),
-                               n_cycles=int(self.n_cycles))
-        self.sim = self.tb.sim
-        self.clk = self.tb.axis_clk
-        #: The width of the top's stream ports: there is no crossbar to take it from.
-        self.data_width = int(WORD.bitwidth)
-        self.dut_top = DutTop.of("rf_relayout_dut", self.sim, comps=[self.tb.dut])
-        self._root: Path | None = None
+    def graph(self) -> RfRelayoutTB:
+        return RfRelayoutTB(name="xsi_tb", sim=Simulation(), nword=int(self.nword),
+                            n_cycles=int(self.n_cycles))
 
-    def dut(self) -> DutTop:
-        """The default DUT: the two conversions alone."""
-        return self.dut_top
+    def dut_modules(self, g) -> list:
+        return [g.dut]
 
-    def write_scenario(self, root) -> None:
-        from waveflow.utils.burst_io import write_run_params
-
+    def write_inputs(self, root) -> None:
         write_scenario(root, int(self.nword))
-        write_run_params(Path(root) / "vectors", n_cycles=int(self.n_cycles))
-        self.tb.drv.root = Path(root)
-        self.tb.sink.root = Path(root)
-        self._root = Path(root)
 
-    def run(self) -> np.ndarray:
-        """Run pysim and check the loopback identity; returns the captured words."""
-        import tempfile
-
-        if self._root is None:
-            with tempfile.TemporaryDirectory() as tmp:
-                self.write_scenario(tmp)
-                self.sim.run_sim()
-        else:
-            self.sim.run_sim()
+    def check(self) -> np.ndarray:
+        """The loopback identity; returns the captured words."""
         got = captured_words(self.tb)
         check_outputs(got, int(self.nword), where="pysim: ")
         return got
+
+
