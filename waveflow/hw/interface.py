@@ -468,7 +468,7 @@ class QueuedTransferIFSlave(InterfaceEndpoint):
                     )
                 yield self.nrx.get(brx)
 
-            yield self.env.process(self.rx_proc(words))
+            yield from self.rx_proc(words)
 
     def get(self, nwords_max: int | None = None) -> ProcessGen[Words]:
         """Pull the next word burst from the buffer (pull model).
@@ -548,7 +548,7 @@ class QueuedTransferIFMaster(InterfaceEndpoint):
             raise RuntimeError(
                 f"Cannot write: {type(self).__name__} is not bound to an interface"
             )
-        yield self.process(self._make_write_call(words))
+        yield from self._make_write_call(words)
 
 
 @dataclass
@@ -1348,7 +1348,7 @@ class StreamIFMaster(TypedCodecMixin, QueuedTransferIFMaster):
                 f"Cannot write: {type(self).__name__} '{self.name}' "
                 "is not bound to an interface"
             )
-        yield self.process(self._make_write_call(raw_words))
+        yield from self._make_write_call(raw_words)
 
     @port_write
     def offer(self, data, word_rate: float | None = None) -> ProcessGen[int]:
@@ -1408,7 +1408,7 @@ class StreamIFMaster(TypedCodecMixin, QueuedTransferIFMaster):
                 f"Cannot write: {type(self).__name__} '{self.name}' "
                 "is not bound to an interface"
             )
-        yield self.process(self.interface.write(raw_words, tstart=t_out_start))
+        yield from self.interface.write(raw_words, tstart=t_out_start)
 
     # ----------------------------------------------------------------
     # The sequential-testbench vocabulary — SOURCE, not a simulation API.
