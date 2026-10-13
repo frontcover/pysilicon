@@ -79,7 +79,9 @@ def counters(work: Path) -> dict:
     _rx, rx_words, rx_last = responses(work, "rxresp", RxResp)
     _tx, tx_words, tx_last = responses(work, "txresp", TxResp)
     return {"ADC_WORDS_SENT": adc["words_sent"], "ADC_DROPPED": adc["dropped"],
+            "ADC_LAST_DROP_CYCLE": adc["last_drop_cycle"],
             "DAC_WORDS_RECV": dac["words_recv"], "DAC_UNDERRUN": dac["underrun"],
+            "DAC_LAST_UNDERRUN_CYCLE": dac["last_underrun_cycle"],
             "DAC_BLOCKS_ZERO_FILLED": dac["blocks_zero_filled"], "DAC_BLOCKS_OUT": dac["blocks_out"],
             "RX_RESP_WORDS": rx_words, "TX_RESP_WORDS": tx_words,
             "RX_RESP_LAST_CYCLE": rx_last, "TX_RESP_LAST_CYCLE": tx_last}
