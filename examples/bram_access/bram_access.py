@@ -1092,21 +1092,26 @@ class BramAccessSystem(GraphSystem):
     """bram_access as a **system** (``plans/system_model.md`` S3e): the :class:`BramAccessTB` graph,
     the cut :class:`BramAccess` alone.  Its memory is hand-written RTL beside the kernel
     (``add_rtl_mod``), so the system top instantiates the DUT as its **wrapper** -- the kernel and
-    ``bram_t2p`` joined -- whose ports are the six AXI-Stream ones."""
+    ``bram_t2p`` joined -- whose ports are the six AXI-Stream ones.
 
+    *scenario* is ``"zero"`` (:func:`scenario_zero`, the gate) or ``"collision"``
+    (:func:`collision_scenario`, the deliberate read-during-write the waveform scan must find)."""
+
+    scenario_name: str = "zero"
     n_cycles: int = XSI_N_CYCLES
 
     def graph(self) -> BramAccessTB:
         from waveflow.simulation.simulation import Simulation
 
-        self.scenario: Scenario | None = None
+        self.scenario: Scenario = {"zero": scenario_zero,
+                                   "collision": collision_scenario}[self.scenario_name]()
         return BramAccessTB(name="xsi_tb", sim=Simulation(), n_cycles=int(self.n_cycles))
 
     def dut_modules(self, g) -> list:
         return [g.dut]
 
     def write_inputs(self, root) -> None:
-        self.scenario = write_scenario(root)
+        write_scenario(root, self.scenario)
 
     def check(self) -> BramAccessTB:
         """The acceptance check on what the sinks captured."""
