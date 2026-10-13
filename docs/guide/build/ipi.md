@@ -1,17 +1,18 @@
 ---
-title: IP Packaging
+title: IP Packaging and Block Design
 parent: Build System
 nav_order: 6.7
 audience: python
-api: [IpPackageStep, package_system, SystemIp, PackagedIp, BusInterface, read_component, add_system_steps]
-summary: "A system packaged as Vivado IP, one per device: each device sub-top and the on-chip memory through ipx::package_project, from exactly the files the XSI gates compile, with their AXI interfaces inferred, their interrupt lines declared and the clock associated with every AXI interface; AMD's crossbar used as its .xci. One opt-in step, ip_package, on a system's DAG; each IP cached by content; what comes back read from each IP's own component.xml. Worked on markov: four IPs, every link between them AXI4 or an interrupt."
+api: [IpPackageStep, package_system, SystemIp, PackagedIp, BusInterface, read_component, BlockDesignStep, build_block_design, BlockDesign, BdLink, bd_links, add_system_steps]
+summary: "A system packaged as Vivado IP, one per device: each device sub-top and the on-chip memory through ipx::package_project, from exactly the files the XSI gates compile, with their AXI interfaces inferred, their interrupt lines declared and the clock associated with every AXI interface; AMD's crossbar used as its .xci. One opt-in step, ip_package, on a system's DAG; each IP cached by content; what comes back read from each IP's own component.xml. Then a block design, block_design: the IPs and the crossbar instantiated and wired from the same spec as the XSI system top, every master's address map assigned at the crossbar's own windows, validate_bd_design as the gate, and the design read back against the system top. Worked on markov: four IPs, every link between them AXI4 or an interrupt."
 ---
 
-# IP packaging
+# IP packaging and block design
 
 The [XSI system simulation](./xsi_system.md) runs a system's DUT as one Verilog top. To put that DUT
 on a board through a Vivado block design, its parts must be **IP**: cells a block design can
-instantiate and wire. One step does it, `ip_package`. Its unit is the **device**, the sub-top
+instantiate and wire. Two steps do it: `ip_package` packages the IPs, and
+[`block_design`](#the-block-design) wires them. The packaging's unit is the **device**, the sub-top
 the system top already renders: a kernel with its views, its adaptor and the bus writers acting for
 it. The on-chip memory is a unit of its own (`plans/ip_packaging_routes.md`,
 *Granularity: one IP per device*).
@@ -112,5 +113,73 @@ res.ips["gen"].interface("mi0_axi").mode    # 'slave'
 - an unchanged system re-packaged without Vivado;
 - each IP carrying exactly what the XSI gates verified.
 
-**Next** (`plans/ip_packaging_routes.md` Stage 4): a block-design generator that instantiates these
-IPs and wires them from the same system spec, gated by `validate_bd_design`.
+## The block design
+
+The second step, `block_design` (`BlockDesignStep`), builds a Vivado block design from the IP
+repository. It is opt-in like `ip_package`, and it depends on it:
+
+```bash
+python examples/markov/markov_build.py --through block_design
+```
+
+```
+block_design:
+    xsi_work\markov\bd\block_design.json
+  markov_top_bd: 3 IPs + crossbar, 6 interface links, 41 ports; validated in 13 s
+```
+
+It instantiates each IP under its sub-top's instance name (`u_gen_sub`, ...) and the crossbar as
+`u_xbar`, configured as the XSI crossbar is (`AxiXbarConfig.config_props`). Then it wires them
+from the same `SystemTopSpec` the XSI system top is rendered from, by the rule the system top
+already follows: **a sub-top's port is named for the net it carries.** So each IP interface meets:
+
+| its name | it meets |
+|---|---|
+| `si<k>_axi` | the crossbar's slave slot *k* (`S0k_AXI`) |
+| `mi<k>_axi` | the crossbar's master slot *k* (`M0k_AXI`) |
+| a name another IP's interface also has | that interface: a direct link between two devices |
+| any other name | a port of the design: the host's bus (`s0_axi`), an interrupt line |
+
+The clock and the reset are ports of the design, wired to every cell.
+
+**The address map is assigned, not inferred.** Vivado's `assign_bd_address`, left to itself, gives
+each slave a window of its own choosing (1 GB each, on markov). The step instead maps every slave,
+in every master's address space, at its crossbar slot's base and size. That is the address map
+`assign_address_ranges` wrote once, in Python, and both the pysim crossbar and the XSI one decode.
+
+`validate_bd_design` then runs. What the step returns is **read back from Vivado** after it, in
+`<work>/bd/block_design.json` (`BlockDesign`):
+
+- each interface net's two ends, and each net's (clock, reset, interrupts);
+- each master's segments, with their offsets and ranges;
+- the crossbar cell's configuration;
+- the ports of the HDL wrapper `make_wrapper` writes;
+- the session's `CRITICAL WARNING` lines.
+
+The step also writes `<top>_bd.tcl` (`write_bd_tcl`), which recreates the design in any project
+that has the IP repository on its path. Like the IPs, the design is cached by its inputs, so an
+unchanged system starts no Vivado.
+
+```python
+from waveflow.build.system_bd import bd_links, build_block_design
+
+bd_links(spec, sysip.ips)        # the connections, found by name -- no Vivado
+bd = build_block_design(spec, sysip, period_ns=10.0, out_dir=work / "bd")
+bd.segments["/s0_axi"]           # {'/u_gen_sub/mi0_axi/reg0': [0, 8192], ...}
+```
+
+Its gate, `tests/examples/test_markov_bd.py`, holds the design against the system top the XSI gates
+run:
+
+- it validates, with no critical warning;
+- the wrapper has the system top's ports: the same names (an AXI group's in lower case),
+  directions and widths, so the block design can stand in for the system top;
+- its interface nets are the system top's links, and the clock, reset and interrupts are wired as
+  there;
+- every one of the four masters (the host and the three bus writers) sees every slave at its
+  crossbar window;
+- the crossbar cell holds the XSI crossbar's configuration after validation;
+- an unchanged system starts no Vivado.
+
+The block design is rung 4 of `plans/board_packaging.md`. The rungs after it, a processor and a
+bitstream for a board, come with that plan.

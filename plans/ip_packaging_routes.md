@@ -370,6 +370,32 @@ interrupt); the direct wiring's credit stream is the open case.  Gate: rung 3 of
 `connect_bd_intf_net` for each IP and link; `validate_bd_design` (rung 4) as the gate.  The XSI top and
 the block design rendered from one spec.
 
+> **Built (2026-10-13, branch `ip-packaging-s4`).**  `waveflow/build/system_bd.py`
+> (`build_block_design`) and the opt-in DAG step `block_design` (`BlockDesignStep`, after
+> `ip_package`):
+> - **links found by name**, by the rule the system top already follows (a sub-top's port is named
+>   for its net): `si<k>_axi` meets crossbar `S0k_AXI`, `mi<k>_axi` meets `M0k_AXI`, two IPs with
+>   one name meet each other (the direct-link case, untested: no system has one yet), any other name
+>   becomes a design port (`bd_links`, testable without Vivado);
+> - the crossbar cell configured from `AxiXbarConfig.config_props()` -- now the one source for both
+>   `create_ip` and the block design;
+> - **the address map assigned explicitly**: every master space (the host port and each bus writer)
+>   maps each slave at its crossbar window.  `assign_bd_address` alone gave markov's three slaves
+>   1 GB windows at 0, 1 G and 2 G -- a block design that validates and decodes nothing like the
+>   verified crossbar;
+> - validated, then **read back**: interface nets, nets, segments, crossbar config, wrapper ports,
+>   critical warnings (`block_design.json`); `write_bd_tcl` exports `<top>_bd.tcl`; cached by inputs.
+>
+> markov: **13 s** of Vivado; 0 critical warnings.  Gate `tests/examples/test_markov_bd.py`
+> (`-m xsi`, `WANT_XSI_GATES` 183 -> 189): validates; the wrapper's 41 ports equal the system top's
+> (names case-folded, directions, widths); the interface nets are the system top's seven links and
+> the clock, reset and interrupts are wired as there; all four masters see all three slaves at the
+> crossbar windows; the crossbar cell's config after validation equals the XSI crossbar's; the
+> cache.  Also fixed here: Stage 3's cache test called `package_system` without the crossbar and
+> overwrote the DAG's manifest with `"xbar": null`; it now re-runs the step.  Not done: simulating
+> the block design's wrapper under the XSI testbench (the IPs are byte-identical to what XSI ran and
+> the wiring is read back, so the remaining risk is small; a lower-case port shim would be needed).
+
 **Stage 5 -- choose the default.**  With stages 1-4 measured, decide which synthesis mode a system's
 bitstream uses by default, and record why.
 
