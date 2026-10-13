@@ -222,6 +222,13 @@ class CSynthStep(BuildStep):
             print(result.stdout)
         if result.stderr:
             print(result.stderr)
+        # The source stamp: this RTL was just built from the sources on disk, which is what lets the
+        # system flow's ``synth="check"`` accept it (``rtl_digest`` / ``trace_steps.rtl_staleness``).
+        from waveflow.build.composite_gen import check_maxi_lowered
+        from waveflow.build.rtl_digest import write_stamp
+
+        check_maxi_lowered(config.root_dir, TOP)
+        write_stamp(config.root_dir, TOP)
         return {"report_dir": config.root_dir / f"{TOP}_proj" / "solution1"}
 
 

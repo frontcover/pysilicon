@@ -545,8 +545,9 @@ testbench).
 > `mem_copy_sweep`) elaborate the kernel as the top; `waveflow/vitis_l1/profile_xsi.py` (times the
 > kernel flow's phases); `test_xsi_bfm.py`'s mem_r/w_stream unit gates.  Framework `tb_top_spec` /
 > `render_tb_main` stay for those.  Moving them is the calibration tooling's own migration.
-> Known drift: `examples/rf_loopback/include/u_int64_array.h` lags its generator (TLAST
-> expression); regenerating it stales rf_pass_through(_2ch)'s csynth.
+> The `u_int64_array.h` drift was fixed afterwards (regenerated, both pass-through tops
+> re-synthesized), together with five csynth steps that had lost their source stamp in the
+> retirement (rf_loopback x2, rf_blk_delay, rf_samp_buf_rx/tx).
 
 **S4 -- the TB side through hooks.**  D5.  Gate: the harness is byte-identical; `system_tb_spec` names
 no participant type.
