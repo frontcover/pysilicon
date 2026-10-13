@@ -565,7 +565,14 @@ class SystemRtlStep(_SystemStep):
             raise RuntimeError("; ".join(bad))
         ip = results["xbar_ip"].artifacts["xbar_ip"] if "xbar_ip" in results else None
         root = Path(config.root_dir)
+        from waveflow.build.system_synth import INIT_SUFFIXES
+
         rtl = [f for m in self.spec.modules for f in sorted((root / rtl_rel(m)).glob("*.v"))]
+        # ROM initializers: csynth maps a large constant table (SsrFft's twiddles from L=256) to a ROM
+        # loaded by `$readmemh("./<name>.dat")`, relative to the simulator's directory.  Without them
+        # the ROM reads X and the run completes on time with wrong numbers.
+        init = [f for m in self.spec.modules for f in sorted((root / rtl_rel(m)).iterdir())
+                if f.suffix in INIT_SUFFIXES]
         manifest = self.work_dir(config) / "rtl.json"
         manifest.write_text(json.dumps({
             "top": self.spec.top,
@@ -575,6 +582,7 @@ class SystemRtlStep(_SystemStep):
                                     *rtl]]
                          + [f"{self.spec.top}.v"],
             "include_dirs": [Path(d).as_posix() for d in (ip.include_dirs if ip else ())],
+            "init_files": [Path(f).as_posix() for f in init],
         }, indent=1) + "\n", encoding="utf-8")
         return {self.a("rtl"): manifest}
 
@@ -638,7 +646,7 @@ class XsiRunStep(_Inner):
             (ws.work_dir / f"{m['top']}_trace.vcd").unlink(missing_ok=True)
         ws.prepare(rtl_files=m["rtl_files"], include_dirs=m["include_dirs"],
                    tb_name=f"{m['top']}_tb", tb_cpp=main, extra_files=dict(tb_files),
-                   tb_include_dirs=tb_inc, trace=o.trace)
+                   tb_include_dirs=tb_inc, trace=o.trace, init_files=m.get("init_files", ()))
         if o.rtl.host is not None:
             out = ws.run(timeout=o.timeout)
         else:
