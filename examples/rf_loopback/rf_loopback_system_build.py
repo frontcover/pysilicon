@@ -31,16 +31,20 @@ WANT_DATA_BLOCKS_OUT = 7
 WANT_SINK_BLOCKS = 63
 
 
-def system() -> RfLoopbackSystem:
-    """The gate scenario: eight 256-sample blocks, the kernel flow's cycle budget."""
-    return RfLoopbackSystem(n_src_blk=XSI_NBLK, blksize=XSI_BLKSIZE, n_cycles=XSI_N_CYCLES)
+def system(variant: str = "real") -> RfLoopbackSystem:
+    """The gate scenario of *variant* (``"real"``, ``"2ch"``, ``"iq"``): eight 256-sample blocks,
+    the kernel flow's cycle budget."""
+    return RfLoopbackSystem(variant=variant, n_src_blk=XSI_NBLK, blksize=XSI_BLKSIZE,
+                            n_cycles=XSI_N_CYCLES)
 
 
-def build_dag(work_dir=WORK_DIR) -> BuildDag:
-    """The framework's system steps; the kernel's csynth project is ``rf_pass_through.tcl``'s."""
+def build_dag(work_dir=WORK_DIR, variant: str = "real") -> BuildDag:
+    """The framework's system steps; the kernels' csynth projects are ``rf_pass_through.tcl``'s
+    and, for the two-channel tile, ``rf_pass_through_2ch.tcl``'s."""
     dag = BuildDag()
-    add_system_steps(dag, system(), work_dir=work_dir, top=TOP,
-                     tcls={"rf_pass_through": Path("rf_pass_through.tcl")})
+    add_system_steps(dag, system(variant), work_dir=work_dir, top=TOPS[variant],
+                     tcls={"rf_pass_through": Path("rf_pass_through.tcl"),
+                           "rf_pass_through_2ch": Path("rf_pass_through_2ch.tcl")})
     return dag
 
 
@@ -109,22 +113,47 @@ def check_counters(work: Path) -> dict:
     return {"adc_dropped": adc["dropped"], "in_flight": in_flight}
 
 
-def counters(work: Path) -> dict:
-    """The counters the kernel flow's hand-written main printed, under its names, read from the
-    recordings the RTL run's models wrote (``vectors/counters/<model>.json``)."""
+#: The system top of each variant's run.
+TOPS = {"real": TOP, "2ch": "rf_loopback_2ch_system", "iq": "rf_loopback_iq_system"}
+#: Its graph's name -- the prefix of every testbench model's name, and so of its counter files.
+TB_NAMES = {"real": "xsi_tb", "2ch": "xsi_tb_2ch", "iq": "xsi_tb_iq"}
+
+
+def counters(work: Path, variant: str = "real") -> dict:
+    """The counters the kernel flow's hand-written mains printed, under their names, read from the
+    recordings the RTL run's models wrote (``vectors/counters/<model>.json``): the converters'
+    totals, per-port counts, bound port counts and format; the RF edges'; the source's and sink's."""
     import json
 
-    def read(name: str) -> dict:
-        return json.loads((Path(work) / "xsi_run" / "vectors" / "counters" / f"{name}.json")
-                          .read_text(encoding="utf-8"))
+    tb = TB_NAMES[variant]
 
-    adc, dac = read("xsi_tb_adc_axis"), read("xsi_tb_dac_axis")
-    adc_ch, dac_ch, src = read("xsi_tb_adc_if"), read("xsi_tb_dac_if"), read("xsi_tb_adc_if_tx")
-    return {"ADC_WORDS_SENT": adc["words_sent"], "ADC_DROPPED": adc["dropped"],
-            "DAC_WORDS_RECV": dac["words_recv"], "DAC_BLOCKS_OUT": dac["blocks_out"],
-            "DAC_BLOCKS_ZERO_FILLED": dac["blocks_zero_filled"],
-            "ADC_CHAN_DROPPED": adc_ch["dropped"], "ADC_CHAN_TRANSFERRED": adc_ch["transferred"],
-            "DAC_CHAN_DROPPED": dac_ch["dropped"], "SRC_BLOCKS_OUT": src["blocks_out"]}
+    def read(name: str) -> dict:
+        d = Path(work) / "xsi_run" / "vectors" / "counters"
+        # A converter model spanning several ports is named for the first (``..._axis_0``).
+        f = d / f"{tb}_{name}.json"
+        return json.loads((f if f.is_file() else d / f"{tb}_{name}_0.json").read_text(encoding="utf-8"))
+
+    adc, dac = read("adc_axis"), read("dac_axis")
+    adc_ch, dac_ch = read("adc_if"), read("dac_if")
+    src, sink = read("adc_if_tx"), read("dac_if_rx")
+    out = {"ADC_WORDS_SENT": adc["words_sent"], "ADC_DROPPED": adc["dropped"],
+           "ADC_N_CH": adc["n_ch"],
+           "DAC_WORDS_RECV": dac["words_recv"], "DAC_UNDERRUN": dac["underrun"],
+           "DAC_BLOCKS_OUT": dac["blocks_out"], "DAC_BLOCKS_ZERO_FILLED": dac["blocks_zero_filled"],
+           "DAC_LAST_ZERO_FILL_IDX": dac["last_zero_fill_idx"], "DAC_N_CH": dac["n_ch"],
+           "ADC_CHAN_DROPPED": adc_ch["dropped"], "ADC_CHAN_TRANSFERRED": adc_ch["transferred"],
+           "DAC_CHAN_DROPPED": dac_ch["dropped"], "DAC_CHAN_TRANSFERRED": dac_ch["transferred"],
+           "SRC_BLOCKS_OUT": src["blocks_out"], "SINK_BLOCKS_IN": sink["blocks_in"],
+           "SINK_LAST_BLOCK_CYCLE": sink["last_block_cycle"],
+           "FMT_IQ_MODE": adc["fmt_iq_mode"], "FMT_IQ_ORDER": adc["fmt_iq_order"],
+           "FMT_SLOTS_PER_WORD": adc["fmt_slots_per_word"], "FMT_WORD_BITS": adc["fmt_word_bits"]}
+    for i in range(adc["n_ch"]):
+        out[f"ADC_WORDS_SENT_{i}"] = adc[f"words_sent_{i}"]
+        out[f"ADC_DROPPED_{i}"] = adc[f"dropped_{i}"]
+    for i in range(dac["n_ch"]):
+        out[f"DAC_WORDS_RECV_{i}"] = dac[f"words_recv_{i}"]
+        out[f"DAC_UNDERRUN_{i}"] = dac[f"underrun_{i}"]
+    return out
 
 
 if __name__ == "__main__":

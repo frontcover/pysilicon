@@ -751,14 +751,20 @@ class RfLoopbackSystem(GraphSystem):
 
     dut_name: ClassVar[str] = "rf_loopback_dut"
 
+    #: Which loopback: ``"real"`` (one channel, real samples), ``"2ch"`` (a two-channel tile through
+    #: the two-lane pass-through) or ``"iq"`` (interleaved I/Q through the unchanged one-channel
+    #: pass-through) -- the three scenarios of ``rf_loopback_xsi``, each its own system.
+    variant: str = "real"
     n_src_blk: int = 8
     blksize: int = 256
     #: The RTL run's cycle bound (the scenario's ``run.json``); see ``rf_loopback_xsi.XSI_N_CYCLES``.
     n_cycles: int = 16000
 
     def graph(self) -> "RfLoopbackTB":
-        self.runner = RfLoopbackSim(n_src_blk=int(self.n_src_blk), name="xsi_tb",
-                                    blksize=int(self.blksize))
+        from examples.rf_loopback.rf_loopback_xsi import make_sim, make_sim_2ch, make_sim_iq
+
+        make = {"real": make_sim, "2ch": make_sim_2ch, "iq": make_sim_iq}[self.variant]
+        self.runner = make(int(self.n_src_blk), int(self.blksize))
         self.runner.tb.sink.recording_check = "example"
         return self.runner.tb
 
