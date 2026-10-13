@@ -50,7 +50,7 @@ import numpy as np
 
 from waveflow.hw.arrayutils import array
 from waveflow.hw.fixpoint import from_real, to_real
-from waveflow.hw.hw_module import HwModule, HwParam
+from waveflow.hw.hw_module import DynParam, HwModule, HwParam
 from waveflow.hw.interface import StreamIFMaster, StreamIFSlave
 from waveflow.hw.rf_sample_if import RFSampIFRx, RFSampIFTx
 from waveflow.hw.rfdc_samp_word import RfdcSampWord, pack, unpack
@@ -130,6 +130,12 @@ class Rfdc(HwModule):
     #: (Zero would be doubly wrong — meaningless as an amplitude reference *and* falsy, which
     #: ``discover_dyn_params`` skips — so ``__post_init__`` refuses it either way.)
     full_scale: float = 1.0
+
+    #: Let the XSI DAC model accept words with X/Z bits.  By default it stops the run on one: an
+    #: undriven word read as 1s is how a run finishes on time with wrong numbers.  Set it for a
+    #: design whose startup transient plays memory it has not written yet -- X in simulation, the
+    #: memory's initial contents on the device.  No effect in pysim.
+    allow_xz: DynParam[bool] = False
 
     # -- t0: owned here, pushed to the interfaces at bind ----------------------------------------
     #

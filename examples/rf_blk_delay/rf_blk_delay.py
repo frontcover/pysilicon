@@ -515,8 +515,10 @@ class RfBlkDelayTB(FreeRunMod):
         self.samp_clk = Clock(name=f"{self.name}_samp_clk", freq=float(self.samp_rate))
         self.blk_period = int(self.blksize) / float(self.samp_rate)
 
+        # The DAC's first words at RTL carry bits the design has not driven yet -- the startup
+        # transient the XSI gates account for -- so the DAC model accepts X instead of stopping.
         self.rfdc = Rfdc(name=f"{self.name}_rfdc", sim=self.sim, n_rx=1, n_tx=1,
-                         word=self.word)
+                         word=self.word, allow_xz=True)
         w = self.rfdc.axis_bitwidth
         spw = int(self.word.samp_per_word)
 
