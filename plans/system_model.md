@@ -523,8 +523,14 @@ testbench).
 > `test_xsi_bfm.py`'s mem_r_stream / mem_w_stream rows: framework unit gates whose hand-written C++
 > mains drive the BFM library directly (no generated testbench), and whose write-side number (176)
 > is the cycle the last write is *acknowledged* -- something no model records yet.  They do not
-> hold up retiring the composite-TB generation (`tb_top_spec`'s main, `generate_tb`, the
-> `*_counters` mains), which now nothing gates on.
+> hold up retiring the composite-TB generation.  What does: the framework DSP blocks' RTL gates --
+> `SsrFft` (`waveflow/dsp/ssr_fft/rtl.py`, tests/dsp/ssr_fft/test_xsi.py) and `VitisFft`
+> (`waveflow/vitis_l1/rtl.py`) -- still generate their testbenches with `tb_top_spec`; they move to
+> systems first.  Then the generation goes (`render_tb_main`, every example's `generate_tb` /
+> `codegen_tb` step, the `*_counters` mains, the committed harness files), together with the docs:
+> 31 pages still teach `generate_tb` / `codegen_tb` / `run.bat` (the memcpy, interleaver, vecmult,
+> firblock, bram_access, rf_* example pages; guide/build/xsi.md, comp_codegen/xsi_tb.md,
+> flows/concurrent_flowsteps.md, ...).
 > Docs: the example pages still teach `generate_tb` / `run.bat`; the flow-steps prose is next.
 
 **S4 -- the TB side through hooks.**  D5.  Gate: the harness is byte-identical; `system_tb_spec` names
