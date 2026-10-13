@@ -625,9 +625,20 @@ class XsiRunStep(_Inner):
         main, tb_files = harness
         tb_inc = [d for d in (find_vitis_include_dir(), root / "include")
                   if d is not None and Path(d).is_dir()]
+        if o.trace:
+            # A traced run: a second top dumps the wrappers' scopes, and the manifests naming their
+            # nets go beside the waveform (``<work>/hazards.json``).
+            from waveflow.build.trace_steps import render_vcd_dumper
+
+            spec = o.rtl.spec
+            (ws.work_dir / f"vcd_dumper_{m['top']}.v").write_text(
+                render_vcd_dumper(m["top"], spec.trace_scopes()), encoding="utf-8")
+            (o.work_dir(config) / "hazards.json").write_text(
+                json.dumps(spec.hazard_manifests(), indent=1) + "\n", encoding="utf-8")
+            (ws.work_dir / f"{m['top']}_trace.vcd").unlink(missing_ok=True)
         ws.prepare(rtl_files=m["rtl_files"], include_dirs=m["include_dirs"],
                    tb_name=f"{m['top']}_tb", tb_cpp=main, extra_files=dict(tb_files),
-                   tb_include_dirs=tb_inc)
+                   tb_include_dirs=tb_inc, trace=o.trace)
         if o.rtl.host is not None:
             out = ws.run(timeout=o.timeout)
         else:
@@ -657,6 +668,9 @@ class SystemXsiStep(_SystemStep):
 
     rtl: SystemRtlStep
     timeout: int = 3600
+    #: Trace the run: ``<work>/xsi/<top>_trace.vcd`` (each wrapped kernel's wrapper scope) and
+    #: ``<work>/hazards.json`` (:meth:`~waveflow.build.system_top.SystemTopSpec.hazard_manifests`).
+    trace: bool = False
 
     @property
     def consumes(self) -> list:  # type: ignore[override]
@@ -952,7 +966,8 @@ def add_system_steps(dag: BuildDag, sysm, *, work_dir, top: str | None = None,
                      xbar_name: str | None = None, inside=None, probes: dict | None = None,
                      prefix: str = "", workspace: str | None = None,
                      sources: tuple[str, ...] = ("include", "gen"),
-                     tcls: dict[str, Path] | None = None, timeout: int = 3600) -> SystemXsiStep:
+                     tcls: dict[str, Path] | None = None, timeout: int = 3600,
+                     trace: bool = False) -> SystemXsiStep:
     """Add the framework steps of a system's flow to *dag*: ``csynth`` (one inner step per HLS top in
     the cut), ``system_rtl``, ``kernel_resources``, ``system_synth``, ``leaf_resources``,
     ``resource_report``, ``scenario``, ``pysim``, ``system_xsi`` and ``compare``.  Returns the
@@ -963,7 +978,7 @@ def add_system_steps(dag: BuildDag, sysm, *, work_dir, top: str | None = None,
     the root.  *top* names the Verilog top (default: the system class in snake case, ``MarkovSystem``
     -> ``markov_system``), *xbar_name* the crossbar IP (default ``xbar_<top>``).  *inside* overrides
     the cut; *probes* (``{name: beat(...)}``) adds timing probes; *tcls* overrides a top's csynth
-    script (``{top: path relative to the root}``).
+    script (``{top: path relative to the root}``); *trace* traces the XSI run (``SystemXsiStep.trace``).
 
     The run lives in ``<work_dir>/<workspace>`` (default ``<prefix><top>``, ``_probes`` added with
     probes) and the crossbar IP cache in ``<work_dir>/ip``; a relative *work_dir* is under the root.
@@ -992,7 +1007,7 @@ def add_system_steps(dag: BuildDag, sysm, *, work_dir, top: str | None = None,
     dag.add(ResourceReportStep(sysm=sysm, work=work, prefix=prefix, rtl=rtl))
     dag.add(ScenarioStep(sysm=sysm, work=work, prefix=prefix))
     dag.add(PysimStep(sysm=sysm, work=work, prefix=prefix))
-    xsi = SystemXsiStep(sysm=sysm, work=work, prefix=prefix, rtl=rtl, timeout=timeout)
+    xsi = SystemXsiStep(sysm=sysm, work=work, prefix=prefix, rtl=rtl, timeout=timeout, trace=trace)
     dag.add(xsi)
     dag.add(CompareStep(sysm=sysm, work=work, prefix=prefix))
     return xsi

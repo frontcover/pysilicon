@@ -151,6 +151,9 @@ class KernelRtl:
     wrapper: object = field(default=None, compare=False, repr=False)
     #: The wrapper's hand-written modules, as ``(instance, module, params, sources)``.
     rtl_leaves: tuple = field(default=(), compare=False, repr=False)
+    #: The wrapper's hazard manifest (:func:`~waveflow.build.wrapper_gen.bram_hazard_manifest`): the
+    #: wrapper nets a memory's read-during-write condition is visible on.
+    hazards: dict | None = field(default=None, compare=False, repr=False)
 
     @property
     def csynth_module(self) -> str:
@@ -403,6 +406,21 @@ class SystemTopSpec:
                                        self.sub_inst(k.group)))
         return tuple(out)
 
+    def scope_of(self, k: KernelRtl) -> str:
+        """Kernel *k*'s hierarchical scope in a simulation of this top: ``<top>[.<sub-top>].<inst>``."""
+        sub = self.sub_inst(k.group)
+        return ".".join(p for p in (self.top, sub, k.inst) if p)
+
+    def trace_scopes(self) -> list[str]:
+        """The scopes a traced run dumps (each at level 1): every wrapped kernel's wrapper -- where a
+        memory's ports are wires -- or, with none, the top itself."""
+        return [self.scope_of(k) for k in self.kernels if k.wrapper is not None] or [self.top]
+
+    def hazard_manifests(self) -> list[dict]:
+        """Each wrapped kernel's hazard manifest, with the ``scope`` its nets are found under in a
+        traced run of this top (:mod:`waveflow.utils.bram_trace` reads it)."""
+        return [dict(k.hazards, scope=self.scope_of(k)) for k in self.kernels if k.hazards]
+
     def sources_of(self, name: str) -> tuple[tuple[Path, ...], tuple[str, ...]]:
         """What sub-top *name* compiles: ``(its hand-written leaves' sources, each once; the
         csynth'd modules it instantiates, each once)`` -- a kernel's files are its csynth output,
@@ -501,7 +519,7 @@ def _rtl_of(mod, dw: int, owner=None) -> KernelRtl:
     # Hand-written RTL beside the kernel (plans/rtl_module.md): the instance is the wrapper, whose
     # ports are the kernel's AXI-Stream ones -- its bram ports are joined inside it.
     from waveflow.build.rtl_gen import resolve_rtl_module, rtl_source_paths
-    from waveflow.build.wrapper_gen import wrapper_spec
+    from waveflow.build.wrapper_gen import bram_hazard_manifest, wrapper_spec
 
     ws = wrapper_spec(fresh, spec)
     pins = tuple(spec.pin_ports)
@@ -509,7 +527,8 @@ def _rtl_of(mod, dw: int, owner=None) -> KernelRtl:
     leaves = tuple((m.inst, m.module, m.params, rtl_source_paths(resolve_rtl_module(mem)))
                    for m, mem in zip(ws.mems, fresh.rtl_mods.values()))
     return KernelRtl(ws.name, f"u_{mod.name}", pins, (), tuple(e for e in eps if e[0] in names),
-                     hw=mod, owner=owner, wrapper=ws, rtl_leaves=leaves)
+                     hw=mod, owner=owner, wrapper=ws, rtl_leaves=leaves,
+                     hazards=bram_hazard_manifest(fresh, spec))
 
 
 def _view_of(v, net_of: dict, law_default: int):
