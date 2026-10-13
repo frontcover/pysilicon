@@ -533,6 +533,21 @@ testbench).
 > flows/concurrent_flowsteps.md, ...).
 > Docs: the example pages still teach `generate_tb` / `run.bat`; the flow-steps prose is next.
 
+> **Done (2026-10-12): the FFTs, the retirement, the docs.**  SsrFft / VitisFft run through systems
+> (`SsrFftSystem`, `VitisFftSystem`; `rtl.run_xsi` is a system run); a traced run dumps every
+> kernel's scope.  The per-example testbench generation is gone from every example but two
+> (`generate_tb`, `codegen_tb`, the `*_counters` mains, the `examples/<ex>/xsi/` workspaces); the
+> kernel csynth steps stamp their sources directly.  The docs teach the system flow
+> (flows/concurrent_flowsteps.md rewritten; memcpy, interleaver, firblock, bram_access, rf_* pages).
+>
+> **Still on the kernel harness, deliberately:** mem_copy and the interleaver -- their calibration,
+> timing-figure and sweep tooling (`mem_copy_build` traces, `measure_compute_spans`,
+> `mem_copy_sweep`) elaborate the kernel as the top; `waveflow/vitis_l1/profile_xsi.py` (times the
+> kernel flow's phases); `test_xsi_bfm.py`'s mem_r/w_stream unit gates.  Framework `tb_top_spec` /
+> `render_tb_main` stay for those.  Moving them is the calibration tooling's own migration.
+> Known drift: `examples/rf_loopback/include/u_int64_array.h` lags its generator (TLAST
+> expression); regenerating it stales rf_pass_through(_2ch)'s csynth.
+
 **S4 -- the TB side through hooks.**  D5.  Gate: the harness is byte-identical; `system_tb_spec` names
 no participant type.
 
