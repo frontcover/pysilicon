@@ -497,6 +497,33 @@ single-kernel pages teach the system flow; first example **mem_copy** (one kerne
 memory, no bus), then markov (devices on a bus, a host), then rf_loopback (vendor IP in the
 testbench).
 
+> **Built (2026-10-12): items 1-3 and the retirement of the kernel-flow RTL runs.**
+>
+> 1. `GraphSystem` (`waveflow/hw/hw_system.py`): `graph()` / `dut_modules()` / `write_inputs()` /
+>    `check()`; the rest derived (`DutTop` name, `clk`, `data_width`, `run.json` joining the inputs'
+>    run params, every bundle participant anchored, `run_until`).  The fourteen no-bus systems use it;
+>    every generated file of all eighteen system runs byte-identical.
+> 2. `compare` names the recording, its participant, the first differing word, and the
+>    `recording_check` remedy.
+> 3. `add_system_steps(trace=True)`: a dumper of each wrapper's scope inside the system top, and
+>    `hazards.json` (each wrapper's manifest with its `scope`); `bram_trace` reads nested scopes.
+>
+> **Retired.**  Every gate file keeps its name (the docs run gates by name), its claims and its
+> recorded numbers; its run is the example's system run (`tests/examples/_system_run.py`), traced
+> where a claim reads a waveform (bram_access, rf_shot_rx/tx -- every waveform claim reproduced).
+> The S3e duplicate system gates are folded in; `test_xsi_bfm.py`'s mem_copy / rf_pass_through rows
+> moved to their system gates.  Counters a hand-written `*_counters` main printed come from the
+> converter models' counter recordings under the same names; the one only a main had (the driver's
+> words sent) is replaced by one response per command, the last included.  `WANT_XSI_GATES` 227 ->
+> 177, every claim still asserted once.
+>
+> **Still on the kernel flow:** rf_loopback's two-channel and interleaved-I/Q runs (they read per-
+> channel counts, the bound port count and the I/Q format, which the converter models do not record
+> yet -- a `write_counters` extension in `xsi_rfdc.h`), and `test_xsi_bfm.py`'s mem_r_stream /
+> mem_w_stream rows (standalone interleaver tops, not in S3e's list).  Until they move, the
+> composite-TB generation (`tb_top_spec`'s main, `generate_tb`, the `*_counters` mains) stays.
+> Docs: the example pages still teach `generate_tb` / `run.bat`; the flow-steps prose is next.
+
 **S4 -- the TB side through hooks.**  D5.  Gate: the harness is byte-identical; `system_tb_spec` names
 no participant type.
 
