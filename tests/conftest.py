@@ -131,7 +131,14 @@ os.environ.setdefault("WAVEFLOW_EVENTS", "off")
 #: recordings match pysim, golden at 2908 (test_mem_copy_system_xsi.py).  176 -> 178 (S3d):
 #: rf_loopback through the system flow, the RFDC in the testbench (test_rf_loopback_system_xsi.py).
 #: 178 -> 179: its loss counters, written by the models as a recording.
-WANT_XSI_GATES = 225
+#: 179 -> 227 on 2026-10-12 (S3e): the twelve single-kernel examples through the system flow, each
+#: beside its kernel-flow gate.
+#: 227 -> 177 on 2026-10-12 (S3f) -- DELIBERATELY LOWERED, and nothing it measured went with it: each
+#: example's gate file now runs its design through the system flow (traced where its claims read a
+#: waveform), so the duplicate S3e system gates were folded into it, and test_xsi_bfm.py's mem_copy /
+#: rf_pass_through rows (with their .f drift checks) moved to test_mem_copy_system_xsi.py /
+#: test_rf_dut_system_xsi.py.  Every claim and every recorded number is still asserted once.
+WANT_XSI_GATES = 177
 
 #: Filled in at collection; module state because a pytest run is one process and the hooks that
 #: write and read it are plain functions.

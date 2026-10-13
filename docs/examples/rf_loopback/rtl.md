@@ -174,7 +174,7 @@ The loopback also runs through the [system flow](../../guide/flows/concurrent_sy
 
 ```bash
 python -m examples.rf_loopback.rf_loopback_system_build --synth check
-pytest -m xsi tests/examples/test_rf_loopback_system_xsi.py
+pytest -m xsi tests/examples/test_rf_loopback_xsi.py
 ```
 
 `RfLoopbackSystem` (in `rf_loopback.py`) cuts the same graph differently in words, not in effect. The
