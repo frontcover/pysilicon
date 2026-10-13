@@ -4,7 +4,7 @@ parent: Examples
 nav_order: 5
 has_children: true
 example_dir: examples/mem_copy
-summary: "The worked example for the free-running flow, and the counterpart to the register-map one. Where a control-driven kernel is a single host-launched function, this is a composite of free-running hls::tasks copying words between memory regions — which Vitis cannot co-simulate, so it is verified by driving the real RTL cycle by cycle through an XSI BFM. It also reuses the MemRStream / MemWStream adaptors, whose timing models ship pre-fit, so the loosely-timed pysim reproduces the RTL with no calibration of its own."
+summary: "The worked example for the free-running flow, the counterpart to the register-map one, and the first system: a composite of free-running hls::tasks copying words between memory regions, which Vitis cannot co-simulate. So it is stated as an HwSystem, and the system flow generates a top and a harness from it and drives the real RTL cycle by cycle through XSI. It also reuses the MemRStream / MemWStream adaptors, whose timing models ship pre-fit, so the loosely-timed pysim reproduces the RTL with no calibration of its own."
 ---
 # Memory Copy — a free-running composite kernel
 
@@ -30,8 +30,13 @@ In going through this example, you will learn to:
 - Run a Python **concurrent simulation** of the composite target hardware in conjunction with the testbench components
 - Generate a **concurrent Vitis C++ kernel** from the Python descriptions, where each sub-component becomes an **HLS task**
 - Synthesize the concurrent Vitis C++ kernel into RTL with **Vitis HLS C-synthesis** (the generated `mem_copy.tcl`)
-- Map each testbench component to an **XSI BFM model** (hand-written framework classes) and **generate the XSI harness** that wires those models to the RTL and drives the clock
-- Run the XSI simulation to extract timing and functionally validate the generated RTL
+- State the design as a **system** (`HwSystem`): the graph plus the **cut**, which says which modules
+  are the design under test, so that everything else is testbench
+- Let the **system flow** derive the rest: a Verilog top around the kernel with a port for every
+  connection that leaves it, and a harness of C++ models (each testbench participant's own BFM twin)
+  answering those ports
+- Run the RTL under XSI, compare what the testbench recorded with pysim word for word, and check the
+  golden and the cycle count on the RTL's recordings
 - Visualize the concurrent timing of the components on an [**activity diagram**](./timing.md) — the
   pipeline overlap and where every cycle of the period goes
 - See why the loosely-timed pysim reproduces the RTL to 0.0% — `mem_copy` **reuses** the platform's
@@ -41,8 +46,8 @@ In going through this example, you will learn to:
 
 ## In this example
 
-The pages build the design up from Python, parallel to the [register-map example](../regmap/) — model
-it, test it in Python, generate the kernel, generate the testbench, then run the RTL:
+The pages build the design up from Python, parallel to the [register-map example](../regmap/). You
+model it, test it in Python, generate the kernel, state the system, then run the RTL:
 
 1. [Module overview](./memcpy.md) — the three-stage design, the in-band forwarding protocol, and how
    it is wired.
@@ -51,10 +56,10 @@ it, test it in Python, generate the kernel, generate the testbench, then run the
    running the pysim step.
 4. [DUT codegen](./codegen_dut.md) — what an `hls::task` is, and how the design graph becomes the
    `ap_ctrl_none` top.
-5. [Testbench codegen](./codegen_tb.md) — what XSI and a harness are, and how the *testbench* graph
-   becomes the BFM harness.
-6. [RTL simulation](./rtlsim.md) — running the RTL through XSI, inspecting the results, and comparing
-   the timing to pysim.
+5. [The system](./system.md) — `MemCopySystem`, the cut, and what the system flow derives from it:
+   the system top, the harness of BFM models, the scenario.
+6. [RTL simulation](./rtlsim.md) — running the system flow end to end, the RTL-vs-pysim comparison,
+   and the golden at 2908 cycles.
 7. [Visualizing timing](./timing.md) — tracing an RTL run and rendering it: the pipeline overlap, the
    bottleneck, where every cycle of the period goes, and why the loosely-timed pysim reproduces it using
    the platform's shipped infra models (no per-example calibration).

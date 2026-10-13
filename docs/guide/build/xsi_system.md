@@ -83,6 +83,23 @@ kernel. The tree is also the unit structure everything after simulation uses: ea
 [Building the markov system](../../examples/markov/system.md) walks one system from its modules to
 its DUT tree.
 
+### A system around one graph: `GraphSystem` {#graph-system}
+
+Most systems with a single kernel already have their graph: a composite holding the kernel and the
+testbench participants around it. `GraphSystem` is the `HwSystem` for that case. A subclass states
+only what is its own, and the base derives the rest:
+
+| a subclass states | the base derives |
+|---|---|
+| `graph()`: build and return the graph | `sim`, from the graph |
+| `dut_modules(g)`: the modules inside the default cut | `dut()`, a `DutTop` of them; `clk`, the DUT's clock; `data_width`, its widest boundary port |
+| `write_inputs(root)`: the scenario's inputs | `write_scenario`: the inputs, then `vectors/run.json` (the graph's `n_cycles`), then every participant that reads or records a bundle anchored at *root* |
+| `check()` (optional): the golden on a pysim run | `run()`: pysim, to the graph's `run_until` when it has one, then `check()` |
+
+A recording that pysim cannot match by construction is marked on its participant in `graph()`
+(`recording_check = "example"`), and the example checks it instead of `compare`.
+[The mem_copy system](../../examples/memcpy/system.md) is the worked example.
+
 ## The system top: `SystemTopSpec` {#the-spec}
 
 ### What it is

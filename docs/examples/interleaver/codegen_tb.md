@@ -99,7 +99,7 @@ cycles.
 
 ## The generated-TB pattern
 
-This is the same shape `mem_copy` uses — its [Testbench codegen](../memcpy/codegen_tb.md) page is the
+This is the same shape `mem_copy` uses — its [Testbench codegen](../memcpy/system.md) page is the
 template. The only hand-written half of the whole RTL testbench is two Python functions:
 `write_xsi_bundles` (a wrapper over `write_scenario`) and `check_xsi_outputs` (the golden). Everything
 else — harness, `main`, the port map, the BFM models — is generated or framework. Python writes the
