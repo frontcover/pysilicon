@@ -29,20 +29,17 @@ In going through this example, you will learn to:
 - Develop a **concurrent testbench** as a composite graph that wires the DUT to stimulus and capture, using Waveflow's built-in stream source/sink models (`StreamDriver`, `StreamSink`)
 - Run a Python **concurrent simulation** of the composite target hardware in conjunction with the testbench components
 - Generate a **concurrent Vitis C++ kernel** from the Python descriptions, where each sub-component becomes an **HLS task**
-- Synthesize the concurrent Vitis C++ kernel into RTL with **Vitis HLS C-synthesis** (the generated `mem_copy.tcl`)
-- State the design as a **system** (`HwSystem`): the graph plus the **cut**, which says which modules
-  are the design under test, so that everything else is testbench
-- Let the **system flow** derive the rest: a Verilog top around the kernel with a port for every
-  connection that leaves it, and a harness of C++ models (each testbench participant's own BFM twin)
-  answering those ports
-- Run the RTL under XSI, compare what the testbench recorded with pysim word for word, and check the
-  golden and the cycle count on the RTL's recordings
-- Visualize the concurrent timing of the components on an [**activity diagram**](./timing.md) — the
+- Describe a **`GraphSystem`** that cuts the graph: the generated kernel as the **DUT**, and the
+  stream driver, stream sink and memory around it as the **testbench**
+- Synthesize the DUT into RTL with **Vitis HLS C-synthesis** (the generated `mem_copy.tcl`)
+- Generate an **XSI harness** from the graph system: a Verilog top around the synthesized kernel,
+  and a C++ testbench of each participant's BFM model answering its ports
+- Simulate the RTL through the XSI harness, compare what the testbench recorded with pysim word for
+  word, and check the golden and the cycle count on the RTL's recordings
+- Visualize the concurrent timing of the components on an [**activity diagram**](./timing.md): the
   pipeline overlap and where every cycle of the period goes
-- See why the loosely-timed pysim reproduces the RTL to 0.0% — `mem_copy` **reuses** the platform's
-  pre-fit infra timing models (the `m_axi` bus and the memory-stream adaptors), which ship with Waveflow,
-  and calibrates nothing itself (fitting a *custom* component's timing is the general
-  [calibration guide](../../guide/calib/), worked end-to-end in the interleaver example)
+- Reuse a pre-fit **platform timing model** (the `m_axi` bus and the memory-stream adaptors, shipped
+  with Waveflow) so the loosely-timed pysim matches the RTL's period with no calibration of your own
 
 ## In this example
 
