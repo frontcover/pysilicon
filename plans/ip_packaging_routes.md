@@ -344,6 +344,28 @@ memory-mapped wiring needs no custom interface definitions (every inter-IP link 
 interrupt); the direct wiring's credit stream is the open case.  Gate: rung 3 of `board_packaging.md`
 (VLNV and ports) for each of markov's four IPs.
 
+> **Built (2026-10-12).**  `waveflow/build/system_ip.py` (`package_system`) and the opt-in DAG step
+> `ip_package` (`IpPackageStep`, on every system's DAG via `add_system_steps`):
+> - each device sub-top and the memory packaged by `ipx::package_project` from exactly what it
+>   compiles (its rendered module, leaves, kernels' csynth Verilog; imported, so self-contained),
+>   all in **one** Vivado session -- markov's three in **11 s** of Vivado, 19 s for the step;
+> - interfaces: the AXI4 groups inferred from their names (`mi<k>_axi` slave, `si<k>_axi` master),
+>   clock and reset inferred, interrupt lines declared from `SystemTopSpec.irqs`; the clock then
+>   associated with every AXI interface and the reset (`ASSOCIATED_BUSIF` / `ASSOCIATED_RESET`),
+>   what Stage 4's validation needs;
+> - the crossbar recorded by its `.xci` (`xilinx.com:ip:axi_crossbar:2.1`), generated for the part;
+> - each IP cached by the content of what it reads plus the recipe's revision: a re-run starts no
+>   Vivado; the manifest is read back from each `component.xml`.
+>
+> Gate (`tests/examples/test_markov_ip.py`, `-m xsi`, `WANT_XSI_GATES` 177 -> 183): markov's four
+> VLNVs; exactly the expected interfaces and modes; no port outside an interface; the clock
+> association; the cache; and **each IP's files byte-identical to what the XSI gates compiled**, its
+> own module the text the gated system top holds.  As predicted, every inter-IP link is AXI4 or an
+> interrupt: no custom interface definition was needed.  Docs: `docs/guide/build/ipi.md` (Stage 3's
+> half; Stage 4 adds the block design).  Not done: `export_design` per kernel (the plan's route B
+> text) -- the kernel's csynth Verilog goes into its device's IP directly, so a kernel is never an IP
+> on its own; the direct-wired markov (a credit stream between devices) is still the open case.
+
 **Stage 4 -- the block-design generator.**  From the system spec, `create_bd_cell` /
 `connect_bd_intf_net` for each IP and link; `validate_bd_design` (rung 4) as the gate.  The XSI top and
 the block design rendered from one spec.
