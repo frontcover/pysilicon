@@ -24,7 +24,8 @@ The flow forks only at the final RTL-exercising rung, based on top execution mod
 | composite free-running task-network top (`ap_ctrl_none`) | [XSI + BFM](./xsi.md) |
 | a memory-mapped system: kernels, adaptors, crossbar, host | [XSI system simulation](./xsi_system.md) |
 
-That fork is two realizations of one flow, not two separate flows.
+That fork is two realizations of one flow, not two separate flows. A system then goes toward a
+board as IP, one per device ([IP packaging](./ipi.md)): a realization, not a verification rung.
 
 ## Why it's useful
 
@@ -47,6 +48,8 @@ That fork is two realizations of one flow, not two separate flows.
   also `SvSimStep`, for a hand-written SystemVerilog testbench with no HLS in it.
 - [XSI System Simulation](./xsi_system.md) — a whole memory-mapped system at RTL, from the pysim
   system object: the generated top, the host as a hooked module, and the trace conformance gate.
+- [IP Packaging](./ipi.md) — a system packaged as Vivado IP, one per device: the step, the
+  interfaces each IP declares, and the gate.
 - [Software Threads](./sw_threads.md) — the host as threads, with one API in Python (SimPy) and C++
   (fibers): the primitives side by side, writing a host's C++ twin, and the gate that checks they agree.
 - [BFM Testbenches](./bfm.md) — the framework's AXI-MM / AXI-Stream models and their five-phase
