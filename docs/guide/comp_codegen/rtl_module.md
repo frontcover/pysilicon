@@ -200,16 +200,15 @@ build DAG, and a design that declares an `rtl_module()` adds both:
 `GenRtlStep` copies and `GenWrapperStep` generates. The wrapper may be generated because it is
 **wiring only**: every name in it was decided elsewhere (the kernel's ports by Vitis's naming rules,
 the memory's by its declared port map, the joins by `add_rtl_if`). Build the wrapper at the same
-`elab_params` and `width` as the kernel it instantiates, or the two will not match. From
-`bram_access_build.py`:
+`elab_params` and `width` as the kernel it instantiates, or the two will not match.
 
-```python
-inner.add(GenWrapperStep(name="wrapper", comp_class=BramAccess, elab_params=dict(_ELAB),
-                         width=WORD_BW, output_dir="xsi"))
-```
-
-The RF examples that wrap a kernel beside hand-written memory (`rf_blk_delay`, `rf_samp_buf_rx`,
-`rf_samp_buf_tx`, `rf_shot_rx`, `rf_shot_tx`) use the same pair.
+**The system flow does both itself.** When a kernel inside a system's cut declares `add_rtl_mod`,
+the system top instantiates it as its wrapper. It renders the wrapper into the top's own Verilog,
+puts each memory's declared `.v` on the run's compile list, and elaborates the kernel from the
+system instance's own `HwParam`s, so the wrapper and the csynth'd kernel match by construction. The
+examples that wrap a kernel beside hand-written memory run that way: `bram_access`, `rf_blk_delay`,
+`rf_samp_buf_rx`, `rf_samp_buf_tx`, `rf_shot_rx` and `rf_shot_tx`. The two steps above remain for a
+design that wants the wrapper as a file of its own.
 
 `trace_manifest` derives net names in *the top's own scope*, so with a wrapper as the elaborated top
 the **kernel's** internals sit one level deeper and are still out of reach. The first consumer to
