@@ -2,7 +2,7 @@
 title: "Simulation speed: the SSR FFT"
 parent: Simulation speed
 nav_order: 2
-summary: "One bit-exact 1024-point FFT run three ways on the same frames: the untimed Python model (1.87 ms a frame), Waveflow's pysim (2.29 ms flat, 4.44 ms with one process per task) and the synthesized RTL under XSI (131 ms, plus about two and a half minutes of synthesis and build per design point). What the pysim adds and why, how its cost came down from 350 ms a frame in one day, the lessons for the next block, and future work: the untimed model itself is the bottleneck now."
+summary: "One bit-exact 1024-point FFT run three ways on the same frames: the untimed Python model (1.87 ms a frame), Waveflow's pysim (2.29 ms flat, 4.44 ms with one process per task) and the synthesized RTL under XSI (131 ms, plus about two and a half minutes of synthesis and build per design point). What the pysim adds and why, how its cost came down from 350 ms a frame in one day, the lessons for the next block, and an estimate against an optimized (compiled) model, which the pysim would call too: about 0.05 ms a frame untimed, about 0.47 ms in the flat pysim, the timing then most of the cost."
 ---
 
 # Simulation speed: the SSR FFT
@@ -47,6 +47,28 @@ Per frame, fitted over 10, 50 and 100 frames; every run bit-exact:
 Measured 2026-10-13, except csynth, measured the same morning on the same machine (it does not
 depend on the number of frames). The machine is described on [Simulation speed](index.md#results).
 
+### With an optimized model (an estimate, not yet measured)
+
+The untimed model above is **not optimized** (see [Insights](#insights)). Written as typed loops over
+integers -- the fixed-point steps are a multiply, a rounding shift and a wrap each -- and compiled with
+Cython or Numba, a bit-exact radix-4 FFT should take tens of nanoseconds a sample. The pysim calls the
+same arithmetic, so it gets the same saving and keeps its own overhead:
+
+| | per frame (estimate) | vs optimized untimed |
+|---|---|---|
+| untimed model, compiled | ~0.05 ms | 1x |
+| pysim, flat, calling the compiled model | ~0.05 + 0.42 = ~0.47 ms | ~9x |
+| pysim, one process per task, calling it per stage | ~0.05 + 2.57 = ~2.6 ms | ~50x |
+| RTL under XSI | 131 ms | ~2600x |
+
+The 0.05 ms is an estimate (20-50 us is the plausible range); the overheads, 0.42 and 2.57 ms, are
+the measured differences between the pysims and the untimed model above, and do not depend on how
+the bits are computed. The flat pysim already runs the whole chain in one place, so a compiled
+kernel for the full pipeline would replace that loop as one call; the per-task pysim would need the
+kernel split per stage. Against an optimized model, the timing is no longer a small addition -- it
+is most of the cost -- which is why [the cost per event](index.md#what-is-still-slow) is the next
+thing to reduce.
+
 ## Insights
 
 - **The flat pysim adds 0.42 ms a frame to the arithmetic** -- about a dozen SimPy events. For this
@@ -64,8 +86,12 @@ depend on the number of frames). The machine is described on [Simulation speed](
   vendor library operation by operation -- a radix-4 butterfly is 16 general complex multiplies by
   constants that are exactly `1, -j, -1, +j`, each with three quantization points -- about a
   thousand int64 operations per sample, and about 3000 Python-level calls per frame. An optimized
-  bit-exact model would be several times faster. Because the pysim calls the same functions, it
-  would get the same saving: the additive overhead is what this page measures.
+  bit-exact model would be far faster -- an estimate is in
+  [the table above](#with-an-optimized-model-an-estimate-not-yet-measured). Because the pysim calls
+  the same functions, it would get the same saving: the additive overhead is what this page measures.
+- **An untimed model can also batch.** Processing a whole capture in one call amortizes every
+  per-frame cost; a timed simulation steps frame by frame, because the timing is per frame. That is a
+  real cost of timing, not an implementation detail.
 
 ## How it got here
 
@@ -112,9 +138,10 @@ For the next block whose pysim is slow:
 
 ## Future work
 
-- **An optimized bit-exact model**: the ±1/±j butterfly products as sign changes and swaps, the
-  quantization steps fused, many frames per call when nothing is timed. It lowers the untimed
-  baseline and the pysim alike -- then this page measures again.
+- **An optimized bit-exact model**, to replace the estimate above with a measurement: typed integer
+  loops compiled with Cython (or Numba), the ±1/±j butterfly products as sign changes and swaps, the
+  quantization steps fused; checked against the golden, then timed untimed and inside the flat pysim.
+  It lowers the untimed baseline and the pysim alike, and tests the additive model directly.
 - **Other lengths and widths** (`L = 16 .. 4096`), and the stream-of-blocks reorder, which has no
   flat model.
 - **Partitioned simulation.** SimPy runs on one core. A system cut at a link with long latency (two

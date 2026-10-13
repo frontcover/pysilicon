@@ -50,6 +50,12 @@ the first block measured is memcpy, which has no arithmetic at all.
 Measured 2026-10-13 on one Windows 11 machine (Intel 13th-generation-class CPU, Python 3.14),
 nothing else running, best of several runs.
 
+**Against an optimized model** the picture changes, and it should be read that way. The FFT's
+untimed model is not optimized; compiled as typed loops it would take an estimated ~0.05 ms a frame.
+The pysim would call the same compiled arithmetic and keep its measured overhead, ~0.05 + 0.42 =
+~0.47 ms flat: about 9 times the optimized model, still about 280 times faster than RTL. The
+estimate and its basis are on [the FFT page](fft.md#with-an-optimized-model-an-estimate-not-yet-measured).
+
 ## How it is measured
 
 - **Per-frame cost, not total.** Each fidelity runs at several frame counts and is fitted to
