@@ -461,6 +461,42 @@ decision.
 > the composite-TB generation (`tb_top_spec`, `render_tb_main`, `*_counters` mains) goes; the TB
 > classes stay as graphs the systems build on.
 
+**S3f -- the system flow as THE single-kernel flow (decided 2026-10-12).**  The user's direction:
+recommend the `HwSystem` model to anyone using the free-running kernel flow, and once the system
+gates can carry everything the kernel-flow gates check, retire the standalone kernel flow's RTL gates
+(and the time they cost).  S3e measured what stands in the way; three items, in order:
+
+1. **No boilerplate.**  The twelve S3e systems are ~40 near-identical lines each (build the graph,
+   `DutTop.of`, `data_width`, `clk`, `write_run_params`, anchor every participant at the root, run to
+   a horizon).  A base class states the defaults, derived from the graph, so an example states only
+   what is its own -- the graph, which modules are the DUT, the scenario's inputs, the golden check:
+
+       @dataclass
+       class StateAccumSystem(GraphSystem):
+           nvec: int = 5
+           def graph(self):          return StateAccumTB(name="xsi_tb", sim=Simulation(), nvec=self.nvec)
+           def dut_modules(self, g): return [g.dut]
+           def write_inputs(self, root): write_scenario(root, self.nvec)
+
+   Defaults: `clk` the DUT's clock; `data_width` the widest DUT boundary port; `write_scenario` =
+   `write_inputs` + `run.json` (`n_cycles` from the graph) + every testbench participant with a
+   bundle anchored at the root; `run` to the graph's `run_until` when it has one, then `check()`.
+   Gate: the twelve S3e system gates unchanged, each example's system class reduced to its own parts.
+2. **A mismatch says what to do.**  `compare`'s failure names the recording, the participant that
+   records it, and the remedy when pysim legitimately cannot match (`recording_check = "example"`).
+3. **Tracing in the system flow.**  A traced `system_xsi` run (VCD), and the hazard manifest's nets
+   resolved at their path through the system top (sub-top / DUT instance / wrapper), so the kernel
+   gates' waveform claims (bram_access, rf_shot_rx/tx) move to the system gates.  Gate: those claims
+   reproduced through the system flow.
+
+Then **retire**: per example, the kernel-flow RTL gate whose every claim a system gate now makes is
+deleted (its csynth-report checks -- II, module names -- stay, they need no RTL run), and with the
+last of them the composite-TB generation (`tb_top_spec`'s main, `*_counters` mains,
+`generate_tb`).  The `*TB` graph classes stay: the systems build on them.  Docs: the guide's
+single-kernel pages teach the system flow; first example **mem_copy** (one kernel, driver / sink /
+memory, no bus), then markov (devices on a bus, a host), then rf_loopback (vendor IP in the
+testbench).
+
 **S4 -- the TB side through hooks.**  D5.  Gate: the harness is byte-identical; `system_tb_spec` names
 no participant type.
 
