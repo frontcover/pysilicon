@@ -141,9 +141,13 @@ os.environ.setdefault("WAVEFLOW_EVENTS", "off")
 #: 177 -> 183 on 2026-10-12 (plans/ip_packaging_routes.md Stage 3): markov packaged as IP, one per
 #: device (test_markov_ip.py) -- VLNVs, interfaces, the clock association, the cache, and each IP
 #: carrying exactly the files the XSI gates verified.
-#: 183 -> 189 on 2026-10-13 (Stage 4): markov's block design (test_markov_bd.py) -- validated, and
-#: read back against the system top: its ports, links, address map and crossbar.
-WANT_XSI_GATES = 189
+#: 183 -> 190 on 2026-10-13 (Stages 4-5): markov's block design (test_markov_bd.py) -- validated,
+#: read back against the system top (its ports, links, address map and crossbar), and set to
+#: synthesize globally.
+#: 190 -> 195 on 2026-10-13 (Stages 2 and 6): markov's tied memory priced as one RAMB36 and the
+#: composed BRAM equal to the measured (test_markov_tieoffs.py); both synthesis routes run fresh
+#: against the record the docs quote (test_markov_routes.py).
+WANT_XSI_GATES = 195
 
 #: Filled in at collection; module state because a pytest run is one process and the hooks that
 #: write and read it are plain functions.

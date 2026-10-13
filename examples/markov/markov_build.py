@@ -7,6 +7,7 @@ two bus writers (``plans/mm_credit_stream.md`` Stage 3, ``plans/system_dag.md``)
     python -m examples.markov.markov_build --status                      # what is stale, and why
     python -m examples.markov.markov_build --probes                      # the system top with probes
     python -m examples.markov.markov_build --through sync_docs_figures   # the docs figure (no toolchain)
+    python -m examples.markov.markov_build --through sync_routes_figure  # both synthesis routes (Vivado)
 
 Each kernel's body is hand-written (``src/markov_gen_task.h``, ``src/markov_chain_core_task.h``
 -- the HLS twins of ``MarkovGen.run_iter`` / ``ChainCore.run_iter``); everything around them is
@@ -161,14 +162,18 @@ def build_dag(probes: bool = False, work_dir=WORK_DIR) -> BuildDag:
     ``scenario`` / ``pysim``; ``system_xsi`` -> ``compare``), and the docs figure beside them.  *probes* builds the
     system top with :func:`~examples.markov.markov.timing_probes` (workspace ``markov_probes``)."""
     from examples.markov.markov_figures import MarkovFiguresStep, SyncDocsFiguresStep
+    from examples.markov.markov_routes import MarkovRoutesStep, SyncRoutesFigureStep
 
     sysm = system()
     dag = BuildDag()
     dag.add(MarkovCodegenStep(name="codegen"))
-    add_system_steps(dag, sysm, work_dir=work_dir, top=TOP, xbar_name=XBAR_NAME, workspace=WORKSPACE,
-                     probes=timing_probes(sysm) if probes else None)
+    xsi = add_system_steps(dag, sysm, work_dir=work_dir, top=TOP, xbar_name=XBAR_NAME,
+                           workspace=WORKSPACE, probes=timing_probes(sysm) if probes else None)
     dag.add(MarkovFiguresStep(name="markov_figures"))
     dag.add(SyncDocsFiguresStep(name="sync_docs_figures"))
+    # Both synthesis routes, measured, for the docs (opt-in: minutes of Vivado cold).
+    dag.add(MarkovRoutesStep(name="markov_routes", rtl=xsi.rtl))
+    dag.add(SyncRoutesFigureStep(name="sync_routes_figure"))
     return dag
 
 

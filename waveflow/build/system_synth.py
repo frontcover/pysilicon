@@ -77,6 +77,10 @@ class SystemSynth:
     met: bool | None = None
     tool: str = ""
     seconds: float = 0.0
+    #: The total after ``opt_design`` (asked with ``opt``): the like-for-like number for the
+    #: per-device route, whose linked total is after ``opt_design`` too (``system_ooc``).
+    opt_total: dict = field(default_factory=dict)
+    opt_seconds: float = 0.0
 
     @property
     def integration(self) -> dict:
@@ -142,7 +146,7 @@ def system_identity(spec, top_text: str, kernel_dirs: dict[str, Path], *, part: 
 
 
 def synth_tcl(top: str, *, part: str, period_ns: float, xci: str, sources: list[str],
-              impl: bool, insts=()) -> str:
+              impl: bool, insts=(), opt: bool = False) -> str:
     """The batch script: read everything, synthesize out of context, report hierarchically."""
     lines = [
         # Per instance, the primitives whose names it prefixes -- what prices an instance whose
@@ -181,6 +185,12 @@ def synth_tcl(top: str, *, part: str, period_ns: float, xci: str, sources: list[
         "wf_slack synth",
         "wf_prims synth {" + " ".join(insts) + "}",
     ]
+    if opt and not impl:
+        lines += [
+            "set t2 [clock milliseconds]", "opt_design",
+            'puts "WF_OPT_SECONDS [expr {([clock milliseconds] - $t2) / 1000.0}]"',
+            "report_utilization -file util_opt.rpt",
+        ]
     if impl:
         lines += [
             "opt_design", "place_design", "phys_opt_design", "route_design",
@@ -301,11 +311,13 @@ def keep_hierarchy_top(top_text: str, insts) -> str:
 def synth_system(spec, *, top_v: Path, kernel_dirs: dict[str, Path], ip, out_dir: Path, part: str,
                  period_ns: float, impl: bool = False, keep_hierarchy: bool = False,
                  vivado: str | None = None,
-                 force: bool = False) -> SystemSynth:
+                 force: bool = False, opt: bool = False) -> SystemSynth:
     """Synthesize the system top *spec* describes (its Verilog at *top_v*) out of context on *part*
     at *period_ns*, attribute the hierarchical report to the inventory, and cache the result under
     ``out_dir/<run digest>/result.json``.  *ip* is the crossbar IP (``generate_axi_xbar``) generated
-    for *part*; *kernel_dirs* maps each csynth'd module to its ``syn/verilog``."""
+    for *part*; *kernel_dirs* maps each csynth'd module to its ``syn/verilog``.  *opt* also runs
+    ``opt_design`` after the synthesis and reports :attr:`SystemSynth.opt_total`; a cached result
+    without it is re-run when it is asked for."""
     from waveflow import events
     from waveflow.utils.vivado_report import parse_markers, parse_utilization_hierarchical
 
@@ -315,7 +327,9 @@ def synth_system(spec, *, top_v: Path, kernel_dirs: dict[str, Path], ip, out_dir
     work = Path(out_dir) / run
     stamp = work / "result.json"
     if stamp.exists() and not force:
-        return SystemSynth.from_json(json.loads(stamp.read_text(encoding="utf-8")))
+        cached = SystemSynth.from_json(json.loads(stamp.read_text(encoding="utf-8")))
+        if cached.opt_total or not opt or impl:
+            return cached
 
     if vivado is None:
         from waveflow.toolchain.toolchain import find_vivado_path
@@ -344,7 +358,7 @@ def synth_system(spec, *, top_v: Path, kernel_dirs: dict[str, Path], ip, out_dir
     tcl = work / "synth_system.tcl"
     tcl.write_text(synth_tcl(spec.top, part=part, period_ns=period_ns,
                              xci=(ip_copy / f"{ip.module}.xci").as_posix(), sources=sources,
-                             impl=impl, insts=[i.path for i in spec.instances()]),
+                             impl=impl, insts=[i.path for i in spec.instances()], opt=opt),
                    encoding="utf-8")
     with events.span("tool", "vivado", script=tcl.name):
         r = subprocess.run([vivado, "-mode", "batch", "-nojournal", "-log", "vivado.log",
@@ -370,6 +384,11 @@ def synth_system(spec, *, top_v: Path, kernel_dirs: dict[str, Path], ip, out_dir
                       met=(wns >= 0) if (impl and wns is not None) else None,
                       tool=f"vivado {mk.get('VERSION', '')}".strip(),
                       seconds=float(mk.get("SECONDS") or 0.0))
+    if opt and not impl:
+        from waveflow.utils.vivado_report import parse_utilization
+
+        res.opt_total = parse_utilization((work / "util_opt.rpt").read_text(encoding="utf-8"))
+        res.opt_seconds = float(mk.get("OPT_SECONDS") or 0.0)
     stamp.write_text(json.dumps(res.to_json(), indent=2), encoding="utf-8")
     return res
 
