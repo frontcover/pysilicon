@@ -338,6 +338,30 @@ unchanged devices show no synthesis span in a one-device rebuild.
 (`bram_t2p` port B, unused crossbar slots), carried in each leaf's identity.  Gate: markov's memory is
 one RAMB36 out of context; the composed BRAM equals the measured.
 
+> **Built (2026-10-13, branch `ip-packaging-s4`) -- as an identity, not a Verilog parameter.**
+> Stage 1 had already shown the device-granularity half: markov's memory sub-top is one RAMB36 out of
+> context, its port B tied inside its own module.  What remained was the leaf library, where
+> `bram_t2p` alone has both ports live and the composed estimate said 6 BRAM18 against 4 measured.
+> Rather than a `PORT_B_USED` generic in `bram_t2p.v` -- a source edit that would move the identity
+> and the RTL of ten examples whose port B is live -- the **instance** states its tie-offs:
+> - `RtlInstance.ties` (`((port, value), ...)`: an input tied to a value, an output left open), set
+>   by `SystemTopSpec.instances()` from what the top renders (`BramView.IDLE_TIES` for a memory no
+>   kernel holds);
+> - `identify_rtl(..., ties)` keys on them **only when there are any**, so every untied leaf keys
+>   exactly as before -- no record orphaned, no XSI top changed;
+> - `synth_rtl_ooc(..., ties)` synthesizes the leaf inside a generated `<module>_tied` wrapper
+>   (`rtl_ooc.tied_wrapper`, port bounds evaluated from the leaf's own header) that ties the ports as
+>   the system does; `measure_instances` passes `RtlInstance.ties`.
+>
+> Measured (xc7z020, 10 ns): `bram_t2p` 512 x 64 tied **1 LUT / 2 BRAM18** (one RAMB36), untied 2 LUT /
+> 4 BRAM18, 35 s each.  markov's composed estimate: **11,937 LUT / 8,088 FF / 4 BRAM18** against
+> 6,281 / 7,187 / 4 measured -- **BRAM exact** (was 6 / 4).  The LUT gap (+90%) is the kernels'
+> `hls_estimate`, untouched here.  Gates: `tests/build/test_leaf_ties.py` (no Vivado: only
+> `u_mem_mem` is tied, untied keys unchanged, the wrapper) and `tests/examples/test_markov_tieoffs.py`
+> (`-m xsi`: one RAMB36 out of context; composed BRAM == measured).  Unused crossbar slots, the
+> plan's other tie-off, need nothing: a stub slot's front is not instantiated, and the crossbar's
+> configuration already carries the slot count.
+
 **Stage 3 -- package.**  `ipx::package_project` per device sub-top (its kernel's csynth Verilog and its
 leaves' sources), the memory as one IP, the crossbar's `.xci` as is.  At device granularity the
 memory-mapped wiring needs no custom interface definitions (every inter-IP link is AXI-MM or an
@@ -399,6 +423,20 @@ the block design rendered from one spec.
 **Stage 5 -- choose the default.**  With stages 1-4 measured, decide which synthesis mode a system's
 bitstream uses by default, and record why.
 
+> **Decided (2026-10-13): global synthesis is the default for a bitstream; per device is the mode
+> for incremental work.**  The evidence is Stage 1's and Stage 6's runs: per device costs 0.35% LUT
+> against global + `opt_design` on markov, so area does not decide; time does, and the two modes win
+> on different rebuilds.  A bitstream build is usually cold (a new part, a new board, a release),
+> where global is one run against five, each with Vivado's fixed overhead.  A design-space loop
+> changes one device per point, where per device re-synthesizes that device only.  So:
+> - `system_synth`'s `synth_route` stays `global` by default; `per_device` is opt-in;
+> - the block design is generated with `synth_checkpoint_mode None` (global), not Vivado's per-IP
+>   default -- `build_block_design(synth=...)`, the DAG param `bd_synth`, read back and gated
+>   (`test_a_bitstream_build_will_synthesize_it_globally`);
+> - packaging stays per device in both cases (Stage 3): it is what makes a device testable on its
+>   own, and costs nothing when synthesized globally.
+> Docs: `docs/guide/flows/bitstream_ipi.md`, un-hidden and rewritten as "Toward the board".
+
 **Stage 6 -- the markov docs: both routes, measured.**  `docs/examples/markov/synth.md` already shows
 route A (csynth of the four tops, the crossbar and the top, the system's resources).  Add the
 comparison, on markov's own numbers from Stages 1-2:
@@ -420,6 +458,26 @@ Conditions, so the page stays true:
 
 Gate: the page's numbers regenerate from the build (a docs figure step, as markov's figures do), and
 the docs snippet harness passes.
+
+> **Built (2026-10-13, branch `ip-packaging-s4`).**  `examples/markov/markov_routes.py`:
+> `MarkovRoutesStep` (`markov_routes`, opt-in) runs both routes -- `synth_system(..., opt=True)`
+> (new: `opt_design` after the synthesis, `SystemSynth.opt_total`, the like-for-like number the
+> plan's Stage 1 measured by hand) and `synth_ooc_link` -- each cached by content, and writes
+> `results/routes.json` (counters from the reports, seconds from Vivado's own run timers) and
+> `results/routes.svg`; `SyncRoutesFigureStep` (`sync_routes_figure`) promotes both to
+> `docs/examples/markov/images/`.  The page is `docs/examples/markov/synth.md#routes`: the four-part
+> grouping and where each bus writer sits, the area table, the time table, the figure, the part
+> named (xc7z020 stand-in).
+>
+> Reproduced exactly: global + `opt_design` **6,228 / 7,091 / 4**, per device linked **6,250 / 7,099 /
+> 4** (+22 LUT, +0.35%), parts and link term as Stage 1.  Seconds (run timers, start-up excluded):
+> global 132; per device cold 226 (parts 54 + 60 + 33, top 55, link 24); one device changed 56-84;
+> unchanged 24 (the link).  The link's seconds move run to run (it re-runs every call), so the page
+> quotes the **committed record**, and two gates hold it: `tests/docs/test_markov_routes_page.py`
+> (no toolchain: every cell of the page's tables, and the flows page's, is the record's) and
+> `tests/examples/test_markov_routes.py` (`-m xsi`: a fresh run's area equals the record's; parts
+> plus link term equal the linked total; gap under 1%).  `kb` finds the page for "IP packaging",
+> "block design" and "out of context".
 
 ## Docs
 
