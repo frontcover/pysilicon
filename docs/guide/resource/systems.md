@@ -221,16 +221,16 @@ system's own synthesis and reproduces the measured total:
 ```text
 markov_top   platform scratch_7020
                                   LUT       FF     BRAM      DSP   how            measured by
-u (MmCreditStreamIF)            1,377    1,658        2        0   EXACT          vivado_synth (in markov_top)
+u (MmCreditStreamIF)            1,355    1,658        2        0   EXACT          vivado_synth (in markov_top)
 xbar (AXIMMCrossBarIF)            849      680        0        0   EXACT          vivado_synth (in markov_top)
-gen_mm (MemSlaveAdaptor)          237      217        0        0   EXACT          vivado_synth (in markov_top)
-chain_mm (MemSlaveAdaptor)        495      178        0        0   EXACT          vivado_synth (in markov_top)
-mem (MemoryMod)                   140       39        2        0   EXACT          vivado_synth (in markov_top)
+gen_mm (MemSlaveAdaptor)          230      217        0        0   EXACT          vivado_synth (in markov_top)
+chain_mm (MemSlaveAdaptor)        489      178        0        0   EXACT          vivado_synth (in markov_top)
+mem (MemoryMod)                   132       39        2        0   EXACT          vivado_synth (in markov_top)
 gen (MarkovGen)                 1,193    1,298        0        0   EXACT          vivado_synth (in markov_top)
-chain (MarkovChain)             2,032    3,115        0        0   EXACT          vivado_synth (in markov_top)
-system integration                -36        2        0        0   EXACT          vivado_synth (in markov_top)
-total                           6,287    7,187        4        0   weakest: EXACT (u (MmCreditStreamIF))
-measured total                  6,287    7,187        4        0   vivado_synth, 2026-10-11   gap +0.0% LUT, +0.0% FF, +0.0% BRAM
+chain (MarkovChain)             2,031    3,115        0        0   EXACT          vivado_synth (in markov_top)
+system integration                  2        2        0        0   EXACT          vivado_synth (in markov_top)
+total                           6,281    7,187        4        0   weakest: EXACT (u (MmCreditStreamIF))
+measured total                  6,281    7,187        4        0   vivado_synth, 2026-10-13   gap +0.0% LUT, +0.0% FF, +0.0% BRAM
 ```
 
 The **composed** prediction (`--composed`: each part from its own measurement, none from this
@@ -241,23 +241,29 @@ u (MmCreditStreamIF)            2,689    1,833        2        0   EXACT        
 xbar (AXIMMCrossBarIF)          1,292      808        0        0   EXACT          vivado_synth (ooc)
 gen_mm (MemSlaveAdaptor)          262      219        0        0   EXACT          vivado_synth (ooc)
 chain_mm (MemSlaveAdaptor)        538      188        0        0   EXACT          vivado_synth (ooc)
-mem (MemoryMod)                   149      105        4        0   EXACT          vivado_synth (ooc)
+mem (MemoryMod)                   148      105        2        0   EXACT          vivado_synth (ooc)
 gen (MarkovGen)                 2,585    1,905        0        0   EXACT          hls_estimate
 chain (MarkovChain)             4,423    3,030        0        0   EXACT          hls_estimate
 system integration                  0        0        0        0   UNCALIBRATED   --
-total                          11,938    8,088        6        0   weakest: UNCALIBRATED (system integration)
-measured total                  6,287    7,187        4        0   vivado_synth, 2026-10-11   gap +89.9% LUT, +12.5% FF, +50.0% BRAM
+total                          11,937    8,088        4        0   weakest: UNCALIBRATED (system integration)
+measured total                  6,281    7,187        4        0   vivado_synth, 2026-10-13   gap +90.0% LUT, +12.5% FF, +0.0% BRAM
 ```
 
 Every row is `EXACT` -- an exact lookup -- and the total is still nearly 2× the truth, which is the
 report's point about keeping *how* apart from *what*:
 
 - **HLS estimates.**  The four kernels' `hls_estimate` rows are ~2× their synthesized LUT (above):
-  5,092 of the 5,651-LUT gap.
+  most of the 5,656-LUT gap.
 - **The crossbar out of context** is 1,292 LUT against 849 in the design: 443 more.
-- **A tied-off port.**  Out of context, `bram_t2p` is a two-port memory: two RAMB36.  In markov its
-  kernel-side port B is tied idle, and the one live port fits one RAMB36.  An out-of-context number is
-  an **upper bound** for an instance whose ports the design ties off.
+
+The BRAM is exact, because a **tie-off is part of a leaf's identity**.  `bram_t2p` alone is a
+two-port memory, two RAMB36.  In markov its kernel-side port B is tied idle, and the one live port
+fits one RAMB36.  The system states that tie-off (`RtlInstance.ties`: an input tied to a value, an
+output left open), and `identify_rtl` keys on it, so the tied memory is another configuration with
+a record of its own. `leaf_resources` measures it inside a generated wrapper that ties the ports as
+the system does (`rtl_ooc.tied_wrapper`). An untied leaf keys as it always did, so no record is
+orphaned. (Before, the composed BRAM was 6 against the measured 4:
+[plans/ip_packaging_routes.md](../../../plans/ip_packaging_routes.md) Stage 2.)
 
 (Before the memory was recoded the composed gap was +412% LUT, nearly all of it a tied-off port on a
 flip-flop memory: 83,194 LUT out of context against 8,769 in markov.)

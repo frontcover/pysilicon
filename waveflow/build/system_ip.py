@@ -93,6 +93,19 @@ class SystemIp:
         return {"top": self.top, "part": self.part, "seconds": self.seconds, "xbar": self.xbar,
                 "ips": {k: v.to_json() for k, v in self.ips.items()}}
 
+    @classmethod
+    def from_json(cls, d: dict) -> "SystemIp":
+        """A manifest (``manifest.json``) read back."""
+        ips = {}
+        for k, v in d["ips"].items():
+            v = dict(v)
+            v["root"] = Path(v["root"])
+            v["ports"] = {p: tuple(x) for p, x in v["ports"].items()}
+            v["interfaces"] = [BusInterface(**b) for b in v["interfaces"]]
+            ips[k] = PackagedIp(**v)
+        return cls(top=d["top"], part=d["part"], ips=ips, xbar=d.get("xbar"),
+                   seconds=d.get("seconds", 0.0))
+
 
 def module_ports(verilog: str, module: str) -> dict[str, tuple[str, int]]:
     """``{port: (direction, width)}`` of *module*'s ANSI header in *verilog*."""
