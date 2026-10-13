@@ -2,7 +2,7 @@
 title: "Simulation speed: the SSR FFT"
 parent: Simulation speed
 nav_order: 2
-summary: "One bit-exact 1024-point FFT run three ways on the same frames: the untimed Python model (1.87 ms a frame), Waveflow's pysim (2.29 ms flat, 4.44 ms with one process per task) and the synthesized RTL under XSI (131 ms, plus about two and a half minutes of synthesis and build per design point). What the pysim adds and why, how its cost came down from 350 ms a frame in one day, the lessons for the next block, and an estimate against an optimized (compiled) model, which the pysim would call too: about 0.05 ms a frame untimed, about 0.47 ms in the flat pysim, the timing then most of the cost."
+summary: "One bit-exact 1024-point FFT run three ways on the same frames: the untimed Python model in vectorized numpy (1.87 ms a frame), Waveflow's pysim (2.29 ms flat, 4.44 ms with one process per task) and the synthesized RTL under XSI (131 ms, plus about two and a half minutes of synthesis and build per design point). What the pysim adds and why, how its cost came down from 350 ms a frame in one day, the lessons for the next block, and an estimate against a compiled model, which the pysim would call too: about 0.05 ms a frame untimed, about 0.47 ms in the flat pysim, the timing then most of the cost."
 ---
 
 # Simulation speed: the SSR FFT
@@ -21,7 +21,11 @@ RTL:      AxisMaster BFM --> synthesized ssr_fft (16 hls::tasks) --> AxisSlave B
 ```
 
 - **Untimed** is `model.pipeline`: the Python a system engineer would evaluate the algorithm with,
-  and the *same functions* the pysim's tasks call. The comparison is therefore model to model.
+  and the *same functions* the pysim's tasks call. The comparison is therefore model to model. It is
+  **vectorized numpy**: each stage is a handful of whole-array operations over the frame, with no
+  Python loop over samples -- the way models like this are normally written, and a reasonable
+  baseline. It is not compiled; what that would change is estimated
+  [below](#with-a-compiled-model-an-estimate-not-yet-measured).
 - **The pysim** comes in two granularities. `pysim="tasks"`, the default, runs one SimPy process
   per `hls::task` -- 16 of them -- with every internal edge a timed stream. `pysim="flat"` runs one
   process for the whole FFT with the same frames at the same cycles (see
@@ -39,7 +43,7 @@ Per frame, fitted over 10, 50 and 100 frames; every run bit-exact:
 
 | | per frame | vs untimed | one-time cost |
 |---|---|---|---|
-| untimed model | **1.87 ms** | 1x | none |
+| untimed model (vectorized numpy) | **1.87 ms** | 1x | none |
 | pysim, flat | **2.29 ms** | 1.22x | ~15 ms to build the graph |
 | pysim, one process per task | 4.44 ms | 2.4x | ~14 ms |
 | RTL under XSI | **131 ms** | 70x | XSI build 24.5 s (compile 2.4, elaborate 17.1, testbench 4.9); csynth ~131 s |
@@ -47,14 +51,16 @@ Per frame, fitted over 10, 50 and 100 frames; every run bit-exact:
 Measured 2026-10-13, except csynth, measured the same morning on the same machine (it does not
 depend on the number of frames). The machine is described on [Simulation speed](index.md#results).
 
-### With an optimized model (an estimate, not yet measured)
+### With a compiled model (an estimate, not yet measured)
 
-The untimed model above is **not optimized** (see [Insights](#insights)). Written as typed loops over
-integers -- the fixed-point steps are a multiply, a rounding shift and a wrap each -- and compiled with
-Cython or Numba, a bit-exact radix-4 FFT should take tens of nanoseconds a sample. The pysim calls the
-same arithmetic, so it gets the same saving and keeps its own overhead:
+The untimed model above is vectorized numpy, which is how most system engineers write such a model.
+A compiled one would be faster still, but it is real work: the arithmetic rewritten as typed loops over
+integers -- each fixed-point step a multiply, a rounding shift and a wrap -- a build step for Cython
+(or a Numba version that supports the Python in use), and the result proven bit-exact all over again.
+Done, a bit-exact radix-4 FFT should take tens of nanoseconds a sample. The pysim calls the same
+arithmetic, so it gets the same saving and keeps its own overhead:
 
-| | per frame (estimate) | vs optimized untimed |
+| | per frame (estimate) | vs compiled untimed |
 |---|---|---|
 | untimed model, compiled | ~0.05 ms | 1x |
 | pysim, flat, calling the compiled model | ~0.05 + 0.42 = ~0.47 ms | ~9x |
@@ -65,7 +71,7 @@ The 0.05 ms is an estimate (20-50 us is the plausible range); the overheads, 0.4
 the measured differences between the pysims and the untimed model above, and do not depend on how
 the bits are computed. The flat pysim already runs the whole chain in one place, so a compiled
 kernel for the full pipeline would replace that loop as one call; the per-task pysim would need the
-kernel split per stage. Against an optimized model, the timing is no longer a small addition -- it
+kernel split per stage. Against a compiled model, the timing is no longer a small addition -- it
 is most of the cost -- which is why [the cost per event](index.md#what-is-still-slow) is the next
 thing to reduce.
 
@@ -82,12 +88,13 @@ thing to reduce.
 - **The two agree.** The pysim's first frame is within 5 cycles of the RTL's at `L = 16 .. 1024`,
   and its interval is exact ([timing](../../guide/dsp/ssr_fft/timing.md)). The untimed model has no
   timing to compare.
-- **The untimed baseline is not optimized**, and a reviewer should ask about that. It reproduces the
-  vendor library operation by operation -- a radix-4 butterfly is 16 general complex multiplies by
-  constants that are exactly `1, -j, -1, +j`, each with three quantization points -- about a
-  thousand int64 operations per sample, and about 3000 Python-level calls per frame. An optimized
-  bit-exact model would be far faster -- an estimate is in
-  [the table above](#with-an-optimized-model-an-estimate-not-yet-measured). Because the pysim calls
+- **The untimed baseline is vectorized, not compiled**, and a reviewer may ask how much faster it
+  could be. Vectorized numpy is a fair baseline -- it is what people use -- but this model also
+  reproduces the vendor library operation by operation: a radix-4 butterfly is 16 general complex
+  multiplies by constants that are exactly `1, -j, -1, +j`, each with three quantization points.
+  That is about a thousand int64 operations per sample and about 3000 numpy calls per frame. A
+  compiled bit-exact model would be far faster -- an estimate is in
+  [the table above](#with-a-compiled-model-an-estimate-not-yet-measured). Because the pysim calls
   the same functions, it would get the same saving: the additive overhead is what this page measures.
 - **An untimed model can also batch.** Processing a whole capture in one call amortizes every
   per-frame cost; a timed simulation steps frame by frame, because the timing is per frame. That is a
@@ -138,7 +145,7 @@ For the next block whose pysim is slow:
 
 ## Future work
 
-- **An optimized bit-exact model**, to replace the estimate above with a measurement: typed integer
+- **A compiled bit-exact model**, to replace the estimate above with a measurement: typed integer
   loops compiled with Cython (or Numba), the ±1/±j butterfly products as sign changes and swaps, the
   quantization steps fused; checked against the golden, then timed untimed and inside the flat pysim.
   It lowers the untimed baseline and the pysim alike, and tests the additive model directly.
