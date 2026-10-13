@@ -52,6 +52,7 @@ from waveflow.hw.clock import Clock  # noqa: E402
 from waveflow.hw.codegen_targets import COMPOSITE_KERNEL, SEQUENTIAL_XSI_TB  # noqa: E402
 from waveflow.hw.hw_freerun import FreeRunMod  # noqa: E402
 from waveflow.hw.hw_module import HwParam  # noqa: E402
+from waveflow.hw.hw_system import GraphSystem  # noqa: E402
 from waveflow.hw.interface import StreamIF, StreamIFMaster, StreamIFSlave  # noqa: E402
 from waveflow.hw.mem_stream import KernelTask  # noqa: E402
 from waveflow.hw.rf_samp_buf import (  # noqa: E402
@@ -581,6 +582,31 @@ class RfBlkDelayTB(FreeRunMod):
         # A testbench channel, so the depth is a pysim modelling choice and claims nothing at RTL.
         self.dac_axis = wire("dac_axis", self.loop.s_out, self.rfdc.tx_streams[0],
                              depth=2 * (BLKSIZE // SAMP_PER_WORD))
+
+
+@dataclass
+class RfBlkDelaySystem(GraphSystem):
+    """The pattern-B loop as a **system** (``plans/system_model.md`` S3e): the
+    :class:`RfBlkDelayTB` graph, the cut :class:`RfBlkDelayLoop` alone -- both buffers' memories
+    inside it, so the system top instantiates its **wrapper**.  The RFDC is testbench.
+
+    Every recording is the example's to check (``recording_check``): pysim bounds the relay at
+    ``N_BLK`` blocks so its event queue can empty, while the RTL relays for as long as the ADC
+    produces (``SRC_NBLK``) -- see ``tests/examples/test_rf_blk_delay_xsi.py``."""
+
+    n_cycles: int = 60000
+
+    def graph(self) -> RfBlkDelayTB:
+        g = RfBlkDelayTB(name="xsi_tb", sim=Simulation(), n_cycles=int(self.n_cycles))
+        for o in (g.sink, g.rxresp_sink, g.txresp_sink):
+            o.recording_check = "example"
+        return g
+
+    def dut_modules(self, g) -> list:
+        return [g.loop]
+
+    def write_inputs(self, root) -> None:
+        write_scenario(root)
 
 
 def write_scenario(root) -> None:

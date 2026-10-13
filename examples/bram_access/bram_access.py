@@ -88,6 +88,7 @@ from waveflow.hw.clock import Clock
 from waveflow.hw.codegen_targets import COMPOSITE_KERNEL, SEQUENTIAL_XSI_TB
 from waveflow.hw.hw_freerun import FreeRunMod
 from waveflow.hw.hw_module import HwParam
+from waveflow.hw.hw_system import GraphSystem
 from waveflow.hw.interface import StreamIF, StreamIFMaster, StreamIFSlave
 from waveflow.hw.mem_stream import KernelTask
 from waveflow.simulation.simobj import ProcessGen
@@ -1084,6 +1085,38 @@ def run_pysim(root=None, sc: Scenario | None = None, *, bitwidth: int = WORD_BW,
             drv.root = root
         tb.sim.run_sim()
     return tb
+
+
+@dataclass
+class BramAccessSystem(GraphSystem):
+    """bram_access as a **system** (``plans/system_model.md`` S3e): the :class:`BramAccessTB` graph,
+    the cut :class:`BramAccess` alone.  Its memory is hand-written RTL beside the kernel
+    (``add_rtl_mod``), so the system top instantiates the DUT as its **wrapper** -- the kernel and
+    ``bram_t2p`` joined -- whose ports are the six AXI-Stream ones.
+
+    *scenario* is ``"zero"`` (:func:`scenario_zero`, the gate) or ``"collision"``
+    (:func:`collision_scenario`, the deliberate read-during-write the waveform scan must find)."""
+
+    scenario_name: str = "zero"
+    n_cycles: int = XSI_N_CYCLES
+
+    def graph(self) -> BramAccessTB:
+        from waveflow.simulation.simulation import Simulation
+
+        self.scenario: Scenario = {"zero": scenario_zero,
+                                   "collision": collision_scenario}[self.scenario_name]()
+        return BramAccessTB(name="xsi_tb", sim=Simulation(), n_cycles=int(self.n_cycles))
+
+    def dut_modules(self, g) -> list:
+        return [g.dut]
+
+    def write_inputs(self, root) -> None:
+        write_scenario(root, self.scenario)
+
+    def check(self) -> BramAccessTB:
+        """The acceptance check on what the sinks captured."""
+        check_outputs(*captured(self.tb), sc=self.scenario, where="pysim: ")
+        return self.tb
 
 
 def captured(tb: BramAccessTB) -> tuple[np.ndarray, np.ndarray, np.ndarray]:

@@ -109,6 +109,24 @@ def check_counters(work: Path) -> dict:
     return {"adc_dropped": adc["dropped"], "in_flight": in_flight}
 
 
+def counters(work: Path) -> dict:
+    """The counters the kernel flow's hand-written main printed, under its names, read from the
+    recordings the RTL run's models wrote (``vectors/counters/<model>.json``)."""
+    import json
+
+    def read(name: str) -> dict:
+        return json.loads((Path(work) / "xsi_run" / "vectors" / "counters" / f"{name}.json")
+                          .read_text(encoding="utf-8"))
+
+    adc, dac = read("xsi_tb_adc_axis"), read("xsi_tb_dac_axis")
+    adc_ch, dac_ch, src = read("xsi_tb_adc_if"), read("xsi_tb_dac_if"), read("xsi_tb_adc_if_tx")
+    return {"ADC_WORDS_SENT": adc["words_sent"], "ADC_DROPPED": adc["dropped"],
+            "DAC_WORDS_RECV": dac["words_recv"], "DAC_BLOCKS_OUT": dac["blocks_out"],
+            "DAC_BLOCKS_ZERO_FILLED": dac["blocks_zero_filled"],
+            "ADC_CHAN_DROPPED": adc_ch["dropped"], "ADC_CHAN_TRANSFERRED": adc_ch["transferred"],
+            "DAC_CHAN_DROPPED": dac_ch["dropped"], "SRC_BLOCKS_OUT": src["blocks_out"]}
+
+
 if __name__ == "__main__":
     from waveflow.build.cli import run_dag_cli
 

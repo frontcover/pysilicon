@@ -344,6 +344,47 @@ class PysimStep(_SystemStep):
         return {self.a("pysim_traces"): traces, self.a("pysim"): report}
 
 
+def _explain_mismatch(sysm, bad: list, rtl: Path, py: Path) -> str:
+    """The message for recordings that differ RTL against pysim: for each, the participant that
+    records it, the word counts and the first differing word -- and what to do when the difference
+    is one pysim cannot avoid by construction."""
+    import numpy as np
+
+    from waveflow.hw.hw_system import _inside
+
+    top = sysm.dut()
+    who: dict[str, str] = {}
+    for o in sysm.elements():
+        if _inside(o, top):
+            continue
+        for b in [getattr(o, "out_bundle", "")] + [g.bundle for g in (getattr(o, "dump_segs", None)
+                                                                      or ())]:
+            if b:
+                who[Path(str(b)).name] = f"{getattr(o, 'name', '?')} ({type(o).__name__})"
+    lines = ["the testbench's recordings differ, RTL against pysim:"]
+    for entry in bad:
+        name = entry.split("/")[0]
+        a, b = rtl / name / "words.bin", py / name / "words.bin"
+        detail = "missing on one side"
+        if a.is_file() and b.is_file():
+            x, y = np.fromfile(a, dtype="<u8"), np.fromfile(b, dtype="<u8")
+            n = min(x.size, y.size)
+            diff = np.flatnonzero(x[:n] != y[:n])
+            detail = f"{x.size} words at RTL, {y.size} in pysim"
+            if diff.size:
+                k = int(diff[0])
+                detail += (f"; first difference at word {k}: RTL 0x{int(x[k]):x}, "
+                           f"pysim 0x{int(y[k]):x} ({diff.size} differ)")
+        lines.append(f"  {name!r}, recorded by {who.get(name, '?')}: {detail}")
+    lines.append(
+        "A difference is a finding until shown otherwise -- an unassigned field, a lost word, a "
+        "design that disagrees with its twin.  If it is one pysim cannot avoid by construction (loss "
+        "below its resolution, a time horizon against a cycle bound, a loosely-timed lead), mark "
+        "that participant `recording_check = \"example\"` and check the recording in the example "
+        "instead (plans/system_model.md S3b).")
+    return "\n".join(lines)
+
+
 @dataclass(kw_only=True)
 class CompareStep(_SystemStep):
     """``compare``: every host endpoint's trace, RTL against pysim, file for file
@@ -382,7 +423,11 @@ class CompareStep(_SystemStep):
                              else ("words.bin",), names=names)
         out.write_text(json.dumps({"trace_mismatches": bad}, indent=2) + "\n", encoding="utf-8")
         if bad:
-            raise RuntimeError(f"the testbench's RTL traces differ from pysim's: {bad}")
+            if host:
+                raise RuntimeError(f"the testbench's RTL traces differ from pysim's: {bad}")
+            raise RuntimeError(_explain_mismatch(self.sysm, bad,
+                                                 Path(inputs[self.a(self.traces_from)]),
+                                                 Path(inputs[self.a("pysim_traces")])))
         return {self.a("compare"): out}
 
 
@@ -580,9 +625,20 @@ class XsiRunStep(_Inner):
         main, tb_files = harness
         tb_inc = [d for d in (find_vitis_include_dir(), root / "include")
                   if d is not None and Path(d).is_dir()]
+        if o.trace:
+            # A traced run: a second top dumps the wrappers' scopes, and the manifests naming their
+            # nets go beside the waveform (``<work>/hazards.json``).
+            from waveflow.build.trace_steps import render_vcd_dumper
+
+            spec = o.rtl.spec
+            (ws.work_dir / f"vcd_dumper_{m['top']}.v").write_text(
+                render_vcd_dumper(m["top"], spec.trace_scopes()), encoding="utf-8")
+            (o.work_dir(config) / "hazards.json").write_text(
+                json.dumps(spec.hazard_manifests(), indent=1) + "\n", encoding="utf-8")
+            (ws.work_dir / f"{m['top']}_trace.vcd").unlink(missing_ok=True)
         ws.prepare(rtl_files=m["rtl_files"], include_dirs=m["include_dirs"],
                    tb_name=f"{m['top']}_tb", tb_cpp=main, extra_files=dict(tb_files),
-                   tb_include_dirs=tb_inc)
+                   tb_include_dirs=tb_inc, trace=o.trace)
         if o.rtl.host is not None:
             out = ws.run(timeout=o.timeout)
         else:
@@ -612,6 +668,9 @@ class SystemXsiStep(_SystemStep):
 
     rtl: SystemRtlStep
     timeout: int = 3600
+    #: Trace the run: ``<work>/xsi/<top>_trace.vcd`` (each wrapped kernel's wrapper scope) and
+    #: ``<work>/hazards.json`` (:meth:`~waveflow.build.system_top.SystemTopSpec.hazard_manifests`).
+    trace: bool = False
 
     @property
     def consumes(self) -> list:  # type: ignore[override]
@@ -684,23 +743,23 @@ class KernelResourcesStep(_SystemStep):
         plat = getattr(config, "platform_info", None)
         filed_into = str(getattr(plat, "write_dir", plat.dir)) if plat is not None else None
         for k in self.rtl.spec.kernels:
-            if k.module not in done:              # one csynth per module: attribute it once
-                out = work / "kernel_resources" / f"{k.module}.json"
-                xml = Path(inputs[report_artifact(k.module)]) / "syn" / "report" / "csynth.xml"
+            if k.csynth_module not in done:              # one csynth per module: attribute it once
+                out = work / "kernel_resources" / f"{k.csynth_module}.json"
+                xml = Path(inputs[report_artifact(k.csynth_module)]) / "syn" / "report" / "csynth.xml"
                 prev = json.loads(out.read_text(encoding="utf-8")) if out.is_file() else None
                 # Records are filed once per csynth, not once per build: an attribution newer than
                 # its report, already filed into this platform, is reused as is.
                 if (prev is not None and prev.get("filed_into") == filed_into and xml.is_file()
                         and out.stat().st_mtime >= xml.stat().st_mtime):
-                    done[k.module] = prev
+                    done[k.csynth_module] = prev
                 else:
-                    done[k.module] = inspect_synth(
-                        k.hw, inputs[report_artifact(k.module)], top_name=k.module, config=config,
+                    done[k.csynth_module] = inspect_synth(
+                        k.hw, inputs[report_artifact(k.csynth_module)], top_name=k.csynth_module, config=config,
                         out=out,
-                        synth_seconds=synth_seconds_of(inputs.get(seconds_artifact(k.module))),
+                        synth_seconds=synth_seconds_of(inputs.get(seconds_artifact(k.csynth_module))),
                         owner=owner_label(k.owner))
-            blob = done[k.module]
-            index[k.inst] = {"top": k.module, "owner": owner_label(k.owner),
+            blob = done[k.csynth_module]
+            index[k.inst] = {"top": k.csynth_module, "owner": owner_label(k.owner),
                              "modules": [m["key"] for m in blob["modules"]],
                              "top_total": blob["top"], "integration": blob["integration"],
                              "filed_into": blob["filed_into"]}
@@ -907,7 +966,8 @@ def add_system_steps(dag: BuildDag, sysm, *, work_dir, top: str | None = None,
                      xbar_name: str | None = None, inside=None, probes: dict | None = None,
                      prefix: str = "", workspace: str | None = None,
                      sources: tuple[str, ...] = ("include", "gen"),
-                     tcls: dict[str, Path] | None = None, timeout: int = 3600) -> SystemXsiStep:
+                     tcls: dict[str, Path] | None = None, timeout: int = 3600,
+                     trace: bool = False) -> SystemXsiStep:
     """Add the framework steps of a system's flow to *dag*: ``csynth`` (one inner step per HLS top in
     the cut), ``system_rtl``, ``kernel_resources``, ``system_synth``, ``leaf_resources``,
     ``resource_report``, ``scenario``, ``pysim``, ``system_xsi`` and ``compare``.  Returns the
@@ -918,7 +978,7 @@ def add_system_steps(dag: BuildDag, sysm, *, work_dir, top: str | None = None,
     the root.  *top* names the Verilog top (default: the system class in snake case, ``MarkovSystem``
     -> ``markov_system``), *xbar_name* the crossbar IP (default ``xbar_<top>``).  *inside* overrides
     the cut; *probes* (``{name: beat(...)}``) adds timing probes; *tcls* overrides a top's csynth
-    script (``{top: path relative to the root}``).
+    script (``{top: path relative to the root}``); *trace* traces the XSI run (``SystemXsiStep.trace``).
 
     The run lives in ``<work_dir>/<workspace>`` (default ``<prefix><top>``, ``_probes`` added with
     probes) and the crossbar IP cache in ``<work_dir>/ip``; a relative *work_dir* is under the root.
@@ -947,7 +1007,7 @@ def add_system_steps(dag: BuildDag, sysm, *, work_dir, top: str | None = None,
     dag.add(ResourceReportStep(sysm=sysm, work=work, prefix=prefix, rtl=rtl))
     dag.add(ScenarioStep(sysm=sysm, work=work, prefix=prefix))
     dag.add(PysimStep(sysm=sysm, work=work, prefix=prefix))
-    xsi = SystemXsiStep(sysm=sysm, work=work, prefix=prefix, rtl=rtl, timeout=timeout)
+    xsi = SystemXsiStep(sysm=sysm, work=work, prefix=prefix, rtl=rtl, timeout=timeout, trace=trace)
     dag.add(xsi)
     dag.add(CompareStep(sysm=sysm, work=work, prefix=prefix))
     return xsi

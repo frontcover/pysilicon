@@ -395,6 +395,135 @@ Golden checks stay as an optional per-example step: "the destination equals the 
 > - Board-level loss *observability* (status registers a host reads) is design work, a separate
 >   item.
 
+**S3e -- migrate the single-kernel examples (2026-10-12, branch `system-model-migrate`).**  After
+S3a-d the system flow covers a single kernel with no crossbar (mem_copy) and vendor IP in the
+testbench (rf_loopback).  Twelve examples still describe their testbench as a composite `FreeRunMod`
+class (`potential_targets = {SEQUENTIAL_XSI_TB}`).  They fall in two groups:
+
+| group | examples | what the system flow needs first |
+|---|---|---|
+| **1. no new feature** | state_toy, fir_block, interleaver (in-band), rf_relayout, rf_repeat_play, rf_loopback's own DUT gate (`RfPassThroughTB`) | nothing: each becomes an `HwSystem` + a system build + a system gate reproducing its existing gate |
+| **2. hand-written RTL beside the kernel** | bram_access, rf_blk_delay, rf_samp_buf_rx, rf_samp_buf_tx, rf_shot_rx, rf_shot_tx | `rtl_module()` leaves inside the DUT -- a memory joined to the kernel by `BramIF` / `add_rtl_if` -- rendered by the system walk, as `wrapper_gen` renders them today |
+
+Order: group 1, one example per commit, each gated by its existing gate's numbers through the system
+flow.  Then the `rtl_module` support, then group 2.  Then the decision the plan has deferred: whether
+the composite testbench class is retired (its gates replaced by the system-flow ones) or kept as a
+second way in.  Then the flow-steps prose rewrite.  The existing kernel-flow gates stay until that
+decision.
+
+> **Built (2026-10-12): all twelve, both groups.**  Each example has an `HwSystem` beside its
+> testbench class (the graph is the testbench's, the cut is a `DutTop` holding the DUT alone), a
+> `<example>_system_build.py`, and `tests/examples/test_<example>_system_xsi.py` reproducing its
+> kernel gate's numbers through `add_system_steps` (`WANT_XSI_GATES` 179 → 227):
+>
+> | example | system gate reproduces |
+> |---|---|
+> | state_toy | 1..5 per lane |
+> | fir_block | every block bit-exact across a reload and the carry |
+> | interleaver (in-band) | twelve jobs, the last at 1300 |
+> | rf_relayout | the identity, the 64th word at 68 |
+> | rf_repeat_play | 15296 samples, 25-slot lead-in, one 64-slot hole, 15143 fed |
+> | rf_loopback DUT gate | bit-exact relay, the last word at 1066 |
+> | bram_access | the golden, the last read word at 568 |
+> | rf_blk_delay | zero loss both ends, skew 0, responses at 3827 / 4211, 234 DAC blocks |
+> | rf_samp_buf_rx / _tx | the windows, 15442 / the ramp, 5191, 40 DAC blocks |
+> | rf_shot_rx (2 builds) | no gap, alternating halves, 516 words at 2205, the address is the phase |
+> | rf_shot_tx (2 builds x 2 streams) | passes, phase, block shape, startup, verdicts at 273/502 (271/500) |
+>
+> What it took in the framework:
+>
+> - **`rtl_module` support in the system walk.**  A kernel that declares `add_rtl_mod` is instantiated
+>   as its wrapper (`wrapper_gen`): `KernelRtl.wrapper` / `.rtl_leaves` / `.csynth_module`, the
+>   wrapper rendered into the top's (and its sub-top's) file, `instances()` listing the csynth'd
+>   kernel and the hand-written module at their path through it.  markov / mm_fir byte-identical.
+> - **The kernel's spec is elaborated with the instance's own `HwParam` values**, not the class
+>   defaults -- a wrapper's memories are sized from them (rf_shot_rx: 256 csynth'd, 512 default).
+> - Counters that kernel gates read from a hand-written main's stdout come from the converter
+>   models' counter recordings instead (S3d's mechanism); a scenario a hand-written main selected by
+>   renaming bundles (rf_shot_tx's loop stream) is a system of its own.
+>
+> **The comparison found a defect.**  rf_shot_tx's loader never assigned `ShotTxResp::_rsvd`
+> ("reserved, must be zero"); the RTL drove bit 40 set on every response.  The kernel gates decode
+> through the schema and could not see it; the system flow's word-for-word compare of the response
+> recording did.  Fixed (one assignment), both builds re-csynth'd, every kernel-gate number unchanged.
+>
+> **Not carried over:** the kernel gates' waveform claims (bram_access's, rf_shot_rx/tx's port
+> overlap, write range, read-during-write scan) read a wrapper's nets off a VCD of the kernel flow's
+> traced run.  The system flow does not trace a run yet; those claims stay with the kernel gates.
+> Recordings pysim cannot match by construction are marked `recording_check = "example"`: the RF
+> sinks (loss below a block, a different LT transient, a time horizon against a cycle bound) and
+> rf_blk_delay's responses (pysim bounds the relay at `N_BLK`, the RTL relays `SRC_NBLK`).
+>
+> **Open: the retire decision.**  Each example now has two RTL gates for one design -- the kernel
+> flow's (a composite `*TB` class + `tb_top_spec` + generated main, some with hand-written counter
+> mains) and the system flow's.  Retiring the first means: the system gates take over the cycle
+> numbers; the VCD claims need tracing in the system flow first (or move to a traced system run);
+> the composite-TB generation (`tb_top_spec`, `render_tb_main`, `*_counters` mains) goes; the TB
+> classes stay as graphs the systems build on.
+
+**S3f -- the system flow as THE single-kernel flow (decided 2026-10-12).**  The user's direction:
+recommend the `HwSystem` model to anyone using the free-running kernel flow, and once the system
+gates can carry everything the kernel-flow gates check, retire the standalone kernel flow's RTL gates
+(and the time they cost).  S3e measured what stands in the way; three items, in order:
+
+1. **No boilerplate.**  The twelve S3e systems are ~40 near-identical lines each (build the graph,
+   `DutTop.of`, `data_width`, `clk`, `write_run_params`, anchor every participant at the root, run to
+   a horizon).  A base class states the defaults, derived from the graph, so an example states only
+   what is its own -- the graph, which modules are the DUT, the scenario's inputs, the golden check:
+
+       @dataclass
+       class StateAccumSystem(GraphSystem):
+           nvec: int = 5
+           def graph(self):          return StateAccumTB(name="xsi_tb", sim=Simulation(), nvec=self.nvec)
+           def dut_modules(self, g): return [g.dut]
+           def write_inputs(self, root): write_scenario(root, self.nvec)
+
+   Defaults: `clk` the DUT's clock; `data_width` the widest DUT boundary port; `write_scenario` =
+   `write_inputs` + `run.json` (`n_cycles` from the graph) + every testbench participant with a
+   bundle anchored at the root; `run` to the graph's `run_until` when it has one, then `check()`.
+   Gate: the twelve S3e system gates unchanged, each example's system class reduced to its own parts.
+2. **A mismatch says what to do.**  `compare`'s failure names the recording, the participant that
+   records it, and the remedy when pysim legitimately cannot match (`recording_check = "example"`).
+3. **Tracing in the system flow.**  A traced `system_xsi` run (VCD), and the hazard manifest's nets
+   resolved at their path through the system top (sub-top / DUT instance / wrapper), so the kernel
+   gates' waveform claims (bram_access, rf_shot_rx/tx) move to the system gates.  Gate: those claims
+   reproduced through the system flow.
+
+Then **retire**: per example, the kernel-flow RTL gate whose every claim a system gate now makes is
+deleted (its csynth-report checks -- II, module names -- stay, they need no RTL run), and with the
+last of them the composite-TB generation (`tb_top_spec`'s main, `*_counters` mains,
+`generate_tb`).  The `*TB` graph classes stay: the systems build on them.  Docs: the guide's
+single-kernel pages teach the system flow; first example **mem_copy** (one kernel, driver / sink /
+memory, no bus), then markov (devices on a bus, a host), then rf_loopback (vendor IP in the
+testbench).
+
+> **Built (2026-10-12): items 1-3 and the retirement of the kernel-flow RTL runs.**
+>
+> 1. `GraphSystem` (`waveflow/hw/hw_system.py`): `graph()` / `dut_modules()` / `write_inputs()` /
+>    `check()`; the rest derived (`DutTop` name, `clk`, `data_width`, `run.json` joining the inputs'
+>    run params, every bundle participant anchored, `run_until`).  The fourteen no-bus systems use it;
+>    every generated file of all eighteen system runs byte-identical.
+> 2. `compare` names the recording, its participant, the first differing word, and the
+>    `recording_check` remedy.
+> 3. `add_system_steps(trace=True)`: a dumper of each wrapper's scope inside the system top, and
+>    `hazards.json` (each wrapper's manifest with its `scope`); `bram_trace` reads nested scopes.
+>
+> **Retired.**  Every gate file keeps its name (the docs run gates by name), its claims and its
+> recorded numbers; its run is the example's system run (`tests/examples/_system_run.py`), traced
+> where a claim reads a waveform (bram_access, rf_shot_rx/tx -- every waveform claim reproduced).
+> The S3e duplicate system gates are folded in; `test_xsi_bfm.py`'s mem_copy / rf_pass_through rows
+> moved to their system gates.  Counters a hand-written `*_counters` main printed come from the
+> converter models' counter recordings under the same names; the one only a main had (the driver's
+> words sent) is replaced by one response per command, the last included.  `WANT_XSI_GATES` 227 ->
+> 177, every claim still asserted once.
+>
+> **Still on the kernel flow:** rf_loopback's two-channel and interleaved-I/Q runs (they read per-
+> channel counts, the bound port count and the I/Q format, which the converter models do not record
+> yet -- a `write_counters` extension in `xsi_rfdc.h`), and `test_xsi_bfm.py`'s mem_r_stream /
+> mem_w_stream rows (standalone interleaver tops, not in S3e's list).  Until they move, the
+> composite-TB generation (`tb_top_spec`'s main, `generate_tb`, the `*_counters` mains) stays.
+> Docs: the example pages still teach `generate_tb` / `run.bat`; the flow-steps prose is next.
+
 **S4 -- the TB side through hooks.**  D5.  Gate: the harness is byte-identical; `system_tb_spec` names
 no participant type.
 

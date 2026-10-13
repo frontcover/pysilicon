@@ -48,6 +48,7 @@ from waveflow.hw.dataschema import DataArray, DataSchemaStep, IntField  # noqa: 
 from waveflow.hw.hw_freerun import FreeRunMod  # noqa: E402
 from waveflow.hw.hw_module import HwParam  # noqa: E402
 from waveflow.hw.hw_state import HwState  # noqa: E402
+from waveflow.hw.hw_system import GraphSystem  # noqa: E402
 from waveflow.hw.interface import StreamIF, StreamIFMaster, StreamIFSlave  # noqa: E402
 from waveflow.hw.mem_stream import KernelTask  # noqa: E402
 from waveflow.hw.synth import synthesizable  # noqa: E402
@@ -175,6 +176,29 @@ def expected_words(nvec: int = 5) -> np.ndarray:
 def write_scenario(root, nvec: int = 5) -> None:
     """Materialize the input bundle under ``<root>/vectors`` — the one source both backends read."""
     write_burst_bundle(input_words(nvec), Path(root) / "vectors" / "s_in")
+
+
+@dataclass
+class StateAccumSystem(GraphSystem):
+    """state_toy as a **system** (``plans/system_model.md`` S3e): the :class:`StateAccumTB` graph,
+    the cut the accumulator alone -- its two streams top ports facing the driver and the sink."""
+
+    nvec: int = 5
+    n_cycles: int = 400
+
+    def graph(self) -> StateAccumTB:
+        return StateAccumTB(name="tb", sim=Simulation(), nvec=int(self.nvec),
+                            n_cycles=int(self.n_cycles))
+
+    def dut_modules(self, g) -> list:
+        return [g.dut]
+
+    def write_inputs(self, root) -> None:
+        write_scenario(root, int(self.nvec))
+
+    def check(self) -> np.ndarray:
+        """The sink's words, flat, in arrival order."""
+        return np.concatenate([np.asarray(b).ravel() for b in self.tb.sink.words]).astype(np.uint64)
 
 
 def gen_headers(config: BuildConfig) -> None:

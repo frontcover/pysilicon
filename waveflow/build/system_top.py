@@ -144,6 +144,21 @@ class KernelRtl:
     owner: object = field(default=None, compare=False, repr=False)
     #: The sub-top it is rendered in (:class:`SubTop` name).
     group: str = ""
+    #: A kernel with hand-written RTL beside it (``add_rtl_mod``) is instantiated as its **wrapper**
+    #: (:func:`~waveflow.build.wrapper_gen.wrapper_spec`): ``module`` is then the wrapper's name, its
+    #: ports the kernel's non-``bram`` ones, and this the :class:`~waveflow.build.wrapper_gen.WrapperSpec`
+    #: rendered beside the top.  ``None`` for a plain kernel.
+    wrapper: object = field(default=None, compare=False, repr=False)
+    #: The wrapper's hand-written modules, as ``(instance, module, params, sources)``.
+    rtl_leaves: tuple = field(default=(), compare=False, repr=False)
+    #: The wrapper's hazard manifest (:func:`~waveflow.build.wrapper_gen.bram_hazard_manifest`): the
+    #: wrapper nets a memory's read-during-write condition is visible on.
+    hazards: dict | None = field(default=None, compare=False, repr=False)
+
+    @property
+    def csynth_module(self) -> str:
+        """The csynth'd module: ``module`` itself, or for a wrapped kernel the kernel inside it."""
+        return self.wrapper.kernel if self.wrapper is not None else self.module
 
 
 def kernel_pins(k: KernelRtl) -> list[tuple[str, str]]:
@@ -377,9 +392,34 @@ class SystemTopSpec:
         for k in self.kernels:
             ident = (identify_instance(k.hw, exempt=boundary_endpoint_ids(k.hw))
                      if k.hw is not None else None)
-            out.append(RtlInstance(k.inst, k.module, "kernel", {}, (), ident, k.owner,
-                                   self.sub_inst(k.group)))
+            if k.wrapper is None:
+                out.append(RtlInstance(k.inst, k.module, "kernel", {}, (), ident, k.owner,
+                                       self.sub_inst(k.group)))
+                continue
+            # A wrapper is structure, like a sub-top: what it holds is the csynth'd kernel and
+            # the hand-written modules beside it, named by their path through it.
+            out.append(RtlInstance(f"{k.inst}/kernel", k.csynth_module, "kernel", {}, (), ident,
+                                   k.owner, self.sub_inst(k.group)))
+            for inst, module, params, src in k.rtl_leaves:
+                out.append(RtlInstance(f"{k.inst}/{inst}", module, "leaf", dict(params), src,
+                                       identify_rtl(module, dict(params), src), k.owner,
+                                       self.sub_inst(k.group)))
         return tuple(out)
+
+    def scope_of(self, k: KernelRtl) -> str:
+        """Kernel *k*'s hierarchical scope in a simulation of this top: ``<top>[.<sub-top>].<inst>``."""
+        sub = self.sub_inst(k.group)
+        return ".".join(p for p in (self.top, sub, k.inst) if p)
+
+    def trace_scopes(self) -> list[str]:
+        """The scopes a traced run dumps (each at level 1): every wrapped kernel's wrapper -- where a
+        memory's ports are wires -- or, with none, the top itself."""
+        return [self.scope_of(k) for k in self.kernels if k.wrapper is not None] or [self.top]
+
+    def hazard_manifests(self) -> list[dict]:
+        """Each wrapped kernel's hazard manifest, with the ``scope`` its nets are found under in a
+        traced run of this top (:mod:`waveflow.utils.bram_trace` reads it)."""
+        return [dict(k.hazards, scope=self.scope_of(k)) for k in self.kernels if k.hazards]
 
     def sources_of(self, name: str) -> tuple[tuple[Path, ...], tuple[str, ...]]:
         """What sub-top *name* compiles: ``(its hand-written leaves' sources, each once; the
@@ -425,7 +465,7 @@ class SystemTopSpec:
     @property
     def modules(self) -> tuple[str, ...]:
         """The csynth'd modules the top instantiates, each once -- whose RTL a workspace compiles."""
-        return tuple(dict.fromkeys(k.module for k in self.kernels))
+        return tuple(dict.fromkeys(k.csynth_module for k in self.kernels))
 
 
 def default_id_width(n_si: int) -> int:
@@ -465,9 +505,30 @@ def _rtl_of(mod, dw: int, owner=None) -> KernelRtl:
     if not name:
         raise LoweringError(f"{type(mod).__name__} '{mod.name}' is inside the cut but names no "
                             f"csynth'd module (cpp_kernel_name)")
-    spec = composite_top_spec(type(mod)(name=name, sim=Simulation()), width=dw)
+    # The instance's own build parameters, so the spec (and a wrapper's memory sizes) is the one its
+    # csynth top was elaborated with, not the class defaults.
+    from waveflow.hw.hw_module import _hw_param_names
+
+    fresh = type(mod)(name=name, sim=Simulation(),
+                      **{n: getattr(mod, n) for n in sorted(_hw_param_names(type(mod)))})
+    spec = composite_top_spec(fresh, width=dw)
     eps = tuple(_unpack_boundary(e) for e in mod.boundary)
-    return KernelRtl(spec.top_name, f"u_{mod.name}", tuple(spec.ports), (), eps, hw=mod, owner=owner)
+    if not getattr(fresh, "rtl_mods", None):
+        return KernelRtl(spec.top_name, f"u_{mod.name}", tuple(spec.ports), (), eps, hw=mod,
+                         owner=owner)
+    # Hand-written RTL beside the kernel (plans/rtl_module.md): the instance is the wrapper, whose
+    # ports are the kernel's AXI-Stream ones -- its bram ports are joined inside it.
+    from waveflow.build.rtl_gen import resolve_rtl_module, rtl_source_paths
+    from waveflow.build.wrapper_gen import bram_hazard_manifest, wrapper_spec
+
+    ws = wrapper_spec(fresh, spec)
+    pins = tuple(spec.pin_ports)
+    names = {p.name for p in pins}
+    leaves = tuple((m.inst, m.module, m.params, rtl_source_paths(resolve_rtl_module(mem)))
+                   for m, mem in zip(ws.mems, fresh.rtl_mods.values()))
+    return KernelRtl(ws.name, f"u_{mod.name}", pins, (), tuple(e for e in eps if e[0] in names),
+                     hw=mod, owner=owner, wrapper=ws, rtl_leaves=leaves,
+                     hazards=bram_hazard_manifest(fresh, spec))
 
 
 def _view_of(v, net_of: dict, law_default: int):
@@ -920,6 +981,7 @@ def render_system_top(spec: SystemTopSpec, probes: dict | None = None) -> str:
     mods = _render_modules(spec, probes)
     text = [f"// {spec.top}.v -- GENERATED by waveflow (build/system_top.py) from the pysim system.\n"
             "`timescale 1ns/1ps\n"]
+    text += ["\n" + w for w in _wrappers(spec)]
     text += [f"\n// {sub.kind} '{sub.name}': a sub-top of {spec.top}\n" + mods[sub.name]
              for sub in spec.subs]
     text.append(("\n" if spec.subs else "") + mods[""])
@@ -937,7 +999,20 @@ def render_sub_top(spec: SystemTopSpec, name: str, probes: dict | None = None) -
         raise LoweringError(f"{spec.top} has no sub-top {name!r}; it has "
                             f"{[s.name for s in spec.subs]}")
     return (f"// {sub.module}.v -- GENERATED by waveflow (build/system_top.py): {sub.kind} '{name}' "
-            f"of {spec.top}, alone.\n`timescale 1ns/1ps\n\n" + _render_modules(spec, probes)[name])
+            f"of {spec.top}, alone.\n`timescale 1ns/1ps\n\n"
+            + "".join(w + "\n" for w in _wrappers(spec, name)) + _render_modules(spec, probes)[name])
+
+
+def _wrappers(spec: SystemTopSpec, group: str | None = None) -> list[str]:
+    """The wrapper modules of the kernels with hand-written RTL beside them (in sub-top *group*,
+    or all), each once: generated Verilog the top's file carries, as it carries its sub-tops."""
+    from waveflow.build.wrapper_gen import render_wrapper
+
+    seen: dict[str, str] = {}
+    for k in spec.kernels:
+        if k.wrapper is not None and (group is None or k.group == group):
+            seen.setdefault(k.module, render_wrapper(k.wrapper))
+    return list(seen.values())
 
 
 def _render_modules(spec: SystemTopSpec, probes: dict | None = None) -> dict[str, str]:

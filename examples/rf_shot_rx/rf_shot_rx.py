@@ -38,6 +38,7 @@ from waveflow.build.composite_gen import RFSOC4X2_CLK_HZ
 from waveflow.hw.clock import Clock
 from waveflow.hw.codegen_targets import SEQUENTIAL_XSI_TB
 from waveflow.hw.hw_freerun import FreeRunMod
+from waveflow.hw.hw_system import GraphSystem
 from waveflow.hw.interface import StreamIF
 from waveflow.hw.rf_shot_rx import (
     CAP_OK,
@@ -238,6 +239,27 @@ class RfShotRxTB(FreeRunMod):
         rate changed here cannot leave the two backends running at different speeds.
         """
         return float(self.samp_rate) / (SPW * float(self.axis_freq))
+
+
+@dataclass
+class RfShotRxSystem(GraphSystem):
+    """The ping-pong receiver as a **system** (``plans/system_model.md`` S3e): the
+    :class:`RfShotRxTB` graph, the cut the receiver alone -- its memory inside it, so the system top
+    instantiates its **wrapper**.  The RFDC is testbench.  *dut_cls* picks the build
+    (:class:`~waveflow.hw.rf_shot_rx.RfShotRx` or :class:`RfShotRxAbs`)."""
+
+    dut_cls: type = RfShotRx
+    n_cycles: int = XSI_N_CYCLES
+
+    def graph(self) -> RfShotRxTB:
+        return RfShotRxTB(name="xsi_tb", sim=Simulation(), dut_cls=self.dut_cls,
+                          n_cycles=int(self.n_cycles))
+
+    def dut_modules(self, g) -> list:
+        return [g.dut]
+
+    def write_inputs(self, root) -> None:
+        write_scenario(root, n_blk=int(self.tb.n_blk))
 
 
 # ---------------------------------------------------------------------------

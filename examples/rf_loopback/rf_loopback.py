@@ -39,8 +39,7 @@ from waveflow.hw.synth import sim_only
 from waveflow.simulation.rf_tb import RfDataSink, RfDataSource, read_rf_bundle, write_rf_bundle
 from waveflow.simulation.simobj import ProcessGen
 from waveflow.simulation.simulation import Simulation
-from waveflow.utils.burst_io import write_run_params
-from waveflow.hw.hw_system import DutTop, HwSystem
+from waveflow.hw.hw_system import GraphSystem
 
 from waveflow.hw.rfdc import Rfdc
 from waveflow.hw.rfdc_samp_word import RfdcSampWord, Rfsoc4x2SampWord
@@ -736,7 +735,7 @@ def run_and_check() -> bool:
 
 
 @dataclass
-class RfLoopbackSystem(HwSystem):
+class RfLoopbackSystem(GraphSystem):
     """rf_loopback as a **system** (``plans/system_model.md`` S3d): vendor IP in the testbench.
 
     The DUT is the pass-through kernel alone.  The RFDC cannot be brought into the DUT as vendor IP
@@ -750,39 +749,25 @@ class RfLoopbackSystem(HwSystem):
     so the two legitimately differ (``tests/examples/test_rf_loopback_xsi.py`` records how).
     """
 
+    dut_name: ClassVar[str] = "rf_loopback_dut"
+
     n_src_blk: int = 8
     blksize: int = 256
     #: The RTL run's cycle bound (the scenario's ``run.json``); see ``rf_loopback_xsi.XSI_N_CYCLES``.
     n_cycles: int = 16000
 
-    def __post_init__(self) -> None:
+    def graph(self) -> "RfLoopbackTB":
         self.runner = RfLoopbackSim(n_src_blk=int(self.n_src_blk), name="xsi_tb",
                                     blksize=int(self.blksize))
-        self.tb = self.runner.tb
-        self.sim = self.tb.sim
-        self.clk = self.tb.axis_clk
-        self.data_width = int(self.tb.rfdc.axis_bitwidth)
-        self.dut_top = DutTop.of("rf_loopback_dut", self.sim, comps=[self.tb.dut])
-        self.tb.sink.recording_check = "example"
-        self._root: Path | None = None
+        self.runner.tb.sink.recording_check = "example"
+        return self.runner.tb
 
-    def dut(self) -> DutTop:
-        """The default DUT: the pass-through kernel alone; the converter is testbench."""
-        return self.dut_top
+    def dut_modules(self, g) -> list:
+        return [g.dut]
 
-    def write_scenario(self, root) -> None:
+    def write_inputs(self, root) -> None:
         self.runner.write_scenario(root)
-        write_run_params(Path(root) / "vectors", n_cycles=int(self.n_cycles))
-        self._root = Path(root)
 
-    def run(self) -> "RfLoopbackTB":
-        if self._root is None:
-            with tempfile.TemporaryDirectory() as tmp:
-                self.write_scenario(tmp)
-                self.sim.run_sim()
-        else:
-            self.sim.run_sim()
-        return self.tb
 
 if __name__ == "__main__":
     run_and_check()

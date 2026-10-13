@@ -360,6 +360,17 @@ examples/markov/xsi_work/
 examples/mem_copy/xsi_work/
 # rf_loopback through the system flow (examples/rf_loopback/rf_loopback_system_build.py).
 examples/rf_loopback/xsi_work/
+examples/state_toy/xsi_work/
+examples/fir_block/xsi_work/
+examples/interleaver/xsi_work/
+examples/rf_relayout/xsi_work/
+examples/rf_repeat_play/xsi_work/
+examples/bram_access/xsi_work/
+examples/rf_blk_delay/xsi_work/
+examples/rf_samp_buf_rx/xsi_work/
+examples/rf_samp_buf_tx/xsi_work/
+examples/rf_shot_rx/xsi_work/
+examples/rf_shot_tx/xsi_work/
 # examples/vitis_fft (born under plans/source_layout.md): no hand-written C++ at all -- include/, gen/
 # (with the .tcl), xsi/ and the pysim's vectors/ are build output; vitis_fft_build.generate() restores them.
 examples/vitis_fft/include/
