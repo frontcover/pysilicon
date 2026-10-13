@@ -320,11 +320,34 @@ class DataSchema(ABC):
         return self.from_dict(json.loads(raw))
 
     @classmethod
+    def _layout_memo(cls) -> dict:
+        """A per-class memo for value-independent layout answers (word counts, cursor steps).
+
+        Those were computed by serializing a default instance on every call -- per transfer, in a
+        pysim.  Keyed on the identity of the attributes a layout derives from, so a class whose
+        structure is changed recomputes."""
+        token = (getattr(cls, "elements", None), getattr(cls, "bitwidth", None),
+                 getattr(cls, "max_shape", None), getattr(cls, "element_type", None),
+                 getattr(cls, "static", None))
+        memo = cls.__dict__.get("_layout_memo_cache")
+        if memo is None or memo[0] != token:          # tuple ==: identity first, element by element
+            memo = (token, {})
+            cls._layout_memo_cache = memo
+        return memo[1]
+
+    @classmethod
     def nwords_per_inst(cls, word_bw: int) -> int:
         """Return the number of packed words needed for one instance at ``word_bw``."""
         if word_bw <= 0:
             raise ValueError("word_bw must be positive.")
+        memo = cls._layout_memo()
+        key = ("nwords", word_bw)
+        if key not in memo:
+            memo[key] = cls._nwords_per_inst_uncached(word_bw)
+        return memo[key]
 
+    @classmethod
+    def _nwords_per_inst_uncached(cls, word_bw: int) -> int:
         packed = np.asarray(cls().serialize(word_bw=word_bw))
         if packed.ndim == 0:
             return 1
@@ -418,10 +441,14 @@ class DataSchema(ABC):
         :class:`VarDataArray` overrides this to simulate max-length layout.
         :class:`DataList` overrides this to walk its children's max steps.
         """
-        words: list[int] = [0]
-        return cls()._serialize_recursive(
-            word_bw=word_bw, words=words, ipos0=ipos0, iword0=iword0
-        )
+        memo = cls._layout_memo()
+        key = ("step", word_bw, ipos0, iword0)
+        if key not in memo:
+            words: list[int] = [0]
+            memo[key] = cls()._serialize_recursive(
+                word_bw=word_bw, words=words, ipos0=ipos0, iword0=iword0
+            )
+        return memo[key]
 
     def serialize(self, word_bw: int = 32) -> Words:
         """Serialize this runtime value into packed hardware words."""
@@ -3130,6 +3157,10 @@ class DataList(DataSchema):
         """
         if word_bw <= 0:
             raise ValueError("word_bw must be positive.")
+        memo = cls._layout_memo()
+        key = ("nwords", word_bw)
+        if key in memo:
+            return memo[key]
         curr_ipos = 0
         curr_iword = 0
         for _, schema_cls in cls._iter_element_schemas():
@@ -3137,7 +3168,8 @@ class DataList(DataSchema):
                 word_bw=word_bw, ipos0=curr_ipos, iword0=curr_iword
             )
         n = curr_iword + (1 if curr_ipos > 0 else 0)
-        return n if n > 0 else 1
+        memo[key] = n if n > 0 else 1
+        return memo[key]
 
     @classmethod
     def _max_cursor_step(
