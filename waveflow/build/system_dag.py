@@ -344,6 +344,47 @@ class PysimStep(_SystemStep):
         return {self.a("pysim_traces"): traces, self.a("pysim"): report}
 
 
+def _explain_mismatch(sysm, bad: list, rtl: Path, py: Path) -> str:
+    """The message for recordings that differ RTL against pysim: for each, the participant that
+    records it, the word counts and the first differing word -- and what to do when the difference
+    is one pysim cannot avoid by construction."""
+    import numpy as np
+
+    from waveflow.hw.hw_system import _inside
+
+    top = sysm.dut()
+    who: dict[str, str] = {}
+    for o in sysm.elements():
+        if _inside(o, top):
+            continue
+        for b in [getattr(o, "out_bundle", "")] + [g.bundle for g in (getattr(o, "dump_segs", None)
+                                                                      or ())]:
+            if b:
+                who[Path(str(b)).name] = f"{getattr(o, 'name', '?')} ({type(o).__name__})"
+    lines = ["the testbench's recordings differ, RTL against pysim:"]
+    for entry in bad:
+        name = entry.split("/")[0]
+        a, b = rtl / name / "words.bin", py / name / "words.bin"
+        detail = "missing on one side"
+        if a.is_file() and b.is_file():
+            x, y = np.fromfile(a, dtype="<u8"), np.fromfile(b, dtype="<u8")
+            n = min(x.size, y.size)
+            diff = np.flatnonzero(x[:n] != y[:n])
+            detail = f"{x.size} words at RTL, {y.size} in pysim"
+            if diff.size:
+                k = int(diff[0])
+                detail += (f"; first difference at word {k}: RTL 0x{int(x[k]):x}, "
+                           f"pysim 0x{int(y[k]):x} ({diff.size} differ)")
+        lines.append(f"  {name!r}, recorded by {who.get(name, '?')}: {detail}")
+    lines.append(
+        "A difference is a finding until shown otherwise -- an unassigned field, a lost word, a "
+        "design that disagrees with its twin.  If it is one pysim cannot avoid by construction (loss "
+        "below its resolution, a time horizon against a cycle bound, a loosely-timed lead), mark "
+        "that participant `recording_check = \"example\"` and check the recording in the example "
+        "instead (plans/system_model.md S3b).")
+    return "\n".join(lines)
+
+
 @dataclass(kw_only=True)
 class CompareStep(_SystemStep):
     """``compare``: every host endpoint's trace, RTL against pysim, file for file
@@ -382,7 +423,11 @@ class CompareStep(_SystemStep):
                              else ("words.bin",), names=names)
         out.write_text(json.dumps({"trace_mismatches": bad}, indent=2) + "\n", encoding="utf-8")
         if bad:
-            raise RuntimeError(f"the testbench's RTL traces differ from pysim's: {bad}")
+            if host:
+                raise RuntimeError(f"the testbench's RTL traces differ from pysim's: {bad}")
+            raise RuntimeError(_explain_mismatch(self.sysm, bad,
+                                                 Path(inputs[self.a(self.traces_from)]),
+                                                 Path(inputs[self.a("pysim_traces")])))
         return {self.a("compare"): out}
 
 
