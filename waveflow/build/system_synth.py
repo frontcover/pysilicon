@@ -46,7 +46,7 @@ INSTANCE_TARGET = "instance"
 
 #: Files in a kernel's ``syn/verilog`` that the synthesis must find beside it (ROM initializers a
 #: ``$readmemh`` names relative to the run directory).
-_INIT_SUFFIXES = (".dat", ".mem", ".mif", ".hex")
+INIT_SUFFIXES = (".dat", ".mem", ".mif", ".hex")
 
 
 class UnmappedInstanceError(RuntimeError):
@@ -115,7 +115,7 @@ def kernel_files(kernel_dir: Path) -> list[Path]:
     if tcls:
         raise NotImplementedError(f"{kernel_dir}: csynth emitted IP scripts {tcls}; system_synth does "
                                   f"not generate a kernel's Vitis IP cores yet")
-    return [p for p in files if p.suffix == ".v" or p.suffix in _INIT_SUFFIXES]
+    return [p for p in files if p.suffix == ".v" or p.suffix in INIT_SUFFIXES]
 
 
 def system_identity(spec, top_text: str, kernel_dirs: dict[str, Path], *, part: str,
