@@ -1,9 +1,30 @@
 # Plan: a unit harness per device -- verification, timing and calibration, one component at a time
 
-**Status:** drafted 2026-10-12.  **Starts after `plans/ip_packaging_routes.md`**, whose Stage 0 (devices
-derived from the inventory, rendered as sub-tops) and Stages 1-2 (per-device out-of-context synthesis,
-identity, tie-offs as parameters) this plan builds on.  Part A is staged work; Part B is a sketch that
-connects it to `plans/multi_agent_flows.md`.
+**Status:** drafted 2026-10-12; **revised 2026-10-13**, after `plans/ip_packaging_routes.md` was
+completed (PRs #252, #259, #260).  Nothing of this plan is built.  Stage 0 is half done: the findings
+below ([Stage 0 findings](#stage-0-findings-2026-10-13)) are the inventory for markov and mm_fir, and
+one decision is proposed and not yet taken (the harness boundary, D9).  Part A is staged work; Part B
+is a sketch that connects it to `plans/multi_agent_flows.md`.
+
+**What the prerequisite plan now provides** (all merged):
+
+- **the device as a module of its own**: `SystemTopSpec.subs`, `render_sub_verilog(name)`,
+  `sources_of(name)` -- the device's Verilog, its leaves and its kernels' csynth files;
+- **the device as an IP** (`waveflow/build/system_ip.py`, step `ip_package`): its boundary is AXI4
+  slave groups (`mi<k>_axi`, its views), AXI4 master groups (`si<k>_axi`, its bus writers) and
+  interrupt lines -- read back from `component.xml` (`PackagedIp.interfaces`);
+- **the device's resources** (`waveflow/build/system_ooc.py`, `system_synth --route per_device`): an
+  out-of-context synthesis per device, cached by content -- D6's record (records not yet filed into
+  the store: `OocLink` only);
+- **tie-offs in identity** (`RtlInstance.ties`, `identify_rtl(..., ties)`): a leaf's configuration
+  includes what the system ties off;
+- **a block design and the routes measured** (`system_bd.py`; `docs/examples/markov/synth.md#routes`):
+  not needed here, but the device boundary they use is the one D9 proposes.
+
+Also landed since the draft: `HwSystem` / `GraphSystem` (`waveflow/hw/hw_system.py`; a system class
+states its graph, its cut and its inputs -- markov is still a plain `HwSystem`, mm_fir too), the
+system flow as the only kernel flow (`plans/system_model.md` S3f), and the routed credit stream's
+writers placed in the device of the kernel they act for.
 
 ## Motivation
 
@@ -36,8 +57,8 @@ That wall is gone:
   characterize the bus once per platform, fit only each kernel's own compute, contention-free.  memcpy
   showed the loaded system then comes out right with no end-to-end fitting (0.0%), because back-pressure
   emerges from the FIFO depths.
-- **Resources are per device already**, once `ip_packaging_routes.md` route B lands: a device's
-  out-of-context synthesis *is* its resource measurement, keyed by its identity.
+- **Resources are per device already** (`system_ooc.synth_ooc_link`, merged): a device's
+  out-of-context synthesis *is* its resource measurement, cached by content.
 
 ## What a device harness is
 
@@ -80,10 +101,58 @@ existing gates are examples.)  For one device, the harness gives:
   the device's identity and the workload's features, beside the resource record.  The `mcp_fir.md`
   commitments hold: failures are rows, a measurement is content-addressed (a repeat is a cache hit), cost
   is known before the call (`waveflow.events`), batches go through `SweepRunner`.
+- **D9 (proposed 2026-10-13, not yet taken) -- the harness boundary is the device's IP boundary.**
+  The harness top is the device's sub-top itself (`render_sub_verilog`): its AXI4 slave group(s),
+  master group(s) and interrupt lines, exactly the ports its IP has.  No crossbar in the harness's
+  RTL: the testbench decodes addresses in a small C++ router to the host and the stand-ins.  Then one
+  boundary serves the IP, the per-device synthesis, the harness and a sub-agent's brief, and the
+  timing measured at the ports (D5) is the device's own, with no crossbar latency in it.  The
+  alternative -- keep the crossbar in the harness and turn each slot whose neighbour is outside the
+  cut into a top port -- reuses today's top-port kinds (`host_axi`, `maxi_ext`) and the crossbar RTL,
+  but puts the crossbar's latency inside every unit measurement.
 - **D8 -- the composition check is part of the plan, not an afterthought.**  Unit-calibrated devices must
   reproduce the system: timing through the system's pysim against its XSI run, with no system-level
   fitting; resources through route B's sum plus link term.  If they do not, the decomposition is wrong,
   and that is the finding.
+
+## Stage 0 findings (2026-10-13)
+
+**The cut today.**  `inside=` takes kernels and memories, not devices (`SystemTopSpec.from_system(s,
+inside=[s.gen_dev])` raises: "names no csynth'd module").  With markov's generator alone inside
+(`inside=[s.gen]`) the walk refuses: "crossbar slave_1 (MemSlaveAdaptor 'chain_mm') is not the device
+of a kernel inside the cut".  A bus neighbour cannot be cut away today; only the host (a bus master
+outside the cut, rendered as an `s<k>_axi` top port) and a kernel's `m_axi` to no crossbar
+(`maxi_ext`, an `m<k>_axi` top port facing a `FlatMemory`) can.
+
+**mm_fir needs nothing new.**  It is one device and a host; its system run (`618` / `611` cycles,
+both topologies) already *is* its device's harness.  It is the reference that Stage 2's generated
+harness must reproduce.
+
+**markov's devices, port by port** (the IP boundaries of `ip_packaging_routes.md` Stage 3; C++
+models in `waveflow/build/xsi/`):
+
+| device | port | what answers it in a harness | exists? |
+|---|---|---|---|
+| gen | `mi0_axi`, view `qcmd` (queue in) | host bus master (`AxiMmMaster`) + `MmQueueWriter` | yes |
+| gen | `mi0_axi`, view `u_crd` (credit in) | a master returning credit by a policy (a plain bus write, `BusRw`) | **missing**: the policy |
+| gen | `si1_axi`, forward writer -> chain's `qu` | a slave that takes the bursts and records the stream | **missing**: a remote-queue sink |
+| gen | `irq_gen_qcmd` | `IrqPin` | yes |
+| chain | `mi1_axi`, view `qu` (queue in) | a master feeding `u` bursts within the credit it holds | partly: `MmQueueWriter`, no credit |
+| chain | `mi1_axi`, view `qresp` (queue out) | host + `MmQueueReader` | yes |
+| chain | `si2_axi`, credit writer -> gen's `u_crd` | a slave taking the credit writes, feeding the feeder above | **missing**: a credit sink |
+| chain | `si3_axi`, memory writer | `FlatMemory` + `AxiMmWriteSlave` | yes |
+| chain | `irq_chain_qresp` | `IrqPin` | yes |
+| mem | `mi2_axi` | host + `MmBusReader` | yes |
+
+So D3's generic stand-ins are, concretely, **two**: a **remote queue** (an AXI slave that accepts a
+writer's bursts into a recorded stream) and the **credit loop** around it (a sink for credit writes,
+and a feeder or returner that honours them by a policy, D4).  Both are testbench C++ beside
+`xsi_mm_host.h`; neither needs RTL.  Each needs a pysim twin so the harness runs in pysim too.
+
+**Still to write for Stage 0:** the unit hosts (which of `MarkovHost`'s two threads a device alone
+needs -- gen: the writer only; chain: the reader, plus the `u` feeder), and how a harness is stated
+(likely a `GraphSystem` whose `dut_modules` is one device, with the stand-ins as its testbench
+participants -- which is D2).
 
 ## Part A -- the unit harness
 
@@ -94,12 +163,14 @@ programs can drive a device alone (markov's host drives both devices; a unit hos
 down before code.  Gate: each port of the three devices mapped to an existing model or a named
 missing one.
 
-**Stage 1 -- one device, assembled by hand.**  markov's generator device inside the cut, the chain
-replaced by a stand-in remote queue with immediate credit, a minimal host driving `qcmd`.  Function
+**Stage 1 -- one device, assembled by hand.**  markov's generator device inside the cut (its
+sub-top as the harness top, if D9 is taken), the chain replaced by a stand-in remote queue with
+immediate credit, a minimal host driving `qcmd`.  Function
 bit-exact against the golden model in pysim and at XSI; cycles per job recorded from port timestamps.
 Gate: bit-exact; and the device's per-job timing agrees with the same device's timing traced inside the
-full markov run (the existing VCD path) -- the unit view and the system view of one device must not
-disagree.
+full markov run (the existing VCD path, now `SystemXsiStep(trace=True)`: each kernel's scope dumped,
+`hazards.json`) -- the unit view and the system view of one device must not disagree, once the
+crossbar's latency is accounted for.
 
 **Stage 2 -- generated.**  The harness derived from a device's ports and the stand-ins of D3, for any
 device: markov's generator and chain, mm_fir's device (both topologies).  A stand-in's policy read from
@@ -148,8 +219,11 @@ agents splitting by device.
 ## Open questions
 
 - **The direct wiring.**  markov's `link="direct"` joins the kernels with a `CreditStreamIF`, no bus; a
-  device harness then needs a credit-stream stand-in, and `ip_packaging_routes.md` leaves the same link
-  open.
+  device harness then needs a credit-stream stand-in.  It is also the one case
+  `ip_packaging_routes.md` left open (a credit-stream interface definition, or both kernels one IP).
+- **Records for the device's resources.**  `synth_ooc_link` returns per-device counters but files no
+  store records; D6 needs them filed under the device's identity (`identify` of the sub-top's
+  contents: kernels' identities, leaves' identities with their ties).
 - **A unit host.**  Generated from the device's views, or a scenario language over them?  The system's
   `SwHost` and its C++ twin are the starting point.
 - **Ports that cannot show a firing.**  Where a device's timing hides behind an internal FIFO, when is the
@@ -159,7 +233,8 @@ agents splitting by device.
 
 ## Relationship to other plans
 
-- `plans/ip_packaging_routes.md` -- the device, its sub-top, its identity and its resource record. Prerequisite.
+- `plans/ip_packaging_routes.md` -- the device, its sub-top, its IP, its resource measurement.
+  Prerequisite; complete (2026-10-13) but for the direct-wired case.
 - `plans/incremental_xsi.md` -- `XsiSnapshot`, `run.json`, parallel runs: what makes a sweep cheap.
 - `plans/system_resources.md` -- the inventory and the records the harness reads and writes beside.
 - `plans/paper_cg_dse_vision.md` -- per-block calibration over each block's own parameters is this plan's
