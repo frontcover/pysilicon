@@ -769,6 +769,61 @@ class KernelResourcesStep(_SystemStep):
 
 
 @dataclass(kw_only=True)
+class IpPackageStep(_SystemStep):
+    """``ip_package``: the system packaged as IP, one per device and one for the memory
+    (:func:`~waveflow.build.system_ip.package_system`; ``plans/ip_packaging_routes.md`` Stage 3).
+    Each sub-top is packaged with ``ipx::package_project`` from what it compiles -- its rendered
+    module, its leaves' Verilog, its kernels' csynth Verilog -- with its AXI interfaces inferred,
+    its interrupt lines declared, and the clock associated with every AXI interface and the
+    reset.  The
+    crossbar is AMD's IP already: its ``.xci``, generated for the same part, is recorded as is.
+
+    Seconds once Vivado is up, but it needs Vivado, so **opt-in** (``--through ip_package``).  Each
+    IP is cached by the content of what it reads, so an unchanged device is never re-packaged.
+    For the part and clock the kernels were csynth'd for
+    (:func:`~waveflow.build.composite_gen.tcl_target`).
+
+    Produces ``<work>/ip_repo/`` (an IP repository: one directory per IP) and its
+    ``manifest.json`` -- each IP's VLNV, ports and bus interfaces, read back from its own
+    ``component.xml`` (:class:`~waveflow.build.system_ip.SystemIp`)."""
+
+    description = "Package each device and the memory as Vivado IP (opt-in; needs Vivado)."
+    step_name: ClassVar[str] = "ip_package"
+
+    rtl: "SystemRtlStep"
+
+    @property
+    def consumes(self) -> list:  # type: ignore[override]
+        return [self.a("rtl")]
+
+    @property
+    def produces(self) -> dict:  # type: ignore[override]
+        return {self.a("ip_repo"): self.work / "ip_repo" / "manifest.json"}
+
+    def run(self, config: BuildConfig, **_: Any) -> dict[str, Any]:
+        import dataclasses
+
+        from waveflow.build.axi_xbar import generate_axi_xbar
+        from waveflow.build.composite_gen import tcl_target
+        from waveflow.build.system_ip import package_system
+
+        spec, work = self.rtl.spec, self.work_dir(config)
+        part, _period = tcl_target(config)
+        xbar = (generate_axi_xbar(dataclasses.replace(spec.xbar, part=part),
+                                  self.rtl.ip_dir(config))
+                if spec.xbar is not None else None)
+        root = Path(config.root_dir)
+        kdirs = {m: root / rtl_rel(m) for m in spec.modules}
+        res = package_system(spec, kernel_dirs=kdirs, part=part, out_dir=work / "ip_repo",
+                             xbar_ip=xbar)
+        fresh = [n for n, ip in res.ips.items() if not ip.cached]
+        print(f"  {spec.top}: {len(res.ips)} IPs ({', '.join(ip.vlnv for ip in res.ips.values())})"
+              f"{'' if res.xbar is None else ' + ' + res.xbar['vlnv']}; packaged now: "
+              f"{fresh or 'none (cached)'}")
+        return {self.a("ip_repo"): work / "ip_repo" / "manifest.json"}
+
+
+@dataclass(kw_only=True)
 class SystemSynthStep(_SystemStep):
     """``system_synth``: the system top through Vivado, out of context -- every instance of the
     inventory attributed from ``report_utilization -hierarchical``, the integration term and the
@@ -969,9 +1024,9 @@ def add_system_steps(dag: BuildDag, sysm, *, work_dir, top: str | None = None,
                      tcls: dict[str, Path] | None = None, timeout: int = 3600,
                      trace: bool = False) -> SystemXsiStep:
     """Add the framework steps of a system's flow to *dag*: ``csynth`` (one inner step per HLS top in
-    the cut), ``system_rtl``, ``kernel_resources``, ``system_synth``, ``leaf_resources``,
-    ``resource_report``, ``scenario``, ``pysim``, ``system_xsi`` and ``compare``.  Returns the
-    ``system_xsi`` step (its ``rtl`` is the ``system_rtl`` step).
+    the cut), ``system_rtl``, ``kernel_resources``, ``system_synth``, ``ip_package``,
+    ``leaf_resources``, ``resource_report``, ``scenario``, ``pysim``, ``system_xsi`` and ``compare``.
+    Returns the ``system_xsi`` step (its ``rtl`` is the ``system_rtl`` step).
 
     *sysm* is the pysim system object, not yet run.  csynth consumes the artifacts *sources* -- the
     example's ``codegen`` products; one the DAG has no producer for becomes a source directory under
@@ -1003,6 +1058,7 @@ def add_system_steps(dag: BuildDag, sysm, *, work_dir, top: str | None = None,
     dag.add(rtl)
     dag.add(KernelResourcesStep(sysm=sysm, work=work, prefix=prefix, rtl=rtl))
     dag.add(SystemSynthStep(sysm=sysm, work=work, prefix=prefix, rtl=rtl))
+    dag.add(IpPackageStep(sysm=sysm, work=work, prefix=prefix, rtl=rtl))
     dag.add(LeafResourcesStep(sysm=sysm, work=work, prefix=prefix, rtl=rtl))
     dag.add(ResourceReportStep(sysm=sysm, work=work, prefix=prefix, rtl=rtl))
     dag.add(ScenarioStep(sysm=sysm, work=work, prefix=prefix))
@@ -1013,8 +1069,8 @@ def add_system_steps(dag: BuildDag, sysm, *, work_dir, top: str | None = None,
     return xsi
 
 
-__all__ = ["CompareStep", "CsynthStep", "CsynthTopsStep", "KernelResourcesStep", "LeafResourcesStep",
-           "PysimStep", "ResourceReportStep", "SystemSynthStep",
+__all__ = ["CompareStep", "CsynthStep", "CsynthTopsStep", "IpPackageStep", "KernelResourcesStep",
+           "LeafResourcesStep", "PysimStep", "ResourceReportStep", "SystemSynthStep",
            "SYNTH_MODES", "ScenarioStep", "SystemRtlStep", "SystemXsiStep", "add_system_steps",
            "owner_label", "report_artifact", "report_rel", "rtl_artifact", "rtl_problem", "rtl_rel",
            "seconds_artifact", "snake"]

@@ -138,7 +138,10 @@ os.environ.setdefault("WAVEFLOW_EVENTS", "off")
 #: waveform), so the duplicate S3e system gates were folded into it, and test_xsi_bfm.py's mem_copy /
 #: rf_pass_through rows (with their .f drift checks) moved to test_mem_copy_system_xsi.py /
 #: test_rf_dut_system_xsi.py.  Every claim and every recorded number is still asserted once.
-WANT_XSI_GATES = 177
+#: 177 -> 183 on 2026-10-12 (plans/ip_packaging_routes.md Stage 3): markov packaged as IP, one per
+#: device (test_markov_ip.py) -- VLNVs, interfaces, the clock association, the cache, and each IP
+#: carrying exactly the files the XSI gates verified.
+WANT_XSI_GATES = 183
 
 #: Filled in at collection; module state because a pytest run is one process and the hooks that
 #: write and read it are plain functions.
