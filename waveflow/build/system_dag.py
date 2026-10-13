@@ -838,6 +838,9 @@ class BlockDesignStep(_SystemStep):
 
     description = "Wire the packaged IPs in a validated Vivado block design (opt-in; needs Vivado)."
     step_name: ClassVar[str] = "block_design"
+    #: ``bd_synth``: how a bitstream build synthesizes the design -- ``global`` (the default) or
+    #: ``per_ip`` (:data:`~waveflow.build.system_bd.SYNTH_MODES`).
+    params: ClassVar[dict] = {"bd_synth": "global"}
 
     rtl: "SystemRtlStep"
 
@@ -849,7 +852,7 @@ class BlockDesignStep(_SystemStep):
     def produces(self) -> dict:  # type: ignore[override]
         return {self.a("block_design"): self.work / "bd" / "block_design.json"}
 
-    def run(self, config: BuildConfig, **_: Any) -> dict[str, Any]:
+    def run(self, config: BuildConfig, bd_synth: str = "global", **_: Any) -> dict[str, Any]:
         import json
 
         from waveflow.build.composite_gen import tcl_target
@@ -860,7 +863,8 @@ class BlockDesignStep(_SystemStep):
         _part, period = tcl_target(config)
         sysip = SystemIp.from_json(
             json.loads((work / "ip_repo" / "manifest.json").read_text(encoding="utf-8")))
-        bd = build_block_design(spec, sysip, period_ns=period, out_dir=work / "bd")
+        bd = build_block_design(spec, sysip, period_ns=period, out_dir=work / "bd",
+                                synth=bd_synth)
         n_intf = sum(1 for x in bd.links if x.kind == "intf")
         print(f"  {bd.name}: {len(sysip.ips)} IPs{'' if spec.xbar is None else ' + crossbar'}, "
               f"{n_intf} interface links, {len(bd.ports)} ports; validated"

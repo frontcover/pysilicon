@@ -69,6 +69,7 @@ def test_the_address_map_is_assigned_from_the_crossbar():
             "[get_bd_addr_segs -of_objects [get_bd_intf_pins u_mem_sub/mi2_axi]]") in tcl
     assert "CONFIG.M01_A00_BASE_ADDR {0x0000000000004000}" in tcl
     assert "-freq_hz 100000000 ap_clk" in tcl and "validate_bd_design" in tcl
+    assert "set_property synth_checkpoint_mode None" in tcl         # global by default
     assert tcl.rstrip().endswith('puts "WF_DONE"')
 
 

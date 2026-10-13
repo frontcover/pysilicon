@@ -37,6 +37,11 @@ def test_the_design_validates_with_no_critical_warning(bd):
     assert bd["bd"].endswith("markov_top_bd.bd") and bd["critical"] == []
 
 
+def test_a_bitstream_build_will_synthesize_it_globally(bd):
+    """The default synthesis mode (Stage 5): one global run, not Vivado's per-IP default."""
+    assert bd["synth_checkpoint_mode"] == "None"
+
+
 def test_the_wrapper_has_the_system_tops_ports(bd, spec):
     """The block design is a drop-in for the system top: the same ports, directions and widths
     (``make_wrapper`` writes an AXI group's names in lower case)."""

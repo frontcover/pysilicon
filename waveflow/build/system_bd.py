@@ -34,8 +34,13 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
 #: The block-design recipe's revision: part of the cache key (see :data:`system_ip.RECIPE`).
-RECIPE = "1"
+RECIPE = "2"
 XBAR_VLNV = "xilinx.com:ip:axi_crossbar:2.1"
+#: How the design is synthesized when a bitstream build runs it -> its ``synth_checkpoint_mode``.
+#: ``global`` (one run over everything) is the default: per device costs 0.35% LUT on markov but
+#: five Vivado runs' fixed overhead cold (``plans/ip_packaging_routes.md`` Stage 5).  ``per_ip`` is
+#: Vivado's own default for a block design: each IP out of context, then linked.
+SYNTH_MODES = {"global": "None", "per_ip": "Hierarchical"}
 
 
 @dataclass(frozen=True)
@@ -75,6 +80,8 @@ class BlockDesign:
     ports: dict = field(default_factory=dict)
     #: ``CRITICAL WARNING`` lines of the session (a validated design has none).
     critical: list = field(default_factory=list)
+    #: Read back: the design's ``synth_checkpoint_mode`` (:data:`SYNTH_MODES`).
+    synth_checkpoint_mode: str = ""
     seconds: float = 0.0
     cached: bool = False
     key: str = ""
@@ -151,7 +158,7 @@ def master_spaces(spec, links: list[BdLink]) -> list[str]:
 
 
 def bd_tcl(spec, ips: dict, *, name: str, part: str, period_ns: float, repo: Path, proj: Path,
-           out: Path, links: list[BdLink]) -> str:
+           out: Path, links: list[BdLink], synth: str = "global") -> str:
     """One Vivado session: the project, the design, its validation, the read-back, the wrapper."""
     from waveflow.build.system_top import XBAR_INST
 
@@ -224,6 +231,8 @@ def bd_tcl(spec, ips: dict, *, name: str, part: str, period_ns: float, repo: Pat
                   for k in spec.xbar.config_props()]
     lines += [
         "save_bd_design",
+        f"set_property synth_checkpoint_mode {SYNTH_MODES[synth]} [get_files {name}.bd]",
+        f"puts \"WF_SYNTHMODE [get_property synth_checkpoint_mode [get_files {name}.bd]]\"",
         f"set w [make_wrapper -files [get_files {name}.bd] -top]",
         "puts \"WF_WRAPPER $w\"",
         f"puts \"WF_BD [get_files {name}.bd]\"",
@@ -268,17 +277,21 @@ def _readback(bd: BlockDesign, out: str) -> None:
 
 
 def build_block_design(spec, sysip, *, period_ns: float, out_dir: str | Path,
-                       vivado: str | None = None, force: bool = False) -> BlockDesign:
+                       synth: str = "global", vivado: str | None = None,
+                       force: bool = False) -> BlockDesign:
     """*spec*'s block design over its packaged IPs *sysip* (:class:`~waveflow.build.system_ip
-    .SystemIp`), validated and read back (module doc).  Written under *out_dir*: the project, the
-    session, ``<name>.tcl`` and ``block_design.json``.  Unchanged inputs start no Vivado."""
+    .SystemIp`), validated and read back (module doc).  *synth* is how a bitstream build will
+    synthesize it (:data:`SYNTH_MODES`).  Written under *out_dir*: the project, the session,
+    ``<name>.tcl`` and ``block_design.json``.  Unchanged inputs start no Vivado."""
     from waveflow.utils.vivado_report import parse_markers
 
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     name = f"{spec.top}_bd"
     links = bd_links(spec, sysip.ips)
-    blob = json.dumps({"recipe": RECIPE, "part": sysip.part, "period": period_ns,
+    if synth not in SYNTH_MODES:
+        raise ValueError(f"synth must be one of {sorted(SYNTH_MODES)}, got {synth!r}")
+    blob = json.dumps({"recipe": RECIPE, "part": sysip.part, "period": period_ns, "synth": synth,
                        "ips": {n: [ip.vlnv, Path(ip.root).name] for n, ip in sysip.ips.items()},
                        "xbar": spec.xbar.config_props() if spec.xbar else None,
                        "links": [asdict(x) for x in links]}, sort_keys=True)
@@ -304,7 +317,7 @@ def build_block_design(spec, sysip, *, period_ns: float, out_dir: str | Path,
     work.mkdir(parents=True)
     (work / "bd.tcl").write_text(
         bd_tcl(spec, sysip.ips, name=name, part=sysip.part, period_ns=period_ns, repo=repo,
-               proj=proj, out=out_dir, links=links), encoding="utf-8")
+               proj=proj, out=out_dir, links=links, synth=synth), encoding="utf-8")
     r = subprocess.run([vivado, "-mode", "batch", "-nojournal", "-log", "vivado.log", "-source",
                         "bd.tcl"], cwd=str(work), capture_output=True, text=True, timeout=3600)
     out = (r.stdout or "") + (r.stderr or "")
@@ -314,12 +327,13 @@ def build_block_design(spec, sysip, *, period_ns: float, out_dir: str | Path,
         raise RuntimeError(f"{name}: the block design failed:\n{out[-4000:]}")
     bd = BlockDesign(name=name, part=sysip.part, period_ns=period_ns, bd=mk.get("BD", ""),
                      wrapper=mk.get("WRAPPER", ""), tcl=(out_dir / f"{name}.tcl").as_posix(),
-                     links=links, seconds=float(mk.get("SECONDS") or 0.0), key=key)
+                     links=links, seconds=float(mk.get("SECONDS") or 0.0), key=key,
+                     synth_checkpoint_mode=mk.get("SYNTHMODE", ""))
     _readback(bd, out)
     bd.ports = wrapper_ports(Path(bd.wrapper).read_text(encoding="utf-8"))
     rec.write_text(json.dumps(bd.to_json(), indent=2) + "\n", encoding="utf-8")
     return bd
 
 
-__all__ = ["BdLink", "BlockDesign", "RECIPE", "bd_links", "bd_tcl", "build_block_design",
-           "master_spaces", "wrapper_ports"]
+__all__ = ["BdLink", "BlockDesign", "RECIPE", "SYNTH_MODES", "bd_links", "bd_tcl",
+           "build_block_design", "master_spaces", "wrapper_ports"]
