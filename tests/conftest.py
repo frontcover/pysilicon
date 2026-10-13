@@ -141,7 +141,9 @@ os.environ.setdefault("WAVEFLOW_EVENTS", "off")
 #: 177 -> 183 on 2026-10-12 (plans/ip_packaging_routes.md Stage 3): markov packaged as IP, one per
 #: device (test_markov_ip.py) -- VLNVs, interfaces, the clock association, the cache, and each IP
 #: carrying exactly the files the XSI gates verified.
-WANT_XSI_GATES = 183
+#: 183 -> 189 on 2026-10-13 (Stage 4): markov's block design (test_markov_bd.py) -- validated, and
+#: read back against the system top: its ports, links, address map and crossbar.
+WANT_XSI_GATES = 189
 
 #: Filled in at collection; module state because a pytest run is one process and the hooks that
 #: write and read it are plain functions.

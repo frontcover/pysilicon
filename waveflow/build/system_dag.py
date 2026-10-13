@@ -824,6 +824,51 @@ class IpPackageStep(_SystemStep):
 
 
 @dataclass(kw_only=True)
+class BlockDesignStep(_SystemStep):
+    """``block_design``: the packaged IPs instantiated and wired in a Vivado block design beside
+    AMD's crossbar, from the same spec as the XSI system top, and validated
+    (:func:`~waveflow.build.system_bd.build_block_design`; ``plans/ip_packaging_routes.md``
+    Stage 4).  Each IP interface meets the crossbar slot, the other IP or the design port of its
+    name; every master's address map is the crossbar's own windows, assigned explicitly.
+
+    Needs Vivado, so **opt-in** (``--through block_design``); cached by its inputs.  Produces
+    ``<work>/bd/block_design.json`` -- the design read back from Vivado after
+    ``validate_bd_design`` (:class:`~waveflow.build.system_bd.BlockDesign`) -- beside the project,
+    the wrapper and ``<top>_bd.tcl``, which recreates the design in another project."""
+
+    description = "Wire the packaged IPs in a validated Vivado block design (opt-in; needs Vivado)."
+    step_name: ClassVar[str] = "block_design"
+
+    rtl: "SystemRtlStep"
+
+    @property
+    def consumes(self) -> list:  # type: ignore[override]
+        return [self.a("ip_repo")]
+
+    @property
+    def produces(self) -> dict:  # type: ignore[override]
+        return {self.a("block_design"): self.work / "bd" / "block_design.json"}
+
+    def run(self, config: BuildConfig, **_: Any) -> dict[str, Any]:
+        import json
+
+        from waveflow.build.composite_gen import tcl_target
+        from waveflow.build.system_bd import build_block_design
+        from waveflow.build.system_ip import SystemIp
+
+        spec, work = self.rtl.spec, self.work_dir(config)
+        _part, period = tcl_target(config)
+        sysip = SystemIp.from_json(
+            json.loads((work / "ip_repo" / "manifest.json").read_text(encoding="utf-8")))
+        bd = build_block_design(spec, sysip, period_ns=period, out_dir=work / "bd")
+        n_intf = sum(1 for x in bd.links if x.kind == "intf")
+        print(f"  {bd.name}: {len(sysip.ips)} IPs{'' if spec.xbar is None else ' + crossbar'}, "
+              f"{n_intf} interface links, {len(bd.ports)} ports; validated"
+              f"{' (cached)' if bd.cached else f' in {bd.seconds:.0f} s'}")
+        return {self.a("block_design"): work / "bd" / "block_design.json"}
+
+
+@dataclass(kw_only=True)
 class SystemSynthStep(_SystemStep):
     """``system_synth``: the system top through Vivado, out of context -- every instance of the
     inventory attributed from ``report_utilization -hierarchical``, the integration term and the
@@ -1025,7 +1070,7 @@ def add_system_steps(dag: BuildDag, sysm, *, work_dir, top: str | None = None,
                      trace: bool = False) -> SystemXsiStep:
     """Add the framework steps of a system's flow to *dag*: ``csynth`` (one inner step per HLS top in
     the cut), ``system_rtl``, ``kernel_resources``, ``system_synth``, ``ip_package``,
-    ``leaf_resources``, ``resource_report``, ``scenario``, ``pysim``, ``system_xsi`` and ``compare``.
+    ``block_design``, ``leaf_resources``, ``resource_report``, ``scenario``, ``pysim``, ``system_xsi`` and ``compare``.
     Returns the ``system_xsi`` step (its ``rtl`` is the ``system_rtl`` step).
 
     *sysm* is the pysim system object, not yet run.  csynth consumes the artifacts *sources* -- the
@@ -1059,6 +1104,7 @@ def add_system_steps(dag: BuildDag, sysm, *, work_dir, top: str | None = None,
     dag.add(KernelResourcesStep(sysm=sysm, work=work, prefix=prefix, rtl=rtl))
     dag.add(SystemSynthStep(sysm=sysm, work=work, prefix=prefix, rtl=rtl))
     dag.add(IpPackageStep(sysm=sysm, work=work, prefix=prefix, rtl=rtl))
+    dag.add(BlockDesignStep(sysm=sysm, work=work, prefix=prefix, rtl=rtl))
     dag.add(LeafResourcesStep(sysm=sysm, work=work, prefix=prefix, rtl=rtl))
     dag.add(ResourceReportStep(sysm=sysm, work=work, prefix=prefix, rtl=rtl))
     dag.add(ScenarioStep(sysm=sysm, work=work, prefix=prefix))
@@ -1069,7 +1115,7 @@ def add_system_steps(dag: BuildDag, sysm, *, work_dir, top: str | None = None,
     return xsi
 
 
-__all__ = ["CompareStep", "CsynthStep", "CsynthTopsStep", "IpPackageStep", "KernelResourcesStep",
+__all__ = ["BlockDesignStep", "CompareStep", "CsynthStep", "CsynthTopsStep", "IpPackageStep", "KernelResourcesStep",
            "LeafResourcesStep", "PysimStep", "ResourceReportStep", "SystemSynthStep",
            "SYNTH_MODES", "ScenarioStep", "SystemRtlStep", "SystemXsiStep", "add_system_steps",
            "owner_label", "report_artifact", "report_rel", "rtl_artifact", "rtl_problem", "rtl_rel",

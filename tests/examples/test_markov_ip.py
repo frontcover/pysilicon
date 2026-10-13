@@ -74,18 +74,13 @@ def test_the_clock_drives_every_axi_interface_and_the_reset(manifest):
         assert clk["params"]["ASSOCIATED_RESET"] == "ap_rst_n", name
 
 
-def test_an_unchanged_system_is_not_repackaged():
-    """Each IP is cached by the content of what it reads: a second run starts no Vivado."""
-    from examples.markov.markov_build import system
-    from waveflow.build.system_dag import rtl_rel
-    from waveflow.build.system_ip import package_system
-    from waveflow.build.system_top import SystemTopSpec
-    from waveflow.build.composite_gen import DEFAULT_PART
-
-    spec = SystemTopSpec.from_system(system(), top=TOP)
-    res = package_system(spec, kernel_dirs={m: HERE / rtl_rel(m) for m in spec.modules},
-                         part=DEFAULT_PART, out_dir=WORK / WORKSPACE / "ip_repo")
-    assert all(ip.cached for ip in res.ips.values()) and res.seconds == 0.0
+def test_an_unchanged_system_is_not_repackaged(manifest):
+    """Each IP is cached by the content of what it reads: a second run of the step starts no
+    Vivado, and writes the same manifest (crossbar included)."""
+    work = system_run(build_dag(work_dir=WORK), HERE, WORKSPACE, through="ip_package")
+    again = json.loads((work / "ip_repo" / "manifest.json").read_text(encoding="utf-8"))
+    assert again["seconds"] == 0.0
+    assert again["ips"] == manifest["ips"] and again["xbar"] == manifest["xbar"]
 
 
 def test_each_ip_carries_exactly_what_the_xsi_gates_verified(manifest):
