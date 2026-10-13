@@ -330,8 +330,8 @@ class RfShotTxTB(FreeRunMod):
     samp_rate: float = SAMP_RATE
     axis_freq: float = RFSOC4X2_CLK_HZ
     word: type[Rfsoc4x2SampWord] = WORD
-    #: Which scenario the pysim run and the generated XSI main drive.  The second scenario reassigns
-    #: the bundle names in its own hand-written main.
+    #: Which scenario the pysim run drives.  At RTL each frame stream is a system of its own
+    #: (``RfShotTxSystem``, ``rf_shot_tx_system_build.py``).
     in_bundle: str = "vectors/cmd"
     n_cycles: int = XSI_N_CYCLES
     #: Which of the two builds this graph wraps — :class:`RfShotTx` or :class:`RfShotTxAbs`.  ONE

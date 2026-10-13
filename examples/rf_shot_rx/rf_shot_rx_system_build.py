@@ -1,15 +1,15 @@
 """rf_shot_rx through the **system** flow: the ping-pong receiver as the DUT, the RFDC in the testbench.
 
-``plans/system_model.md`` S3e.  The design the kernel flow's RTL gates run
-(``tests/examples/test_rf_shot_rx_xsi.py`` and ``..._abs_xsi.py``, one per build), taken through
+``plans/system_model.md`` S3e.  The RTL rung of both builds -- the gates are
+``tests/examples/test_rf_shot_rx_xsi.py`` and ``..._abs_xsi.py``, one per build -- through
 ``add_system_steps``: ``csynth`` -> ``system_rtl`` (the receiver instantiated as its wrapper: the
 kernel and its ``bram_t2p``) -> ``scenario`` / ``pysim`` -> ``system_xsi`` -> ``compare``.  The window
-frames are compared RTL against pysim; the kernel gates' counters come from the ADC model's own
-counter recording.
+frames are compared RTL against pysim; the gates' counters come from the ADC model's own counter
+recording.
 
-The kernel gates' waveform claims (both memory ports live together, never in one region) read the
-wrapper's nets off a VCD of the kernel flow's run; the system flow does not trace yet, so they stay
-there.
+The run is **traced**: the wrapper's scope is dumped (``<work>/<top>_trace.vcd``) and its hazard
+manifest written beside it (``<work>/hazards.json``), which is what the gates' waveform claims (both
+memory ports live together, never in one region) read.
 
     python -m examples.rf_shot_rx.rf_shot_rx_system_build --synth check            # the default build
     python -m examples.rf_shot_rx.rf_shot_rx_system_build --synth check --abs      # absolute_index=1
@@ -33,13 +33,13 @@ BUILDS = {"default": (RfShotRx, "rf_shot_rx_system"), "abs": (RfShotRxAbs, "rf_s
 
 
 def system(build: str = "default") -> RfShotRxSystem:
-    """The kernel gates' run: forty ramp blocks into the receiver, 2800 cycles."""
+    """The gates' run: forty ramp blocks into the receiver, 2800 cycles."""
     return RfShotRxSystem(dut_cls=BUILDS[build][0])
 
 
 def build_dag(build: str = "default", work_dir=WORK_DIR) -> BuildDag:
-    """The framework's system steps for :func:`system`.  The kernel's csynth project is the kernel
-    flow's (``<cpp_kernel_name>.tcl`` at the root)."""
+    """The framework's system steps for :func:`system`, traced.  The kernel's csynth project is the
+    one ``rf_shot_rx_build.py`` generates (``<cpp_kernel_name>.tcl`` at the root)."""
     cls, top = BUILDS[build]
     name = cls.cpp_kernel_name
     dag = BuildDag()
@@ -57,7 +57,7 @@ def frames(work: Path) -> list[np.ndarray]:
 
 
 def counters(work: Path) -> dict:
-    """The kernel gates' counter names, from the RTL run's recordings: the ADC model's counters,
+    """The gates' counter names, from the RTL run's recordings: the ADC model's counters,
     the RF edge's, and the window sink's word count and last arrival cycle."""
     run = Path(work) / "xsi_run" / "vectors"
 

@@ -40,7 +40,7 @@ def system(scenario: str = "zero") -> BramAccessSystem:
 
 def build_dag(scenario: str = "zero", work_dir=WORK_DIR) -> BuildDag:
     """The framework's system steps for :func:`system`, traced.  The kernel's csynth project is the
-    kernel flow's (``bram_access.tcl`` at the root)."""
+    one ``bram_access_build.py`` generates (``bram_access.tcl`` at the root)."""
     dag = BuildDag()
     add_system_steps(dag, system(scenario), work_dir=work_dir, top=top(scenario),
                      tcls={"bram_access": Path("bram_access.tcl")}, trace=True)

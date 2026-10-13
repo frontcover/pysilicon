@@ -1,16 +1,15 @@
 """rf_shot_tx through the **system** flow: the shot transmitter as the DUT, the RFDC in the testbench.
 
-``plans/system_model.md`` S3e.  The design the kernel flow's RTL gates run
-(``tests/examples/test_rf_shot_tx_xsi.py`` and ``..._abs_xsi.py``: two builds, two frame streams
-each), taken through ``add_system_steps``: ``csynth`` -> ``system_rtl`` (the transmitter instantiated
-as its wrapper: the kernel and its ``bram_t2p``) -> ``scenario`` / ``pysim`` -> ``system_xsi`` ->
-``compare``.  The kernel flow drove its second stream from a hand-written main that renamed the
-bundles; here each stream is a system of its own.  The responses are compared RTL against pysim; the
-playout and the DAC model's counter recording are the example's to check.
+``plans/system_model.md`` S3e.  The RTL rung of both builds -- the gates are
+``tests/examples/test_rf_shot_tx_xsi.py`` and ``..._abs_xsi.py``: two builds, two frame streams
+each -- through ``add_system_steps``: ``csynth`` -> ``system_rtl`` (the transmitter instantiated as
+its wrapper: the kernel and its ``bram_t2p``) -> ``scenario`` / ``pysim`` -> ``system_xsi`` ->
+``compare``.  Each frame stream is a system of its own.  The responses are compared RTL against
+pysim; the playout and the DAC model's counter recording are the example's to check.
 
-The kernel gates' waveform claims (the memory's own pins: port overlap, write range, the speculative
-read at a handover) read the wrapper's nets off a VCD of the kernel flow's run; the system flow does
-not trace yet, so they stay there.
+The run is **traced**: the wrapper's scope is dumped (``<work>/<top>_trace.vcd``) and its hazard
+manifest written beside it (``<work>/hazards.json``), which is what the gates' waveform claims (the
+memory's own pins: port overlap, write range, the speculative read at a handover) read.
 
     python -m examples.rf_shot_tx.rf_shot_tx_system_build --synth check [--abs] [--loop]
 """
@@ -39,13 +38,13 @@ def top(build: str, scenario: str) -> str:
 
 
 def system(build: str = "default", scenario: str = "cmd") -> RfShotTxSystem:
-    """One of the kernel gates' four runs: a build and a frame stream, 1400 cycles."""
+    """One of the gates' four runs: a build and a frame stream, 1400 cycles."""
     return RfShotTxSystem(dut_cls=BUILDS[build], scenario=scenario)
 
 
 def build_dag(build: str = "default", scenario: str = "cmd", work_dir=WORK_DIR) -> BuildDag:
-    """The framework's system steps for :func:`system`.  The kernel's csynth project is the kernel
-    flow's (``<cpp_kernel_name>.tcl`` at the root)."""
+    """The framework's system steps for :func:`system`, traced.  The kernel's csynth project is the
+    one ``rf_shot_tx_build.py`` generates (``<cpp_kernel_name>.tcl`` at the root)."""
     name = BUILDS[build].cpp_kernel_name
     dag = BuildDag()
     add_system_steps(dag, system(build, scenario), work_dir=work_dir, top=top(build, scenario),
@@ -74,7 +73,7 @@ def responses(work: Path) -> list[tuple[int, int, int]]:
 
 
 def counters(work: Path) -> dict:
-    """The kernel gates' counter names, from the RTL run's recordings: the DAC model's counters and
+    """The gates' counter names, from the RTL run's recordings: the DAC model's counters and
     the last response's arrival cycle."""
     run = Path(work) / "xsi_run" / "vectors"
     dac = json.loads((run / "counters" / "xsi_tb_dac_axis.json").read_text(encoding="utf-8"))
