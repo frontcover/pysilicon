@@ -129,14 +129,14 @@ pysim object. After `system_synth` (xc7z020, 10 ns) the measured total sits besi
 
 | row | LUT | FF | BRAM18 |
 |---|---:|---:|---:|
-| `chain` (`MarkovChain`) | 2,032 | 3,115 | 0 |
-| `u` (`MmCreditStreamIF`: two writers and a FIFO) | 1,377 | 1,658 | 2 |
+| `chain` (`MarkovChain`) | 2,031 | 3,115 | 0 |
+| `u` (`MmCreditStreamIF`: two writers and a FIFO) | 1,355 | 1,658 | 2 |
 | `gen` (`MarkovGen`) | 1,193 | 1,298 | 0 |
 | `xbar` (the crossbar) | 849 | 680 | 0 |
-| `chain_mm`, `gen_mm` (the adaptors) | 732 | 395 | 0 |
-| `mem` (`MemoryMod`: the BRAM window and its memory) | 140 | 39 | 2 |
-| system integration | −36 | 2 | 0 |
-| **total** | **6,287** | **7,187** | **4** |
+| `chain_mm`, `gen_mm` (the adaptors) | 719 | 395 | 0 |
+| `mem` (`MemoryMod`: the BRAM window and its memory) | 132 | 39 | 2 |
+| system integration | 2 | 2 | 0 |
+| **total** | **6,281** | **7,187** | **4** |
 
 The kernels are the cost, and each is about half what its csynth report estimated. The memory is one
 RAMB36 -- since `bram_t2p` was recoded with one `always` block per port: the first synthesis found it

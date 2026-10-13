@@ -278,6 +278,9 @@ class RtlInstance:
     owner: object = field(default=None, compare=False, repr=False)
     #: The sub-top instance it sits in ("" for the system top itself).
     sub: str = ""
+    #: The leaf's tie-offs in this system: ``((port, value), ...)``, an input tied to *value* or an
+    #: output left open (``""``).  Part of its identity: a tied leaf is another configuration.
+    ties: tuple[tuple[str, str], ...] = ()
 
     @property
     def path(self) -> str:
@@ -369,10 +372,12 @@ class SystemTopSpec:
         cfg = self.xbar
         dw, aw, idw = self.dw, self.aw, self.idw
 
-        def leaf(inst: str, module: str, params: dict, owner, group: str) -> RtlInstance:
+        def leaf(inst: str, module: str, params: dict, owner, group: str,
+                 ties=()) -> RtlInstance:
             src = leaf_module_sources(module)
             return RtlInstance(inst, module, "leaf", dict(params), src,
-                               identify_rtl(module, params, src), owner, self.sub_inst(group))
+                               identify_rtl(module, params, src, ties), owner,
+                               self.sub_inst(group), tuple(ties))
 
         out = [leaf(n.fifo_inst, "mm_sync_fifo", n.fifo_params(dw), n.owner, n.group)
                for n in self.nets if n.fifo_depth]
@@ -387,7 +392,9 @@ class SystemTopSpec:
                             front_params(dw, aw, idw, law), slot.owner, slot.group))
             for v in slot.views:
                 if isinstance(v, BramView):
-                    out.append(leaf(v.mem_inst, v.mem_module, v.mem_params(dw), v.owner, slot.group))
+                    ties = v.IDLE_TIES if v.kport in self.idle_memory_ports else ()
+                    out.append(leaf(v.mem_inst, v.mem_module, v.mem_params(dw), v.owner,
+                                    slot.group, ties))
                 out.append(leaf(v.inst, v.module, v.leaf_params(dw), v.owner, slot.group))
         for k in self.kernels:
             ident = (identify_instance(k.hw, exempt=boundary_endpoint_ids(k.hw))
