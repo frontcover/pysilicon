@@ -517,11 +517,14 @@ testbench).
 > words sent) is replaced by one response per command, the last included.  `WANT_XSI_GATES` 227 ->
 > 177, every claim still asserted once.
 >
-> **Still on the kernel flow:** rf_loopback's two-channel and interleaved-I/Q runs (they read per-
-> channel counts, the bound port count and the I/Q format, which the converter models do not record
-> yet -- a `write_counters` extension in `xsi_rfdc.h`), and `test_xsi_bfm.py`'s mem_r_stream /
-> mem_w_stream rows (standalone interleaver tops, not in S3e's list).  Until they move, the
-> composite-TB generation (`tb_top_spec`'s main, `generate_tb`, the `*_counters` mains) stays.
+> **Still on the kernel flow:** rf_loopback's two-channel and interleaved-I/Q runs -- MOVED
+> (2026-10-12): the converter models now also record `n_ch`, per-port counts and the format
+> (`fmt_*`), and `RfLoopbackSystem(variant=)` runs each scenario as a system.  What remains are
+> `test_xsi_bfm.py`'s mem_r_stream / mem_w_stream rows: framework unit gates whose hand-written C++
+> mains drive the BFM library directly (no generated testbench), and whose write-side number (176)
+> is the cycle the last write is *acknowledged* -- something no model records yet.  They do not
+> hold up retiring the composite-TB generation (`tb_top_spec`'s main, `generate_tb`, the
+> `*_counters` mains), which now nothing gates on.
 > Docs: the example pages still teach `generate_tb` / `run.bat`; the flow-steps prose is next.
 
 **S4 -- the TB side through hooks.**  D5.  Gate: the harness is byte-identical; `system_tb_spec` names
