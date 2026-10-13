@@ -392,3 +392,8 @@ examples/ssr_fft/logs/
 
 # Per-step build timings written by run_dag_cli (waveflow/build/cli.py STEP_LOG)
 .waveflow/
+
+# FFT RTL runs through the system flow, and the profiler's kernel-as-top workspace (plans/system_model.md S3f).
+examples/vitis_fft/system/
+examples/vitis_fft/xsi_profile/
+examples/ssr_fft/system/
