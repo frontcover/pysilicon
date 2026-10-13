@@ -44,7 +44,7 @@ def build_dag(build: str = "default", work_dir=WORK_DIR) -> BuildDag:
     name = cls.cpp_kernel_name
     dag = BuildDag()
     add_system_steps(dag, system(build), work_dir=work_dir, top=top,
-                     tcls={name: Path(f"{name}.tcl")})
+                     tcls={name: Path(f"{name}.tcl")}, trace=True)
     return dag
 
 

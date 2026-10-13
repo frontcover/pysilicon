@@ -38,3 +38,11 @@ def compared_clean(work: Path) -> bool:
     """Every exactly-compared recording equal, RTL against pysim."""
     return json.loads((Path(work) / "compare.json").read_text(encoding="utf-8"))[
         "trace_mismatches"] == []
+
+
+def trace_of(work: Path) -> tuple[Path, dict]:
+    """A traced run's ``(VCD, its one wrapped kernel's hazard manifest)`` -- the manifest carrying
+    the scope the wrapper's nets are under (``SystemTopSpec.hazard_manifests``)."""
+    work = Path(work)
+    (manifest,) = json.loads((work / "hazards.json").read_text(encoding="utf-8"))
+    return work / f"{work.name}_trace.vcd", manifest
